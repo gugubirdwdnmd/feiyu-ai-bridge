@@ -6,7 +6,7 @@
 
 | 文件 | 用途 | 触发方式 |
 |---|---|---|
-| `reactor_faceswap.json` | 真·换脸（ReActorFaceSwap 节点） | 先发目标图、再发源脸图，说「换脸/替脸/换头/贴脸」 |
+| `reactor_faceswap.json` | 人脸替换工作流（ReActorFaceSwap 节点） | 先发目标图、再发源脸图，说「换脸/替脸/换头/贴脸」 |
 | `z_image_turbo_2img_fusion.json` | 双图融合（Z-Image-Turbo 重绘） | 同时发两张图，说「融合/合成/两人合影」 |
 
 换脸工作流依赖 ComfyUI 自定义节点 [ComfyUI-ReActor](https://github.com/Gourieff/ComfyUI-ReActor) 及模型：

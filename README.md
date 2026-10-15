@@ -40,7 +40,7 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 | 图片记忆 | 跨消息累积记住最近 6 张图（5 分钟 TTL、去重、私聊同样生效），支持「先发图、再打字」 |
 | 链接与卡片解析 | B 站视频信息、QQ 分享卡片 |
 | 聊天记录分析 | 合并转发消息的解析与归纳 |
-| 双图融合 / 真·换脸 | 连发两张图说「融合」走 Z-Image-Turbo 重绘融合；说「换脸」走 ComfyUI-ReActor 换脸（见 `workflows/`） |
+| 多图工作流 | 连发两张图可触发本地 ComfyUI 图像工作流（合成 / 处理，见 `workflows/`） |
 | 工具调用 | 14 个内置工具：联网搜索、网页抓取、读时间、记笔记、发文件、建表格、生图等 |
 | Agent 多步 | 最多 5 步的多步任务执行 |
 | 用量看板与分账 | 单文件 HTML 看板；按 `answer` / `judge` / `vision` / `agent` 分类统计 token |
@@ -55,7 +55,7 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 - **Node.js v22.x**（用到全局 `fetch` 与现代 `dns` API）
 - 一个可用的 **NapCat**（OneBot11）实例，HTTP 服务监听 `127.0.0.1:3000`
 - 一个大模型 API Key（默认适配 DeepSeek）
-- （可选）本机 **ComfyUI**：用于生图 / 双图融合 / ReActor 换脸
+- （可选）本机 **ComfyUI**：用于 AI 生图与图像工作流处理
 
 **零第三方依赖** —— 不需要 `npm install`，只用 Node 内置模块（`fs` / `path` / `http` / `https` / `dns` / `crypto` / `zlib`）。
 
@@ -132,7 +132,7 @@ node tests/run-all.js
 ```
 
 离线用例（意图识别、记忆、安全、解析）**零网络依赖、不产生 API 费用**；
-live 用例（真实出图 / 换脸）需要本机 ComfyUI，未运行时会打印 SKIP 而不是失败。
+live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行时会打印 SKIP 而不是失败。
 
 ---
 
@@ -148,7 +148,7 @@ live 用例（真实出图 / 换脸）需要本机 ComfyUI，未运行时会打�
 ├─ tools/                  工具层：web / bilibili / image / video / file / memory / result / chat_record
 ├─ chat_record_parser/     合并转发与聊天记录解析
 ├─ memory/                 记忆模块（运行时数据 json 不入库）
-├─ workflows/              ComfyUI 工作流（换脸 / 融合，含说明）
+├─ workflows/              ComfyUI 图像工作流（含说明）
 ├─ dashboard/index.html    用量看板（单文件）
 ├─ stickers/               本地表情包目录（图片丢进去即可，需自备）
 ├─ tests/                  测试（*.test.js 离线 + _test_*.js live）
@@ -177,8 +177,8 @@ A：默认适配 DeepSeek，但 API 调用集中在少数几处，换其他兼�
 **Q：为什么它不回我？**
 A：检查三处：`group.mode` 是否为 `at`；是否被本地预筛拦掉（看日志"群预筛"）；判定置信度是否低于阈值。
 
-**Q：换脸没反应？**
-A：确认本机 ComfyUI 已装 ComfyUI-ReActor 节点及模型（见 `workflows/README.md`），并且先发目标图、再发源脸图、最后说「换脸」。
+**Q：图像工作流没反应？**
+A：确认本机 ComfyUI 已在运行、对应工作流文件与自定义节点就位（见 `workflows/README.md`），并且按该文档的图片顺序与触发词操作。
 
 **Q：会不会很费钱？**
 A：本地预筛不花钱；只有进入判定和生成才调用模型。建议开启 `budget.enabled` 设置每日上限。
@@ -196,4 +196,4 @@ A：**没有**，本项目不含任何语音识别或语音合成能力。
 
 ## 许可证
 
-许可证尚未选定，当前状态见 [LICENSE_PENDING.md](./LICENSE_PENDING.md)（未选定前默认"保留所有权利"）。
+本项目采用 [MIT](./LICENSE) 许可证。
