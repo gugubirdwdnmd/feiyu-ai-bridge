@@ -1,0 +1,210 @@
+{
+  "_说明": "AI 桥配置模板。复制为 ai_config.json 后按需修改；删掉 ai_config.json 则全部走内置默认值。所有 *_Workflow 支持相对路径（相对本文件所在目录）。",
+  "_字段": "group.mode: 'smart'=智能预筛(推荐) | 'at'=仅被@才回 | 'all'=每条都回",
+
+  "api": {
+    "baseUrl": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-chat",
+    "reasoningModel": "deepseek-reasoner",
+    "timeoutMs": 90000,
+    "maxRetries": 2
+  },
+
+  "vision": {
+    "_说明": "看图（多模态）后端，默认 DeepSeek 官方（deepseek-chat 支持图片输入，deepseek-reasoner 不支持）。Key 取 secrets.json 的 apiKey。",
+    "enabled": true,
+    "baseUrl": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-chat",
+    "apiKeyRef": "apiKey",
+    "timeoutMs": 90000
+  },
+
+  "group": {
+    "allow": true,
+    "mode": "at",
+    "requireAt": true,
+    "replyProbability": 100,
+    "ringSize": 30,
+    "contextSimple": 3,
+    "contextNormal": 8,
+    "contextComplex": 15,
+    "cooldownMs": 3000,
+    "userCooldownMs": 2000,
+    "aggregateMs": 2500,
+    "aiNames": ["deepseek", "小助手"],
+    "judgeWithAi": false,
+    "topicWindowMs": 120000
+  },
+
+  "atReply": {
+    "minContext": 8,
+    "moderateThinking": true
+  },
+
+  "replySplit": {
+    "enabled": true,
+    "maxParts": 3,
+    "minChars": 18,
+    "gapMs": 900
+  },
+
+  "dailySummary": {
+    "_说明": "群聊每日总结。默认全部关闭；要开自动总结需同时满足 auto=true 且 allowedGroups 非空。",
+    "auto": false,
+    "autoTime": "23:30",
+    "allowedGroups": [],
+    "maxMsgs": 160,
+    "maxChars": 7000,
+    "minUseful": 5,
+    "minUsefulLen": 4,
+    "dedupWindowMs": 90000,
+    "cooldownMs": 20000,
+    "maxOutputChars": 1500
+  },
+
+  "groupArchive": {
+    "enabled": true,
+    "maxPerDay": 400,
+    "retainDays": 7,
+    "maxBytes": 4194304,
+    "minTextLen": 2,
+    "maxTextLen": 300
+  },
+
+  "memoryStore": {
+    "_说明": "可管理的长期记忆。autoExtract=false 时只记录明确的指令式内容。",
+    "enabled": true,
+    "autoExtract": false,
+    "maxItems": 500,
+    "maxBytes": 1048576,
+    "defaultTtlDays": 180,
+    "maxTtlDays": 365,
+    "retrieveLimit": 6,
+    "retrieveChars": 900,
+    "minLen": 2,
+    "maxLen": 200
+  },
+
+  "judge": {
+    "enabled": true,
+    "model": "deepseek-chat",
+    "confidenceThreshold": 0.6,
+    "maxContext": 5,
+    "maxTokens": 512
+  },
+
+  "model": {
+    "_说明": "全部模型均走 DeepSeek 官方（api.deepseek.com）。multimodal 必须用 deepseek-chat。",
+    "fast": "deepseek-chat",
+    "normal": "deepseek-chat",
+    "reasoning": "deepseek-reasoner",
+    "multimodal": "deepseek-chat",
+    "routing": true,
+    "autoSelect": true,
+    "fallback": "deepseek-chat"
+  },
+
+  "context": { "short": 3, "normal": 9, "complex": 15 },
+
+  "summary": { "enabled": true, "triggerMsgs": 60, "keepRecent": 12 },
+
+  "mode": { "default": "enhanced" },
+
+  "private": { "allow": true, "cooldownMs": 0 },
+
+  "memory": { "enable": true, "filterSensitive": true },
+
+  "sticker": { "enable": true },
+  "files": { "enable": true },
+  "web": { "enable": true },
+
+  "image": {
+    "_说明": "生图后端。provider=comfyui 走本机 ComfyUI（仅 127.0.0.1:8188，不出网）。workflow/img2imgWorkflow 指向你 ComfyUI 里的文生图/图生图工作流（需自备）；fusion/faceSwap 工作流已随本仓库提供（相对路径）。",
+    "enabled": true,
+    "provider": "comfyui",
+    "endpoint": "http://127.0.0.1:8188",
+    "workflow": "./workflows/txt2img.json",
+    "img2imgWorkflow": "./workflows/img2img.json",
+    "img2imgDenoise": 0.65,
+    "_fusion说明": "双图融合工作流：同时发两张图 + 融合/合成/两人合影 等词才会触发。",
+    "fusionWorkflow": "./workflows/z_image_turbo_2img_fusion.json",
+    "fusionDenoise": 0.6,
+    "_faceSwap说明": "真·换脸（ReActor）工作流：先发「要改的图」、再发「脸的图」，然后说 换脸/替脸/换头，即把后发那张的脸换到先发那张上。依赖 ComfyUI 的 ComfyUI-ReActor 自定义节点 + inswapper_128.onnx / buffalo_l 模型。",
+    "faceSwapWorkflow": "./workflows/reactor_faceswap.json",
+    "_agentFirst说明": "true=把画图交给 Agent 的 generate_image 工具；false=退回正则快路径。",
+    "agentFirst": true,
+    "loraName": "",
+    "loraStrength": 0.8,
+    "filenamePrefix": "qq",
+    "model": "",
+    "apiKeyRef": "imageApiKey",
+    "width": 1024,
+    "height": 1024,
+    "steps": 9,
+    "cfgScale": 1,
+    "sampler": "euler",
+    "scheduler": "simple",
+    "negativePrompt": "",
+    "size": "1024x1024",
+    "timeoutMs": 240000,
+    "userCooldownMs": 60000,
+    "maxQueueLen": 5,
+    "useEasyNegative": false,
+    "useBadhandv4": false,
+    "hiresFix": {
+      "enabled": false,
+      "scale": 2,
+      "upscaler": "Latent",
+      "steps": 15,
+      "denoising": 0.5
+    }
+  },
+
+  "stats": { "enable": true, "file": "memory/stats.json" },
+
+  "budget": { "enabled": false, "daily_tokens": 0, "warn_percent": 80, "hard_limit": false },
+
+  "agent": { "enabled": true, "maxSteps": 5, "maxToolCalls": 5, "maxRetries": 1, "maxObservationChars": 700, "maxContextChars": 3000, "logRuns": true },
+
+  "admin": {
+    "_说明": "管理员 QQ 号数组（私聊这些号才能使用 /ai 等管理命令）。改成你自己的。",
+    "qq": [],
+    "mode": "private_only"
+  },
+
+  "personality": {
+    "name": "AI小助手",
+    "humor": true,
+    "proactive": true,
+    "defaultResponseLength": "normal",
+    "groups": {}
+  },
+
+  "debug": { "rawEvent": false },
+
+  "poke": {
+    "enabled": true,
+    "mode": "pokeback+text",
+    "useAI": true,
+    "cooldownMs": 5000,
+    "texts": ["戳我干嘛，痒痒的😏", "哼，被你发现了～"]
+  },
+
+  "proactiveChat": {
+    "enabled": false,
+    "useAI": true,
+    "aiStyle": "轻松、简短、像群里朋友随口开的头，不超过20字",
+    "templates": ["大家早上好呀～今天也要开心😊"],
+    "schedule": []
+  },
+
+  "crypto": {
+    "_说明": "接入 crypto-sim 本地行情分析服务（独立进程，默认 http://127.0.0.1:8088）。默认关闭。",
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:8088",
+    "interval": "4h",
+    "defaultSymbol": "BTC",
+    "defaultUseAI": true,
+    "timeoutMs": 15000
+  }
+}

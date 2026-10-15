@@ -1,0 +1,90 @@
+# ==========================================================
+#  .gitignore —— 白名单思维 + 显式排除。宁可漏提交，不可漏排除。
+# ==========================================================
+
+# ---------- 1. 密钥与凭据（最高优先级） ----------
+secrets.json
+config.secret.json
+*.secret.json
+secrets.*.json
+!secrets.example.json
+.env
+.env.*
+!.env.example
+
+# ---------- 2. 本地业务配置（含真实管理员 QQ 号） ----------
+ai_config.json
+!ai_config.example.json
+
+# ---------- 3. 运行数据 / 记忆 / 日志（含群聊历史，隐私） ----------
+memory/*.json
+memory/*.jsonl
+memory/usage/
+memory/stats.json
+workspace/
+*.log
+*.err
+*.out
+ai_bridge.log
+_hist.json
+tests/_out/
+tests/_*.png
+tests/_gen_tool_src.png
+tests/_img2img_src.png
+
+# ---------- 4. 备份与临时 / 调试残留 ----------
+backup/
+backups/
+_run*.log
+_bridge*.log
+_upscale_qr.py
+.v14c_backup_path
+
+# ---------- 5. 第三方框架与 QQ 客户端（绝对禁止入库） ----------
+napcat/
+win64/
+NapCat.Node.zip
+node.exe
+wrapper.node
+*.dll
+*.node
+# 构建产物（exe 通过 GitHub Releases 分发，不进源码库）
+dist/
+# SEA 构建中间产物
+sea-prep.blob
+build/sea-bundle.js
+build/sea-config.json
+
+# ---------- 6. 数据库 ----------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---------- 7. 登录凭据类图片 ----------
+*二维码*.png
+qrcode.png
+QQ登录二维码*.png
+
+# ---------- 8. 开发日志（含真实数据） ----------
+项目日志.md
+观察期记录.md
+
+# ---------- 9. 系统与编辑器 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+
+# ---------- 10. Node ----------
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# ==========================================================
+#  推送前自检：
+#   git status --porcelain | grep -iE "secrets|ai_config\.json|memory/|\.log$|napcat/|\.exe$" && echo "❌ 命中敏感文件" || echo "✅ 干净"
+# ==========================================================
