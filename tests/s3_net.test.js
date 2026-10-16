@@ -537,6 +537,71 @@ function testResolve(map, extra) {
     await closeServer(srv);
   }
 
+  // ==================================================================
+  group('B13 传输层接线：固定 IP / 禁连接池 / 证书校验入口（B 本地受控，记录 http.request 实参）');
+  {
+    // 直接观察 safe_http 传给 node http/https 的请求选项，验证传输层硬闸真实接线，
+    // 而不是只靠「请求成功」间接推断。
+    const httpMod = require('http');
+    const httpsMod = require('https');
+    const origReq = httpMod.request;
+    const origReqTls = httpsMod.request;
+    const seen = { plain: null, tls: null };
+    httpMod.request = function (opts, cb) { seen.plain = opts; return origReq.call(this, opts, cb); };
+    httpsMod.request = function (opts, cb) { seen.tls = opts; return origReqTls.call(this, opts, cb); };
+    try {
+      {
+        const srv = await startServer((req, res) => { res.end('wire-ok'); });
+        const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'ok.test': { addrs: ['127.0.0.1'] } }) });
+        const r = await safeHttp.safeFetch('http://ok.test:' + srv.port + '/w', { policy, testToken: policy.token });
+        eq(r.ok, true, 'B13-1 请求成功（接线记录不影响功能）');
+        ok(seen.plain && seen.plain.agent === false, 'B13-2 禁用连接池（agent=false，每跳都走受控 socket）');
+        ok(seen.plain && typeof seen.plain.lookup === 'function', 'B13-3 使用自定义 lookup（连接阶段不经过系统解析器）');
+        // 直接调用内部 lookup：对预期主机只能返回已校验的固定 IP
+        const got = await new Promise((resolve) => {
+          seen.plain.lookup('ok.test', { all: true }, (err, addrs) => resolve({ err, addrs }));
+        });
+        ok(!got.err && Array.isArray(got.addrs) && got.addrs.length === 1 && got.addrs[0].address === '127.0.0.1',
+          'B13-4 lookup 对预期主机只返回已校验 IP（' + JSON.stringify(got.addrs) + '）');
+        // 连接阶段若被诱导解析别的主机名（DNS 重绑定场景），必须失败而不是顺从
+        const bad = await new Promise((resolve) => {
+          seen.plain.lookup('rebind.evil.test', {}, (err, addr, fam) => resolve({ err, addr, fam }));
+        });
+        ok(!!bad.err && bad.err.code === 'EAI_AGAIN',
+          'B13-5 lookup 拒绝非预期主机名（' + (bad.err && bad.err.code) + '）——连接阶段无法被重绑定到其他主机');
+        await closeServer(srv);
+      }
+      {
+        const srv = await startServer((req, res) => { res.end('tls-wire-ok'); }, { tls: true });
+        const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'my.host.example': { addrs: ['127.0.0.1'] } }) });
+        const r = await safeHttp.safeFetch('https://my.host.example:' + srv.port + '/w', { policy, testToken: policy.token });
+        eq(r.ok, true, 'B13-6 HTTPS 请求成功');
+        ok(seen.tls && seen.tls.rejectUnauthorized === true, 'B13-7 证书校验入口强制开启（rejectUnauthorized=true，不提供关闭入口）');
+        eq(seen.tls && seen.tls.servername, 'my.host.example', 'B13-8 SNI 使用原始域名');
+        await closeServer(srv);
+      }
+    } finally {
+      httpMod.request = origReq;
+      httpsMod.request = origReqTls;
+    }
+  }
+
+  // ==================================================================
+  group('B14 显式 allowDowngrade 时才允许 HTTPS→HTTP（B 本地受控）');
+  {
+    const plain = await startServer((req, res) => { res.end('downgraded-ok'); });
+    const srv = await startServer((req, res) => {
+      res.writeHead(302, { Location: 'http://ok.test:' + plain.port + '/down' });
+      res.end();
+    }, { tls: true });
+    const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'my.host.example': { addrs: ['127.0.0.1'] }, 'ok.test': { addrs: ['127.0.0.1'] } }) });
+    const r = await safeHttp.safeFetch('https://my.host.example:' + srv.port + '/s', { policy, testToken: policy.token, allowDowngrade: true });
+    eq(r.ok, true, 'B14-1 allowDowngrade=true 时显式放行降级（证明默认拒绝是策略而非写死）');
+    eq(String(r.body), 'downgraded-ok', 'B14-2 拿到降级后的响应体');
+    eq(plain.st.count, 1, 'B14-3 HTTP 目标被请求了 1 次');
+    await closeServer(srv); await closeServer(plain);
+  }
+
   console.log('\n====================================================');
   console.log('V14 阶段三 B2 测试：通过 ' + pass + '，失败 ' + fail);
   console.log('分类：A=单元/模拟（不连网），B=本地受控网络（服务器只绑 127.0.0.1）');

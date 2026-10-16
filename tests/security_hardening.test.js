@@ -80,7 +80,7 @@ function loadBridge(opts) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(SRC + '\n;globalThis.__T={fetchUrl,webSearch,fetchImageAsBase64,napcatCall,rememberNote,safeFileName,workspacePath,writeWorkspaceFile,readLocalAsBase64,isPathAllowed,handleMessage,resolveVideoFile};',
+  vm.runInContext(SRC + '\n;globalThis.__T={fetchUrl,webSearch,fetchImageAsBase64,napcatCall,rememberNote,safeFileName,workspacePath,writeWorkspaceFile,readLocalAsBase64,isPathAllowed,handleMessage,resolveVideoFile,callImageGen};',
     sandbox, { filename: 'ai_bridge.js' });
 
   // 还原环境变量，避免污染后续用例
@@ -158,13 +158,28 @@ async function postEvent(port, bodyStr, headers) {
     b.cleanup();
   }
   {
-    // 云端图像 API 响应里带回的 URL 也走 safeFetch（旧代码此处是裸 fetch）
+    // 云端图像 API 响应里带回的 URL 也走 safeFetch（旧代码此处是裸 fetch）。
+    // 真正执行 callImageGen 云端分支：mock 端点 fetch 的响应返回一个内网 URL，
+    // 验证其下载走 safeFetch 并被拦截（不用固定 true 断言冒充验证）。
     const b = loadBridge({
       fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ data: [{ url: 'http://127.0.0.1:9999/internal.png' }] }) }),
-      safeFetchImpl: async () => ({ ok: false, kind: 'blocked', why: '环回' }),
+      safeFetchImpl: async () => ({ ok: false, kind: 'blocked', why: '域名解析到内网/本机地址（127.0.0.0/8 环回）' }),
     });
-    // 直接调用内部路径不可达（callImageGen 未导出），改为验证：fetchImageAsBase64 已覆盖同类模式
-    ok('云端图 URL 下载：同类不可信 URL 已在 fetchImageAsBase64 侧验证走 safeFetch（callImageGen 同一模式）', true);
+    const r = await b.T.callImageGen('画一只猫', { provider: 'openai', endpoint: 'https://fake-image-api.example/v1/images' });
+    ok('callImageGen：云端响应 URL 的下载确实走了 safeFetch（真实执行）', b.calls.safeFetch.length === 1, b.calls.safeFetch.length);
+    ok('callImageGen：唯一一次裸 fetch 只用于调用配置端点，未裸 fetch 下载该 URL', b.calls.fetch.length === 1 && String(b.calls.fetch[0].url).includes('fake-image-api.example'), b.calls.fetch.map((c) => c.url));
+    ok('callImageGen：URL 被拦截时返回 download-blocked 且 ok=false（SSRF 失败关闭）', !!r && r.ok === false && /^download-blocked:/.test(String(r.error)), r);
+    b.cleanup();
+  }
+  {
+    // 正向：safeFetch 放行时云端图 URL 正常下载并返回 base64:// 文件（功能保持）
+    const b = loadBridge({
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ data: [{ url: 'https://cdn.example/x.png' }] }) }),
+      safeFetchImpl: async () => ({ ok: true, status: 200, body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]), contentType: 'image/png', finalUrl: 'https://cdn.example/x.png' }),
+    });
+    const r = await b.T.callImageGen('画一只猫', { provider: 'openai', endpoint: 'https://fake-image-api.example/v1/images' });
+    ok('callImageGen：URL 放行时返回 base64:// 文件（功能保持）', !!r && r.ok === true && /^base64:\/\//.test(String(r.file)), r && String(r.file).slice(0, 24));
+    ok('callImageGen：下载仍只走 safeFetch', b.calls.safeFetch.length === 1 && b.calls.fetch.length === 1);
     b.cleanup();
   }
   {
@@ -247,6 +262,34 @@ async function postEvent(port, bodyStr, headers) {
     const rWrong = await postEvent(port, JSON.stringify({ post_type: 'meta_event', meta_event_type: 'heartbeat' }),
       { Authorization: 'Bearer wrong-token' });
     ok('requireEventAuth 开启：错误 Token → 401', rWrong.status === 401, rWrong.status);
+    b.cleanup();
+  }
+  {
+    // 开启 requireEventAuth 但本机未加载 Token：必须 fail-closed 拒绝（503），
+    // 绝不能静默跳过鉴权放行（修复前此处直接放行）
+    const b = loadBridge({
+      env: { NAPCAT_ONEBOT_TOKEN: '' },
+      config: { http: { requireEventAuth: true } },
+    });
+    await sleep(120);
+    const port = b.port();
+    const rNo = await postEvent(port, JSON.stringify({ post_type: 'meta_event', meta_event_type: 'heartbeat' }));
+    ok('requireEventAuth 开启但 Token 缺失 → 503 fail-closed 拒绝（不再静默放行）', rNo.status === 503, rNo.status);
+    const rWith = await postEvent(port, JSON.stringify({ post_type: 'meta_event', meta_event_type: 'heartbeat' }),
+      { Authorization: 'Bearer anything' });
+    ok('requireEventAuth 开启但 Token 缺失 → 带任意 Token 仍 503（无凭据可校验）', rWith.status === 503, rWith.status);
+    b.cleanup();
+  }
+  {
+    // 关闭 requireEventAuth + 有 Token：保持旧行为不校验（兼容未配 token 头的既有部署）
+    const b = loadBridge({
+      env: { NAPCAT_ONEBOT_TOKEN: 'sec-test-token-abc123' },
+      config: { http: { requireEventAuth: false } },
+    });
+    await sleep(120);
+    const port = b.port();
+    const r = await postEvent(port, JSON.stringify({ post_type: 'meta_event', meta_event_type: 'heartbeat' }));
+    ok('requireEventAuth 关闭：有 Token 也不校验，既定行为放行', r.status === 200, r.status);
     b.cleanup();
   }
   {

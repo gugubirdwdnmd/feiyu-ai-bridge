@@ -350,7 +350,7 @@ const DEFAULT_CONFIG = {
 
   // 本地 HTTP 事件入口（安全整改新增）
   http: {
-    _说明: '事件入口加固。requireEventAuth=true 时，若加载了 OneBot Token，则每个事件请求都必须携带 Authorization: Bearer <token>（NapCat 侧填同一个 access_token）。默认 false 保持旧行为（不校验，依赖 127.0.0.1 回环信任边界）。',
+    _说明: '事件入口加固。requireEventAuth=true 时，每个事件请求都必须携带 Authorization: Bearer <token>（NapCat 侧填同一个 access_token）；若本机未加载 OneBot Token（env NAPCAT_ONEBOT_TOKEN / secrets.json.onebotToken），则按 fail-closed 拒绝全部事件推送（503），不会跳过鉴权。默认 false 保持旧行为（不校验，依赖 127.0.0.1 回环信任边界）。',
     requireEventAuth: false,
   },
 
@@ -5262,10 +5262,11 @@ async function runProactiveOnce() {
 // OneBot 事件体上限：合并转发/长消息可能到几十 KB，1MB 足够且防止无限拼接耗尽内存
 const MAX_EVENT_BODY_BYTES = 1024 * 1024;
 // 事件推送来源鉴权开关（动态读配置，/ai reload 后即时生效）。
-// 置 true 时：若本机加载了 OneBot Token，则要求每个事件请求携带
-// Authorization: Bearer <token>，否则 401。NapCat 侧在 HTTP/WS 配置里
-// 填同一个 access_token 即会带头（OneBot 11 规范）。
-// 未配置 Token 时任何设置都不校验（无凭据可校验，依赖 127.0.0.1 回环信任边界）。
+// 置 true 时：每个事件请求都必须携带 Authorization: Bearer <token>，否则 401；
+// NapCat 侧在 HTTP/WS 配置里填同一个 access_token 即会带头（OneBot 11 规范）。
+// 若开启鉴权但本机未加载 Token（env NAPCAT_ONEBOT_TOKEN 与 secrets.json 均无），
+// 按 fail-closed 拒绝全部事件推送（503），绝不静默跳过鉴权。
+// 关闭（默认 false）时不校验，依赖 127.0.0.1 回环信任边界。
 function eventAuthRequired() {
   return !!(CFG.http && CFG.http.requireEventAuth === true);
 }
@@ -5312,8 +5313,16 @@ const server = http.createServer((req, res) => {
     return sendJson(405, { status: 'method-not-allowed' });
   }
 
-  // —— 来源鉴权（可选）：加载了 Token 且开启 requireEventAuth 时，强制 Bearer 校验 ——
-  if (eventAuthRequired() && ONEBOT_TOKEN) {
+  // —— 来源鉴权：开启 requireEventAuth 时强制 Bearer 校验（fail-closed）——
+  // 必须拒绝的两种情况：
+  //   ① 未加载 OneBot Token——无凭据可校验，绝不能静默跳过鉴权放行；
+  //   ② 请求未携带与 Token 匹配的 Authorization: Bearer 头。
+  // 关闭 requireEventAuth（默认）时不校验，依赖 127.0.0.1 回环信任边界。
+  if (eventAuthRequired()) {
+    if (!ONEBOT_TOKEN) {
+      log('[HTTP] 事件入口要求鉴权但未加载 OneBot Token：按 fail-closed 拒绝全部事件推送（请在 secrets.json 配置 onebotToken，或关闭 http.requireEventAuth）');
+      return sendJson(503, { status: 'auth-misconfigured', error: 'requireEventAuth enabled but no OneBot token loaded' });
+    }
     const auth = String(req.headers.authorization || '');
     if (auth !== 'Bearer ' + ONEBOT_TOKEN) {
       log('[HTTP] 事件推送鉴权失败：未携带有效 OneBot Token（来源 IP 可信度不足，已拒绝）');
@@ -5480,7 +5489,10 @@ server.listen(LISTEN_PORT, '127.0.0.1', () => {
   log('='.repeat(46));
   log(`AI 桥启动 | 端口 ${LISTEN_PORT} | 模型 ${CFG.api.model} | Key来源=${process.env.DEEPSEEK_API_KEY ? 'env' : 'secrets.json'}`);
   // 安全整改：日志如实描述行为，不再出现「日志说将被拒、代码却无鉴权直连」的矛盾
-  log(`OneBot Token=${ONEBOT_TOKEN ? '已加载(len=' + ONEBOT_TOKEN.length + ')' : '未加载-将以无鉴权方式调用本机 OneBot(依赖 127.0.0.1 回环信任边界)；如需鉴权请在 secrets.json 配置 onebotToken 并设 http.requireEventAuth=true'}`);
+  if (eventAuthRequired() && !ONEBOT_TOKEN) {
+    log('安全警告：http.requireEventAuth=true 但未加载 OneBot Token——事件入口将 fail-closed 拒绝全部推送（503）。请配置 secrets.json 的 onebotToken（NapCat 侧填同一个 access_token），或关闭 requireEventAuth。');
+  }
+  log(`OneBot Token=${ONEBOT_TOKEN ? '已加载(len=' + ONEBOT_TOKEN.length + ')' : '未加载' + (eventAuthRequired() ? '-requireEventAuth=true，事件推送将被拒绝（fail-closed）' : '-将以无鉴权方式调用本机 OneBot(依赖 127.0.0.1 回环信任边界)')}`);
   if (ONEBOT_TOKEN && !eventAuthRequired()) {
     log('安全提示：已加载 OneBot Token 但 http.requireEventAuth=false，事件推送入口暂不校验来源（任何本机程序均可推送事件）；确认 NapCat 会带 Authorization 头后，可在 ai_config.json 置 http.requireEventAuth=true 收紧。');
   }
