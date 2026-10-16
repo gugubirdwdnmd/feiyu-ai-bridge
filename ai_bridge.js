@@ -3609,17 +3609,29 @@ const VISION_PROMPT =
   '图里有文字就原样读出（尤其是明显的测试标记/编号）。' +
   '看不清或没有的信息直接说"看不清/无法确定"，禁止推测、禁止编造。用中文简短回答。';
 
-// 视频路径安全校验：realpath + 白名单根目录 + 扩展名 + 大小
+// 视频路径归属判断：基于 path.relative 验证 real 是否真实位于某个白名单根目录之下，
+// 杜绝 startsWith 字符串前缀误判（如 D:\...\\workspace_backup 被误认为 workspace 子项）。
+// Windows 文件系统大小写不敏感，故先统一 lower-case 再比对；跨盘符时 path.relative
+// 返回绝对路径，由 isAbsolute 检查拦截；.. 穿越会使 rel 以 '..' 开头，同样拦截。
+function isUnderAllowedVideoRoot(real) {
+  const realNorm = real.toLowerCase();
+  for (const r of VIDEO_ALLOWED_ROOTS) {
+    const rel = path.relative(r.toLowerCase(), realNorm);
+    if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+  }
+  return false;
+}
+
+// 视频路径安全校验：realpath + 白名单根目录（路径相对关系判断）+ 扩展名 + 大小
 function safeVideoPath(p) {
   if (typeof p !== 'string' || !p) return null;
   if (/^[a-zA-Z]:[\\/]/.test(p) === false && !p.startsWith('/')) return null;   // 必须是绝对路径
   let real;
-  try { real = fs.realpathSync(p); } catch (e) { return null; }
+  try { real = fs.realpathSync(p); } catch (e) { return null; }   // 解析符号链接 / ..，无法解析（不存在/不可达）则保守拒绝
   let st;
   try { st = fs.statSync(real); } catch (e) { return null; }
   if (!st.isFile()) return null;
-  const root = VIDEO_ALLOWED_ROOTS.find((r) => real.toLowerCase().startsWith(r.toLowerCase()));
-  if (!root) return null;                                  // 项目外 / D:\qq / C:\Windows → 一律拒绝
+  if (!isUnderAllowedVideoRoot(real)) return null;               // 项目外 / workspace_backup 同级 / 跨盘符 / .. 穿越 → 一律拒绝
   if (!VIDEO_EXT.has(path.extname(real).toLowerCase())) return null;
   if (st.size > MAX_VIDEO_BYTES) return null;
   return real;

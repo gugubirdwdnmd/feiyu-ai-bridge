@@ -80,7 +80,7 @@ function loadBridge(opts) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(SRC + '\n;globalThis.__T={fetchUrl,webSearch,fetchImageAsBase64,napcatCall,rememberNote,safeFileName,workspacePath,writeWorkspaceFile,readLocalAsBase64,isPathAllowed,handleMessage,resolveVideoFile,callImageGen};',
+  vm.runInContext(SRC + '\n;globalThis.__T={fetchUrl,webSearch,fetchImageAsBase64,napcatCall,rememberNote,safeFileName,workspacePath,writeWorkspaceFile,readLocalAsBase64,isPathAllowed,handleMessage,resolveVideoFile,callImageGen,safeVideoPath};',
     sandbox, { filename: 'ai_bridge.js' });
 
   // 还原环境变量，避免污染后续用例
@@ -401,6 +401,114 @@ async function postEvent(port, bodyStr, headers) {
     try { persisted = fs.readFileSync(notesFile, 'utf-8'); } catch (e) {}
     ok('凭据类内容未落盘', !/sk-abcdef|13812345678/.test(persisted), persisted.slice(0, 80));
     ok('正常内容已落盘', /乌龙茶/.test(persisted));
+    b.cleanup();
+  }
+
+  // ================= G. 视频路径目录边界（safeVideoPath） =================
+  section('G. 视频路径目录边界：safeVideoPath 必须基于路径相对关系(path.relative)判断归属');
+  {
+    const b = loadBridge({});
+    const T = b.T;
+    const WS = path.join(b.tmp, 'workspace');
+    const NAPCACHE = path.join(b.tmp, 'napcat', 'cache');
+    fs.mkdirSync(path.join(WS, 'sub'), { recursive: true });
+    fs.mkdirSync(path.join(b.tmp, 'workspace_backup'), { recursive: true });
+    fs.mkdirSync(path.join(b.tmp, 'workspace2'), { recursive: true });
+    fs.mkdirSync(NAPCACHE, { recursive: true });
+    const mk = (p) => { fs.writeFileSync(p, Buffer.from('x')); return p; };
+    const allowed    = mk(path.join(WS, 'allowed.mp4'));
+    const allowedSub = mk(path.join(WS, 'sub', 'allowed2.mp4'));
+    const inNapCache = mk(path.join(NAPCACHE, 'nap.mp4'));
+    const rejected   = mk(path.join(b.tmp, 'workspace_backup', 'rejected.mp4'));   // 相似前缀同级目录
+    const rejected2  = mk(path.join(b.tmp, 'workspace2', 'rejected2.mp4'));         // 相似前缀
+    const wrongExt   = mk(path.join(WS, 'bad.txt'));
+    const outside    = mk(path.join(b.tmp, 'outside_root.mp4'));                   // 白名单外、与 workspace 同级
+
+    ok('白名单内正常视频路径：允许', T.safeVideoPath(allowed) === allowed, T.safeVideoPath(allowed));
+    ok('白名单内子目录视频：允许', T.safeVideoPath(allowedSub) === allowedSub, T.safeVideoPath(allowedSub));
+    ok('napcat/cache 白名单内：允许', T.safeVideoPath(inNapCache) === inNapCache, T.safeVideoPath(inNapCache));
+    ok('相似前缀同级目录 workspace_backup：拒绝', T.safeVideoPath(rejected) === null, T.safeVideoPath(rejected));
+    ok('相似前缀 workspace2：拒绝', T.safeVideoPath(rejected2) === null, T.safeVideoPath(rejected2));
+    ok('白名单外同级目录 outside_root：拒绝', T.safeVideoPath(outside) === null, T.safeVideoPath(outside));
+    ok('扩展名不在白名单：拒绝', T.safeVideoPath(wrongExt) === null, T.safeVideoPath(wrongExt));
+
+    // .. 路径穿越
+    const escapePath = path.join(WS, '..', 'outside_root.mp4');   // 解析后为 b.tmp/outside_root.mp4（白名单外）
+    ok('.. 目录穿越出白名单：拒绝', T.safeVideoPath(escapePath) === null, T.safeVideoPath(escapePath));
+    const inPlaceDotDot = path.join(WS, 'sub', '..', 'allowed.mp4'); // 解析后仍在白名单内
+    ok('合法路径含 .. 仍在白名单内：允许', T.safeVideoPath(inPlaceDotDot) === allowed, T.safeVideoPath(inPlaceDotDot));
+
+    // Windows 大小写 & 分隔符差异
+    const upper = T.safeVideoPath(allowed.toUpperCase());
+    ok('Windows 大小写差异：仍正确识别为白名单内', upper === allowed || upper === allowed.toUpperCase(), upper);
+    const fwd = allowed.replace(/\\/g, '/');
+    const fwdRes = T.safeVideoPath(fwd);
+    ok('正斜杠分隔符：行为正确', fwdRes === allowed || fwdRes === fwd, fwdRes);
+
+    // 跨盘符：在另一块盘创建真实文件，验证不被误判为白名单内
+    const selfDrive = (b.tmp[0] || 'C').toUpperCase() + ':';
+    const otherDrive = selfDrive === 'C:' ? 'D:' : 'C:';
+    let crossDrive = '未执行';
+    try {
+      const dRoot = path.join(otherDrive, path.sep, 'NapCat_publish_video_crossdrive_test');
+      fs.mkdirSync(dRoot, { recursive: true });
+      const cross = mk(path.join(dRoot, 'cross.mp4'));
+      crossDrive = T.safeVideoPath(cross) === null;
+      fs.rmSync(dRoot, { recursive: true, force: true });
+    } catch (e) {
+      crossDrive = '未执行(无法在' + otherDrive + '写入: ' + e.code + ')';
+    }
+    if (crossDrive === true) ok('跨盘符真实文件：拒绝', true);
+    else if (crossDrive === false) ok('跨盘符真实文件：拒绝', false, '被误判为允许');
+    else console.log('  ⚠ 跨盘符测试' + crossDrive + '（按任务要求明确报告，不计入失败）');
+
+    // 符号链接 / 目录联接指向白名单外：realpath 解析后应在白名单外被拒。
+    // 目录联接(junction) 在 Windows 上无需提权即可创建且会被 realpath 跟随，用于真实验证越界防护。
+    const outsideDir = path.join(b.tmp, 'outside_dir');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    mk(path.join(outsideDir, 'vid.mp4'));   // 白名单外的视频
+    const junc = path.join(WS, 'junction_dir');
+    try {
+      fs.symlinkSync(outsideDir, junc, 'junction');   // workspace/junction_dir -> outside_dir
+      ok('目录联接(junction)指向白名单外：拒绝', T.safeVideoPath(path.join(junc, 'vid.mp4')) === null, T.safeVideoPath(path.join(junc, 'vid.mp4')));
+      // 指向白名单内的联接应正常允许（验证不误杀）
+      const innerDir = path.join(WS, 'inner_dir'); fs.mkdirSync(innerDir, { recursive: true });
+      const juncIn = path.join(WS, 'junction_in');
+      fs.symlinkSync(innerDir, juncIn, 'junction');   // workspace/junction_in -> workspace/inner_dir
+      const vidIn = mk(path.join(innerDir, 'in.mp4'));
+      const jInRes = T.safeVideoPath(path.join(juncIn, 'in.mp4'));
+      ok('目录联接指向白名单内：允许（不误杀）', !!jInRes && jInRes.toLowerCase().startsWith(WS.toLowerCase()), jInRes);
+    } catch (e) {
+      console.log('  ⚠ 目录联接测试未执行（' + e.code + '）：按任务要求明确报告——未执行。越界防护由 realpath 解析后做路径相对关系判断保证（见 isUnderAllowedVideoRoot）。');
+    }
+
+    // 文件符号链接：若本环境能创建真实可穿越的软链则断言拒绝；否则明确报告（不计入失败）
+    try {
+      const link = path.join(WS, 'escape_link.mp4');
+      fs.symlinkSync(outside, link, 'file');   // 软链指向白名单外的 outside_root.mp4
+      const resolved = (() => { try { return fs.realpathSync(link); } catch (e) { return null; } })();
+      const traversable = resolved && resolved.toLowerCase() !== link.toLowerCase();
+      if (traversable) ok('符号链接(文件)指向白名单外：拒绝', T.safeVideoPath(link) === null, T.safeVideoPath(link));
+      else console.log('  ⚠ 文件符号链接测试环境不支持：本机 fs.symlinkSync 未生成可被 realpath 解析的真实软链（无提权/Developer Mode），按任务要求明确报告——未执行越界软链拒绝断言；junction 越界测试已覆盖同类防护。');
+    } catch (e) {
+      console.log('  ⚠ 文件符号链接测试环境不支持（' + e.code + '）：按任务要求明确报告——未执行。');
+    }
+
+    // 不存在文件 / 非法路径 / 非字符串：安全拒绝
+    ok('不存在的文件：安全拒绝', T.safeVideoPath(path.join(WS, 'nope.mp4')) === null);
+    ok('空串/非字符串：安全拒绝', T.safeVideoPath('') === null && T.safeVideoPath(null) === null && T.safeVideoPath(123) === null);
+    ok('相对路径（非绝对）：安全拒绝', T.safeVideoPath('workspace/allowed.mp4') === null);
+
+    // 原有视频解析功能回归：本地路径正常解析为 from:'local'，非法路径安全回退 null（不得退化）
+    try {
+      const good = await T.resolveVideoFile({ data: { path: allowed } });
+      ok('resolveVideoFile ① 本地白名单视频：返回 {path,from:local}', good && good.from === 'local' && good.path === allowed, good);
+      const bad = await T.resolveVideoFile({ data: { path: rejected } });
+      ok('resolveVideoFile ① 非法(workspace_backup)视频：安全回退 null', bad === null, bad);
+    } catch (e) {
+      ok('resolveVideoFile 本地路径回归：执行异常', false, e.message);
+    }
+
     b.cleanup();
   }
 
