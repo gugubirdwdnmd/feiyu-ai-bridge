@@ -107,6 +107,9 @@ function createAgentCore(deps) {
         groupId: input.groupId,
         userId: input.userId,
         isGroup: input.isGroup,
+        // 安全整改：透传管理员身份，工具可在执行层做权限校验（fail-closed）。
+        // 原样透传不转布尔：调用方没给就是 undefined，工具侧按「非 true 即非管理员」处理
+        isAdmin: input.isAdmin,
       });
       if (res.ok) break;
       if (attempt >= cfg.maxRetries) break;

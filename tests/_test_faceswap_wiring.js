@@ -34,6 +34,8 @@ function ok(name, cond, extra) {
 
 const target = process.argv[2] || path.join(ROOT, 'tests', 'fixtures', 'face_target.png');
 const source = process.argv[3] || path.join(ROOT, 'tests', 'fixtures', 'face_source.png');
+// 隐私整改：仓库不再内置人脸示例图。默认路径不存在时 SKIP，
+// 自备两张含人脸照片传入即可：node _test_faceswap_wiring.js 目标.png 源.png
 
 (async () => {
   console.log('\n========== 换脸接线集成测试（callComfyUIImage 真实路径）==========\n');

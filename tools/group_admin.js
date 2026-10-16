@@ -18,14 +18,33 @@ const MODULE_DEFAULTS = {
 };
 
 // 内置 OneBot 调用（与 ai_bridge 的 napcatCall 行为一致：action 走 URL 路径，参数平铺 body）
+// 安全整改：原来这里不发 Authorization，与 napcatCall 的鉴权策略不一致
+// （配置了 Token 时一个带一个不带）。统一为同一套读取逻辑。
+function loadOnebotTokenForAdmin() {
+  if (process.env.NAPCAT_ONEBOT_TOKEN) return String(process.env.NAPCAT_ONEBOT_TOKEN).trim();
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    for (const f of ['secrets.json', 'config.secret.json']) {
+      const j = JSON.parse(fs.readFileSync(path.join(__dirname, '..', f), 'utf-8'));
+      const v = j.onebotToken || j.onebot_token;
+      if (v) return String(v).trim();
+    }
+  } catch (e) { /* 未配置时按无鉴据处理（本地回环信任边界） */ }
+  return '';
+}
+
 function builtinCallOneBot(apiBase, timeoutMs) {
   return async function callOneBot(action, payload) {
+    const token = loadOnebotTokenForAdmin();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const r = await fetch(`${apiBase}/${action}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload || {}),
         signal: ctrl.signal,
       });

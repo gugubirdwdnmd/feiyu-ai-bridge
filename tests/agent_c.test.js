@@ -224,8 +224,8 @@ ok(tBili.inputSchema.additionalProperties === false, 'bilibili_search 禁止未�
   ok(/VIDEO_EXT\.has\(path\.extname\(real\)/.test(SRC), '视频扩展名走白名单');
   ok(/st\.size\s*>\s*MAX_VIDEO_BYTES/.test(SRC), '视频有大小上限');
   ok(/MAX_VIDEO_BYTES\s*=\s*100\s*\*\s*1024\s*\*\s*1024/.test(SRC), '视频大小上限 100MB（视频专用常量，未改文件工具限制）');
-  ok(/isSafeUrl\(url\)/.test(SRC.slice(SRC.indexOf('async function resolveVideoFile'), SRC.indexOf('async function resolveVideoFile') + 3000)),
-    '★视频 URL 下载继续走现有 isSafeUrl（SSRF 防护未绕过）');
+  ok(/safeFetch\(url,/.test(SRC.slice(SRC.indexOf('async function resolveVideoFile'), SRC.indexOf('async function resolveVideoFile') + 3000)),
+    '★视频 URL 下载走统一安全模块 safeFetch（SSRF 防护未绕过，且消除「校验后裸 fetch」的 DNS 重绑定窗口）');
   ok(/VIDEO_EXT\s*=\s*new Set\(\['\.mp4'/.test(SRC), '视频扩展名白名单含 .mp4');
   ok(!/'\.exe'|'\.bat'|'\.cmd'|'\.ps1'/.test(SRC.slice(SRC.indexOf('VIDEO_EXT'), SRC.indexOf('VIDEO_EXT') + 300)),
     '视频扩展名白名单不含可执行类型');

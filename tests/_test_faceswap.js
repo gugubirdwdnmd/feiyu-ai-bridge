@@ -2,8 +2,8 @@
 //   ① 意图识别单测（vm 加载 ai_bridge.js 的 isFaceSwapIntent / isFusionIntent / 换脸图序）
 //   ② 真实端到端冒烟（上传两张含人脸的照片 → reactor_faceswap.json → 拿回换脸结果）
 // 用法: node _test_faceswap.js [目标图路径] [源脸图路径]
-// 缺省用 tests/fixtures/face_target.png 与 face_source.png（自带两张示例图；
-// 也可传任意两张含人脸的照片）。没有 ComfyUI 或没有图时自动跳过冒烟部分。
+// 隐私整改：仓库不再内置任何人脸示例图（避免真实/半真实肖像进入公开仓库）。
+// 冒烟需要你自备两张含人脸的照片作为参数传入；没有 ComfyUI 或没有图时自动跳过冒烟部分。
 'use strict';
 const fs = require('fs');
 const path = require('path');

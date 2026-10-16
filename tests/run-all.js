@@ -16,6 +16,7 @@ const OFFLINE = [
   'agent_c3.test.js',
   's3_url.test.js',
   's3_net.test.js',
+  'security_hardening.test.js',
   'group_admin.test.js',
   'group_admin_cmd.test.js',
   'feature_command_integration.test.js',

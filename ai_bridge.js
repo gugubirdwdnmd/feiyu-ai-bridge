@@ -8,6 +8,10 @@ const path = require('path');
 // V14-C.2：URL 安全（重定向逐跳 SSRF 校验）与 QQ 分享卡片提取（独立零依赖模块，便于单测）
 const urlSafety = require('./url_safety');
 const shareCard = require('./share_card');
+// 安全整改：统一安全传输层。所有「不可信 URL」的请求必须走 safeFetch
+// （固定 IP 连接 + socket 远端复核 + 逐跳重校验 + 限额 + 四档超时），
+// 禁止「先校验 URL、再用裸 fetch 连接」的 TOCTOU 模式。
+const { safeFetch } = require('./safe_http');
 
 // V13.5：聊天记录解析 + 多模态混合理解（独立模块，零依赖）
 const chatRecordParser = require('./chat_record_parser');
@@ -342,6 +346,12 @@ const DEFAULT_CONFIG = {
   },
   debug: {
     rawEvent: false,              // v10 临时：打印原始事件结构（默认关）
+  },
+
+  // 本地 HTTP 事件入口（安全整改新增）
+  http: {
+    _说明: '事件入口加固。requireEventAuth=true 时，若加载了 OneBot Token，则每个事件请求都必须携带 Authorization: Bearer <token>（NapCat 侧填同一个 access_token）。默认 false 保持旧行为（不校验，依赖 127.0.0.1 回环信任边界）。',
+    requireEventAuth: false,
   },
 
   // 戳一戳（notice/notify/poke）：有人戳机器人时的回应
@@ -877,11 +887,19 @@ async function callImageGen(prompt, imgOverride) {
     else if (d && (d.b64_json || d.url)) raw = d.b64_json || d.url;
     if (!raw) return { ok: false, error: 'no-image-in-response' };
     // url → 下载为 base64（NapCat 需要 base64:// 或本地路径或直链）
+    // 安全整改：第三方 API 响应里带回的 URL 属于不可信输入，必须走 safeFetch
+    // （旧代码用裸 fetch 直连该 URL，响应指向内网即 SSRF 打穿）
     let b64 = raw;
     if (/^https?:\/\//i.test(raw)) {
       try {
-        const ab = await fetch(raw, { headers: { 'User-Agent': UA, Referer: raw } }).then((x) => x.arrayBuffer());
-        b64 = Buffer.from(ab).toString('base64');
+        const ir = await safeFetch(raw, {
+          maxRedirects: 3,
+          maxBytes: 16 * 1024 * 1024,
+          maxDecompressedBytes: 16 * 1024 * 1024,
+          headers: { 'User-Agent': UA, Referer: raw },
+        });
+        if (!ir.ok) return { ok: false, error: 'download-blocked:' + ir.kind };
+        b64 = ir.body.toString('base64');
       } catch (e) { return { ok: false, error: 'download-failed' }; }
     }
     const file = /^data:/i.test(b64) ? b64 : 'base64://' + b64;
@@ -1555,13 +1573,15 @@ let lastMbaiduAt = 0;
 async function mbaiduSearch(query, n) {
   if (Date.now() - lastMbaiduAt < 15000) return [];
   lastMbaiduAt = Date.now();
-  const t = withTimeout(WEB_TIMEOUT_MS);
   try {
-    const r = await fetch('https://m.baidu.com/s?word=' + encodeURIComponent(query), {
-      signal: t.signal,
+    // 安全整改：搜索引擎请求同样走 safeFetch（固定 IP + 逐跳重校验 + 限额）
+    const r = await safeFetch('https://m.baidu.com/s?word=' + encodeURIComponent(query), {
+      maxRedirects: 3,
+      maxBytes: 4 * 1024 * 1024,
       headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
     });
-    const html = await r.text();
+    if (!r.ok) { log('[移动百度失败] kind=' + r.kind); return []; }
+    const html = r.body.toString('utf-8');
     if (html.length < 20000 || /安全验证|wappass/.test(html)) {
       log('[移动百度被限流]');
       return [];
@@ -1575,20 +1595,20 @@ async function mbaiduSearch(query, n) {
   } catch (e) {
     log('[移动百度失败] ' + e.message);
     return [];
-  } finally {
-    t.done();
   }
 }
 
 // 搜狗：不设验证门槛，可作高频兜底
 async function sogouSearch(query, n) {
-  const t = withTimeout(WEB_TIMEOUT_MS);
   try {
-    const r = await fetch('https://www.sogou.com/web?query=' + encodeURIComponent(query), {
-      signal: t.signal,
+    // 安全整改：同上，统一走 safeFetch
+    const r = await safeFetch('https://www.sogou.com/web?query=' + encodeURIComponent(query), {
+      maxRedirects: 3,
+      maxBytes: 4 * 1024 * 1024,
       headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
     });
-    const html = await r.text();
+    if (!r.ok) { log('[搜狗失败] kind=' + r.kind); return []; }
+    const html = r.body.toString('utf-8');
     if (html.length < 20000 || /请输入验证|验证码/.test(html)) {
       log('[搜狗被限流]');
       return [];
@@ -1602,8 +1622,6 @@ async function sogouSearch(query, n) {
   } catch (e) {
     log('[搜狗失败] ' + e.message);
     return [];
-  } finally {
-    t.done();
   }
 }
 
@@ -1640,18 +1658,21 @@ async function webSearch(query, count) {
 
   // ① 主源：Bing（时效查询走 news 版面并按时间排序，召回明显更准）
   let items = [];
-  const t1 = withTimeout(WEB_TIMEOUT_MS);
   try {
     const bingUrl = fresh
       ? 'https://cn.bing.com/news/search?q=' + encodeURIComponent(query)
         + '&qft=sortbydate%3d%221%22&form=YFNR&setlang=zh-CN&mkt=zh-CN'
       : 'https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&mkt=zh-CN';
-    const r = await fetch(bingUrl, { signal: t1.signal, headers: hdr });
-    items = parseBing(await r.text(), n * 2);
+    // 安全整改：走 safeFetch（固定 IP + 逐跳重校验 + 限额），不再裸 fetch
+    const r = await safeFetch(bingUrl, {
+      maxRedirects: 3,
+      maxBytes: 4 * 1024 * 1024,
+      headers: hdr,
+    });
+    if (r.ok) items = parseBing(r.body.toString('utf-8'), n * 2);
+    else log('[Bing失败] kind=' + r.kind);
   } catch (e) {
     log('[Bing失败] ' + e.message);
-  } finally {
-    t1.done();
   }
 
   // ② 相关性过滤（按标题/全文覆盖率打分，首页基本被淘汰）
@@ -1659,18 +1680,20 @@ async function webSearch(query, count) {
 
   // ③ 相关结果太少 → 用引号做精确搜索再试一次（对中文短词很有效）
   if (good.length < 2) {
-    const t2 = withTimeout(WEB_TIMEOUT_MS);
     try {
-      const r2 = await fetch(
+      // 安全整改：同上，统一走 safeFetch
+      const r2 = await safeFetch(
         'https://cn.bing.com/search?q=' + encodeURIComponent('"' + query + '"') + '&setlang=zh-CN&mkt=zh-CN',
-        { signal: t2.signal, headers: hdr }
+        { maxRedirects: 3, maxBytes: 4 * 1024 * 1024, headers: hdr }
       );
-      const q2 = parseBing(await r2.text(), n * 2).filter((x) => searchResultOK(query, x));
-      if (q2.length > good.length) good = q2;
+      if (r2.ok) {
+        const q2 = parseBing(r2.body.toString('utf-8'), n * 2).filter((x) => searchResultOK(query, x));
+        if (q2.length > good.length) good = q2;
+      } else {
+        log('[Bing精确搜索失败] kind=' + r2.kind);
+      }
     } catch (e) {
       log('[Bing精确搜索失败] ' + e.message);
-    } finally {
-      t2.done();
     }
   }
 
@@ -1707,62 +1730,53 @@ async function webSearch(query, count) {
   );
 }
 
-// V14-C.2 修复 D：手动逐跳重定向，每一跳都重新过 SSRF 校验（不再用 redirect:'follow' 一路跟到底）
+// 安全整改：网页抓取统一走 safeFetch。
+// 旧实现是「assertSafeTarget 校验 → 裸 fetch 连接」：校验时的 DNS 解析与连接时的
+// DNS 解析相互独立，攻击者用 TTL=0 的域名即可让第二次解析落到内网 IP（DNS 重绑定）。
+// safeFetch 把「校验得到的 IP」固定给连接（自定义 lookup 只返回已校验 IP），
+// 并在连接建立后用 socket.remoteAddress 复核实际远端 IP，不一致立即中止。
 async function fetchUrl(url) {
-  const first = await assertSafeTarget(url);
-  if (!first.ok) return '这个地址不允许访问。';
-
-  let cur = url;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const chk = await assertSafeTarget(cur);
-    if (!chk.ok) {
-      log('[网页] 重定向目标被拒 ' + safeUrlForLog(cur) + ' 原因=' + chk.why);
-      return '这个地址不允许访问（' + chk.why + '）。';
-    }
-    const t = withTimeout(WEB_TIMEOUT_MS);
-    let r;
-    try {
-      r = await fetch(cur, {
-        signal: t.signal,
-        redirect: 'manual',                // 关键：不自动跟随
-        headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
-      });
-    } catch (e) {
-      t.done();
-      log('[网页] 读取失败 ' + safeUrlForLog(cur) + ' 类别=请求异常');
-      return '打开网页失败：' + e.message;
-    }
-    t.done();
-
-    if (r.status >= 300 && r.status < 400) {
-      const loc = r.headers.get('location');
-      if (!loc) return '打开网页失败：重定向缺少目标地址';
-      let next;
-      try { next = new URL(loc, cur).toString(); } catch (e) { return '打开网页失败：重定向地址非法'; }
-      if (hop === MAX_REDIRECTS) {
-        log('[网页] 重定向次数超限 ' + safeUrlForLog(cur));
-        return '打开网页失败：重定向次数过多（上限 ' + MAX_REDIRECTS + ' 次）。';
-      }
-      cur = next;
-      continue;
-    }
-
-    const ct = r.headers.get('content-type') || '';
-    if (!/text|html|json|xml/i.test(ct)) {
-      log('[网页] 读取失败 ' + safeUrlForLog(cur) + ' 类别=非网页内容 HTTP=' + r.status);
-      return '这个链接不是网页内容（' + ct + '）。';
-    }
-    let html = await r.text();
-    html = html
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-      .replace(/<!--[\s\S]*?-->/g, ' ');
-    let text = stripTags(html);
-    if (text.length > FETCH_MAX_CHARS) text = text.slice(0, FETCH_MAX_CHARS) + '…（已截断）';
-    return `网页 ${sanitizeUrlForUse(cur)} 的内容：\n` + text;
+  let r;
+  try {
+    r = await safeFetch(url, {
+      maxRedirects: MAX_REDIRECTS,
+      maxBytes: 4 * 1024 * 1024,               // 网页实际接收字节上限
+      maxDecompressedBytes: 8 * 1024 * 1024,   // 解压后上限（防压缩炸弹）
+      headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+    });
+  } catch (e) {
+    log('[网页] 读取失败 ' + safeUrlForLog(url) + ' 类别=请求异常');
+    return '打开网页失败：' + e.message;
   }
-  return '打开网页失败：重定向次数过多。';
+
+  if (!r.ok) {
+    // 分类错误文案（保持既有返回格式，调用方 looksFailed 依赖这些前缀）
+    if (r.kind === 'blocked') {
+      log('[网页] 目标被拒 ' + safeUrlForLog(r.finalUrl || url) + ' 原因=' + r.why);
+      return '这个地址不允许访问（' + r.why + '）。';
+    }
+    if (r.kind === 'max-redirects') {
+      log('[网页] 重定向次数超限 ' + safeUrlForLog(r.finalUrl || url));
+      return '打开网页失败：重定向次数过多（上限 ' + MAX_REDIRECTS + ' 次）。';
+    }
+    log('[网页] 读取失败 ' + safeUrlForLog(r.finalUrl || url) + ' 类别=' + r.kind);
+    return '打开网页失败：' + (r.error || r.kind);
+  }
+
+  const ct = r.contentType || '';
+  if (!/text|html|json|xml/i.test(ct)) {
+    log('[网页] 读取失败 ' + safeUrlForLog(r.finalUrl) + ' 类别=非网页内容 HTTP=' + r.status);
+    return '这个链接不是网页内容（' + ct + '）。';
+  }
+  let html = r.body.toString('utf-8');
+  html = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ');
+  let text = stripTags(html);
+  if (text.length > FETCH_MAX_CHARS) text = text.slice(0, FETCH_MAX_CHARS) + '…（已截断）';
+  return `网页 ${sanitizeUrlForUse(r.finalUrl || url)} 的内容：\n` + text;
 }
 
 function getCurrentTime() {
@@ -2267,15 +2281,9 @@ async function fetchImageAsBase64(seg) {
     }
   }
 
-  // ③ 网络下载（兜底）：先过 SSRF 校验（初始 URL + 每次重定向逐跳校验），再带 Referer + 重试
+  // ③ 网络下载（兜底）：统一走 safeFetch（固定 IP + socket 复核 + 逐跳重校验 + 限额）
   const url = /^https?:/i.test(d.url || '') ? d.url : '';
   if (url) {
-    const firstChk = await assertSafeTarget(url);
-    if (!firstChk.ok) {
-      log('[图片] URL 被 SSRF 规则拒绝 ' + safeUrlForLog(url) + ' 原因=' + firstChk.why);
-      imageDebug(seg, 'url-ssrf', firstChk.why);
-      return null;
-    }
     const headers = {
       'User-Agent': UA,
       'Accept': 'image/avif,image/webp,image/apng,image/png,image/jpeg,image/*,*/*',
@@ -2283,38 +2291,25 @@ async function fetchImageAsBase64(seg) {
     };
     let lastErr = '';
     for (let attempt = 0; attempt < 3; attempt++) {
-      let cur = url;
       let r = null;
-      for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-        const chk = await assertSafeTarget(cur);
-        if (!chk.ok) {
-          log('[图片] 重定向目标被拒 ' + safeUrlForLog(cur) + ' 原因=' + chk.why);
-          r = null; lastErr = 'ssrf:' + chk.why; break;
-        }
-        const t = withTimeout(WEB_TIMEOUT_MS);
-        try {
-          const resp = await fetch(cur, { signal: t.signal, redirect: 'manual', headers });
-          if (resp.status >= 300 && resp.status < 400) {
-            const loc = resp.headers.get('location');
-            if (!loc) { r = null; lastErr = 'redirect-no-location'; break; }
-            let next;
-            try { next = new URL(loc, cur).toString(); } catch (e) { r = null; lastErr = 'redirect-bad-url'; break; }
-            if (hop === MAX_REDIRECTS) { r = null; lastErr = 'too-many-redirects'; break; }
-            cur = next; continue;
-          }
-          r = resp; break;
-        } catch (e) { r = null; lastErr = e.message; break; }
-        finally { t.done(); }
-      }
+      try {
+        r = await safeFetch(url, {
+          maxRedirects: MAX_REDIRECTS,
+          maxBytes: MAX_IMAGE_BYTES + 1024,          // 实际接收字节（压缩形态）上限
+          maxDecompressedBytes: MAX_IMAGE_BYTES + 1024,
+          headers,
+        });
+      } catch (e) { r = { ok: false, kind: 'exception', error: e.message }; }
       if (r && r.ok) {
-        const ct = r.headers.get('content-type') || '';
-        const ab = await r.arrayBuffer();
-        if (ab.byteLength > 0 && ab.byteLength <= MAX_IMAGE_BYTES) {
-          const mime = ct.startsWith('image/') ? ct.split(';')[0] : guessMime(url);
-          imageDebug(seg, 'url-ok', 'bytes=' + ab.byteLength + ' attempt=' + attempt);
-          return `data:${mime};base64,${Buffer.from(ab).toString('base64')}`;
+        const ab = r.body;
+        if (ab && ab.length > 0 && ab.length <= MAX_IMAGE_BYTES) {
+          const mime = (r.contentType || '').startsWith('image/') ? r.contentType.split(';')[0] : guessMime(url);
+          imageDebug(seg, 'url-ok', 'bytes=' + ab.length + ' attempt=' + attempt);
+          return `data:${mime};base64,${ab.toString('base64')}`;
         }
-        lastErr = 'http=' + r.status + ' size=' + ab.byteLength;
+        lastErr = 'kind=' + r.kind + ' size=' + (ab ? ab.length : 0);
+      } else {
+        lastErr = 'kind=' + (r && r.kind) + ' err=' + String((r && (r.error || r.why)) || '').slice(0, 60);
       }
       imageDebug(seg, 'url-fail', lastErr + ' attempt=' + attempt);
       if (attempt < 2) await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
@@ -2379,9 +2374,17 @@ function saveMemory() {
 }
 
 // 模型调用 remember 工具时写入长期记忆
+// 安全整改：这里增加凭据过滤。tools/memory.js 的 memory_write 有 gateWrite 闸门，
+// 但 runTool 的 'remember'（V13 老链）与模型直接 remember 都会走到本函数，
+// 不过闸门 —— 凭据类内容（API Key/Token/手机号/证件号等）一旦写入 notes.json，
+// 会被 buildSystemPrompt 注入提示词并随每次请求发给模型厂商，属于凭据外泄。
 function rememberNote(sessionId, content) {
   const c = String(content || '').replace(/\s+/g, ' ').trim().slice(0, 200);
   if (!c) return '没记住：内容为空。';
+  if (typeof memoryStore.looksSecret === 'function' && memoryStore.looksSecret(c)) {
+    log('[记忆] 拒绝写入长期记忆：内容命中凭据/敏感信息特征（已丢弃，不落盘）');
+    return '没记住：这条看起来包含密钥、密码、手机号或证件号等敏感信息，不能记。';
+  }
   const arr = notes.get(sessionId) || [];
   if (arr.includes(c)) return '这条已经记过了。';
   arr.push(c);
@@ -2532,6 +2535,9 @@ const TEXT_EXT = new Set([
 const BINARY_EXT = new Set(['.xlsx', '.xls', '.zip', '.rar', '.7z', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf', '.mp3', '.mp4']);
 
 // 沙箱文件名：剥掉目录、非法字符、前后多余的点；无扩展名默认 .txt
+// Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，带不带扩展名都算设备）：
+//   直接拿它们建文件会创建设备句柄而不是普通文件，属于路径绕过的翻版，一律加前缀改写
+const WIN_RESERVED_STEM = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 function safeFileName(name) {
   let n = String(name == null ? '' : name).trim().replace(/[\\/]+/g, '/');
   n = n.split('/').pop() || '';
@@ -2539,6 +2545,7 @@ function safeFileName(name) {
   if (!n) n = '未命名';
   if (n.length > 80) n = n.slice(0, 80);
   if (!path.extname(n)) n += '.txt';
+  if (WIN_RESERVED_STEM.test(path.basename(n, path.extname(n)))) n = '_' + n;
   return n;
 }
 
@@ -2562,7 +2569,10 @@ function writeWorkspaceFile(name, buf) {
   if (buf.length > MAX_FILE_BYTES) return { ok: false, msg: '内容太大（上限 ' + fmtBytes(MAX_FILE_BYTES) + '）。' };
   try {
     fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
-    fs.writeFileSync(p, buf);
+    // 安全整改：先写临时文件再 rename，写入中途失败不会留下半个文件、更不会破坏原文件
+    const tmp = p + '.tmp-' + process.pid + '-' + Date.now().toString(36);
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, p);
     return { ok: true, name: path.basename(p), size: buf.length };
   } catch (e) {
     return { ok: false, msg: '写入失败：' + e.message };
@@ -3644,21 +3654,20 @@ async function resolveVideoFile(seg) {
     } catch (e) { /* 拿不到就继续往下走 */ }
   }
 
-  // ③ URL 下载兜底（继续走现有 SSRF 校验）
+  // ③ URL 下载兜底（安全整改：与 fetchUrl 同标准——safeFetch 固定 IP + socket 复核 + 逐跳重校验 + 限额）
+  //    旧代码「isSafeUrl 校验 → 裸 fetch 连接」存在 DNS 重绑定窗口，且 arrayBuffer 全量落内存后才判大小
   const url = /^https?:/i.test(d.url || '') ? d.url : '';
-  if (url && typeof isSafeUrl === 'function' && isSafeUrl(url)) {
+  if (url) {
     try {
       if (!fs.existsSync(VIDEO_CACHE_DIR)) fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
-      const t = withTimeout(60000);
-      const r = await fetch(url, { signal: t.signal, redirect: 'follow', headers: { 'User-Agent': UA, 'Referer': 'https://qq.com/' } });
-      t.done();
-      if (r.ok) {
-        const ab = await r.arrayBuffer();
-        if (ab.byteLength > 0 && ab.byteLength <= MAX_VIDEO_BYTES) {
-          const ext = path.extname(new URL(url).pathname).toLowerCase();
+      const r = await safeFetch(url, { maxRedirects: 3, maxBytes: MAX_VIDEO_BYTES + 1024, headers: { 'User-Agent': UA, 'Referer': 'https://qq.com/' } });
+      if (r && r.ok) {
+        const ab = r.body;
+        if (ab && ab.byteLength > 0 && ab.byteLength <= MAX_VIDEO_BYTES) {
+          const ext = path.extname(new URL(r.finalUrl || url).pathname).toLowerCase();
           const name = 'v_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + (VIDEO_EXT.has(ext) ? ext : '.mp4');
           const fp = path.join(VIDEO_CACHE_DIR, name);
-          fs.writeFileSync(fp, Buffer.from(ab));
+          fs.writeFileSync(fp, ab);
           const ok = safeVideoPath(fp);
           if (ok) return { path: ok, from: 'download' };
         }
@@ -3959,6 +3968,9 @@ async function processReply(ev, o) {
         userId,
         sessionId,
         isGroup: msgType === 'group',
+        // 安全整改：把「管理员身份」带进 Agent 运行上下文，
+        // 让工具在执行层自行校验权限（而不是只靠模型提示词或意图分类）
+        isAdmin: isAdmin(userId),
         ev,                                    // 仅供适配器取 groupId/chatId，不进任何提示词
       });
       if (ar && ar.handled) {
@@ -5246,7 +5258,23 @@ async function runProactiveOnce() {
   }
 }
 
+// ================= 本地 HTTP 事件入口（安全整改） =================
+// OneBot 事件体上限：合并转发/长消息可能到几十 KB，1MB 足够且防止无限拼接耗尽内存
+const MAX_EVENT_BODY_BYTES = 1024 * 1024;
+// 事件推送来源鉴权开关（动态读配置，/ai reload 后即时生效）。
+// 置 true 时：若本机加载了 OneBot Token，则要求每个事件请求携带
+// Authorization: Bearer <token>，否则 401。NapCat 侧在 HTTP/WS 配置里
+// 填同一个 access_token 即会带头（OneBot 11 规范）。
+// 未配置 Token 时任何设置都不校验（无凭据可校验，依赖 127.0.0.1 回环信任边界）。
+function eventAuthRequired() {
+  return !!(CFG.http && CFG.http.requireEventAuth === true);
+}
+
 const server = http.createServer((req, res) => {
+  const sendJson = (code, obj) => {
+    try { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); }
+    catch (e) {}
+  };
   // —— 后台页面 / API（复用同一个端口，NapCat 走 POST 不受影响）——
   if (req.method === 'GET') {
     let urlObj;
@@ -5277,14 +5305,54 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end('{"status":"alive"}');
   }
+
+  // —— 方法限制：事件入口只接受 POST，其余一律 405（不再一律 200 ok）——
+  if (req.method !== 'POST') {
+    log('[HTTP] 拒绝非 POST 方法 ' + req.method + ' ' + String(req.url || '').slice(0, 80));
+    return sendJson(405, { status: 'method-not-allowed' });
+  }
+
+  // —— 来源鉴权（可选）：加载了 Token 且开启 requireEventAuth 时，强制 Bearer 校验 ——
+  if (eventAuthRequired() && ONEBOT_TOKEN) {
+    const auth = String(req.headers.authorization || '');
+    if (auth !== 'Bearer ' + ONEBOT_TOKEN) {
+      log('[HTTP] 事件推送鉴权失败：未携带有效 OneBot Token（来源 IP 可信度不足，已拒绝）');
+      return sendJson(401, { status: 'unauthorized' });
+    }
+  }
+
+  // —— Content-Type：显式非 JSON 才拒绝（缺失时放行，兼容不同 OneBot 实现）——
+  const reqCt = String(req.headers['content-type'] || '');
+  if (reqCt && !/^application\/json/i.test(reqCt)) {
+    log('[HTTP] 拒绝非 JSON Content-Type: ' + reqCt.slice(0, 60));
+    return sendJson(415, { status: 'unsupported-media-type' });
+  }
+
+  // —— 请求体大小硬上限：超限立即断开，绝不上线拼接 ——
   let body = '';
-  req.on('data', (c) => (body += c));
+  let tooLarge = false;
+  req.on('data', (c) => {
+    if (tooLarge) return;
+    body += c;
+    if (body.length > MAX_EVENT_BODY_BYTES) {
+      tooLarge = true;
+      body = '';
+      log('[HTTP] 事件体超过上限（' + MAX_EVENT_BODY_BYTES + 'B），已断开连接');
+      try { req.destroy(); } catch (e) {}
+    }
+  });
   req.on('end', () => {
+    if (tooLarge) return;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"status":"ok"}');
 
     let ev;
     try { ev = JSON.parse(body); } catch (e) { log('[解析失败] ' + e.message); return; }
+    // 字段类型校验：post_type 必须是已知字符串，否则不当事件处理
+    if (!ev || typeof ev !== 'object' || typeof ev.post_type !== 'string') {
+      log('[解析失败] 事件缺少合法的 post_type 字段');
+      return;
+    }
 
     if (ev.post_type === 'message') {
       handleMessage(ev).catch((e) => log('[异常] ' + e.message));
@@ -5411,7 +5479,11 @@ if (CFG.stats.enable) { const t = setInterval(saveStats, 60000); if (t.unref) t.
 server.listen(LISTEN_PORT, '127.0.0.1', () => {
   log('='.repeat(46));
   log(`AI 桥启动 | 端口 ${LISTEN_PORT} | 模型 ${CFG.api.model} | Key来源=${process.env.DEEPSEEK_API_KEY ? 'env' : 'secrets.json'}`);
-  log(`OneBot Token=${ONEBOT_TOKEN ? '已加载(len=' + ONEBOT_TOKEN.length + ')' : '未加载-OneBot 调用将被拒，需检查 secrets.json/NAPCAT_ONEBOT_TOKEN'}`);
+  // 安全整改：日志如实描述行为，不再出现「日志说将被拒、代码却无鉴权直连」的矛盾
+  log(`OneBot Token=${ONEBOT_TOKEN ? '已加载(len=' + ONEBOT_TOKEN.length + ')' : '未加载-将以无鉴权方式调用本机 OneBot(依赖 127.0.0.1 回环信任边界)；如需鉴权请在 secrets.json 配置 onebotToken 并设 http.requireEventAuth=true'}`);
+  if (ONEBOT_TOKEN && !eventAuthRequired()) {
+    log('安全提示：已加载 OneBot Token 但 http.requireEventAuth=false，事件推送入口暂不校验来源（任何本机程序均可推送事件）；确认 NapCat 会带 Authorization 头后，可在 ai_config.json 置 http.requireEventAuth=true 收紧。');
+  }
   log(`配置来源=${CFG.__source} | 文件=${CONFIG_FILE}`);
   log(`私聊=${CFG.private.allow ? '开' : '关'} 群聊=${CFG.group.allow ? CFG.group.mode : '关'} 联网=${CFG.web.enable ? '开' : '关'} 图片调试=${IMAGE_DEBUG ? '开' : '关'}`);
   log(`群策略：回复概率=${CFG.group.replyProbability}% 冷却(群/人)=${CFG.group.cooldownMs}/${CFG.group.userCooldownMs}ms 聚合=${CFG.group.aggregateMs}ms 缓冲=${CFG.group.ringSize} 上下文(简/常/复)=${CFG.group.contextSimple}/${CFG.group.contextNormal}/${CFG.group.contextComplex} AI判断=${CFG.group.judgeWithAi ? '开' : '关'}`);
