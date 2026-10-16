@@ -221,7 +221,7 @@ function observe(o) {
 
 // —— 写入单条画像（走 memoryStore，天然获得隔离/去重合并/容量/TTL）——
 // 关键：scope='user' + groupId+userId；source 带 profile 标记，便于按来源查看/清理。
-// 容量：写入前先清掉该成员超出上限的最旧画像条目（画像要精简，不无限增长）。
+// 容量：仅**新增**时才按单人条数上限腾位；总字节治理按「写入后的预计总量」进行。
 // —— 写入单条画像 ——
 // 为什么不直接用 memoryStore.add()：
 //   add() 的相似合并只按 scope + userId 过滤，**不比对 groupId**
@@ -238,34 +238,49 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
   if (!text) return { ok: false, error: 'empty' };
   if (looksSecret(text) || looksSensitiveAttr(text)) return { ok: false, error: 'sensitive' };
 
-  // 先按单人上限裁剪（腾出空间，保证合并/更新而非堆积）
-  try { enforcePerUser(gid, uid, c); } catch (e) { /* 裁剪失败不阻断写入 */ }
-  // 再按全库总字节上限治理（任务书 B5：不能只限条数而忽略总体积）
-  try { enforceTotalBytes(c); } catch (e) { /* 同上 */ }
-
   const src = PROFILE_SOURCE + ':' + source + ':' + kind;
-  // ① 只在「本群 + 本人」的画像条目里找相似项（严格群隔离）
-  for (const it of listRaw(gid, uid)) {
-    if (memoryStore.similarity(text, it.content) >= 0.8) {
-      // 就地更新同一 id 的条目（upsertRaw 是"追加"，所以先移除旧条目再写回，
-      // 避免同一条画像出现两份）。updatedAt 刷新使其排到最前。
-      it.hits = (it.hits || 0) + 1;
-      it.updatedAt = Date.now();
-      it.lastHitAt = 0;
-      // 再次陈述同一件事 → 视为「再次确认」，刷新最后确认时间（B5 过期淘汰用）
-      it.lastConfirmedAt = Date.now();
-      // 再次陈述同一件事 → 置信度小幅提升；推测类不因重复而变成事实
-      if (String(it.source || '').indexOf(PROFILE_SOURCE + ':stated') === 0) {
-        it.confidence = Math.min(1, (Number(it.confidence) || 0.6) + 0.05);
-      }
-      const keep = Object.assign({}, it);
-      try { memoryStore.remove(it.id, { userId: uid, isAdmin: true }); } catch (e) { /* 移除失败则跳过写回 */ }
-      const w = memoryStore.upsertRaw(keep);
-      return { ok: !!(w && w.ok), merged: true, id: keep.id };
+
+  // ① 先判断「本群 + 本人」是否已有可合并条目。
+  // ⚠ 这一步必须在任何淘汰动作**之前**完成：
+  //   旧实现先跑 enforcePerUser/enforceTotalBytes 再找相似项，结果「重复陈述同一件事」
+  //   也会先被腾位删掉一条（往往是另一条画像），更新变成「新增一条 + 误删一条」。
+  //   正确顺序：先判定能否合并 → 能合并就走更新（不腾位、不淘汰），不能合并才走新增。
+  const hit = findMergable(gid, uid, text);
+
+  if (hit) {
+    // ② 更新既有条目：**不调用 enforcePerUser**。
+    //   更新不占用新名额（条目总数不变），因此不需要、也不允许为了它去淘汰其它条目。
+    const keep = Object.assign({}, hit);
+    keep.hits = (Number(keep.hits) || 0) + 1;
+    keep.updatedAt = Date.now();          // 刷新时间 → 更新后不会被当成"最久未更新"淘汰
+    keep.lastHitAt = 0;
+    // 再次陈述同一件事 → 视为「再次确认」，刷新最后确认时间（过期/淘汰策略用）
+    keep.lastConfirmedAt = Date.now();
+    // 再次陈述同一件事 → 置信度小幅提升；推测类不因重复而变成事实
+    if (String(keep.source || '').indexOf(PROFILE_SOURCE + ':stated') === 0) {
+      keep.confidence = Math.min(1, (Number(keep.confidence) || 0.6) + 0.05);
     }
+    // 容量：按「写入后的预计总量」治理 —— 预计 =（现有画像总量 − 旧条目）+ 本条目。
+    // 旧条目用 protectId 保护，避免被自己的容量治理淘汰掉（否则更新会变成"什么都没写"）。
+    const need = byteLen(keep);
+    if (c.maxTotalBytes && need > c.maxTotalBytes) {
+      // 单条本身就超过总预算 → 淘汰谁都解决不了，明确拒绝，绝不假装写入成功
+      return { ok: false, error: 'over-budget', reason: 'single-item', needBytes: need, maxBytes: c.maxTotalBytes };
+    }
+    const ev = enforceTotalBytes(c, { reserveBytes: need, protectId: keep.id });
+    if (!ev.ok) {
+      // 腾不出足够空间（单条超限 / 淘汰失败）→ 拒绝写入，不留下"写了但超预算"的状态
+      return { ok: false, error: 'over-budget', reason: ev.reason || 'evict-failed', evicted: ev.removed, needBytes: need, maxBytes: c.maxTotalBytes };
+    }
+    // upsertRaw 按 id 覆盖 → 条目总数不变。
+    // （不再"先 remove 再 upsert"：那会在两步之间留下丢数据的窗口，且旧实现依赖的
+    //   "upsertRaw 是追加" 的假设已经在本次修复后不成立，先删后写纯属多余。）
+    const w = memoryStore.upsertRaw(keep);
+    if (!w || !w.ok) return { ok: false, error: (w && w.error) || 'write-failed' };
+    return { ok: true, merged: true, id: keep.id };
   }
 
-  // ② 本群无相似项 → 作为新条目写入（upsertRaw 只追加、不做相似合并，天然不跨群污染）
+  // ③ 本群无相似项 → 新增（upsertRaw 只按 id 覆盖、不做相似合并，天然不跨群污染）
   const now = Date.now();
   const item = {
     id: 'p_' + now.toString(36) + '_' + crypto.randomBytes(4).toString('hex'),
@@ -276,16 +291,39 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
     source: src,
     createdAt: now,
     updatedAt: now,
-    lastConfirmedAt: now,        // B3：最后确认时间（过期/淘汰策略用）
+    lastConfirmedAt: now,        // 最后确认时间（过期/淘汰策略用）
     expireAt: now + c.ttlDays * 86400000,
     confidence: Math.max(0, Math.min(1, Number(confidence) || 0.6)),
     hits: 0,
     lastHitAt: 0,
     storedAt: now,
   };
+  // 单条就超过总预算 → 直接拒绝（不腾位、不淘汰、不写）
+  const need = byteLen(item);
+  if (c.maxTotalBytes && need > c.maxTotalBytes) {
+    return { ok: false, error: 'over-budget', reason: 'single-item', needBytes: need, maxBytes: c.maxTotalBytes };
+  }
+  // 只有「新增」才占新名额，所以单人条数上限只在这里治理
+  try { enforcePerUser(gid, uid, c); } catch (e) { /* 裁剪失败不阻断写入 */ }
+  // 容量治理按「写入后的预计总量」：现有条目的预算 = 总上限 − 本次将占用的字节。
+  // 这样"当前还没超限、但加上这条就超限"的情形也能被治理，而不是等超了才管。
+  const ev = enforceTotalBytes(c, { reserveBytes: need });
+  if (!ev.ok) {
+    return { ok: false, error: 'over-budget', reason: ev.reason || 'evict-failed', evicted: ev.removed, needBytes: need, maxBytes: c.maxTotalBytes };
+  }
   const w = memoryStore.upsertRaw(item);
   return w && w.ok ? { ok: true, merged: false, id: item.id } : { ok: false, error: (w && w.error) || 'write-failed' };
 }
+
+// —— 在「本群 + 本人」的画像里找可合并条目（阈值 0.8，与 memory_store.add 一致）——
+// 只在本群本人范围内比对：跨群内容相似的画像绝不能互相合并（那是画像泄漏的根因）。
+function findMergable(gid, uid, text) {
+  for (const it of listRaw(gid, uid)) {
+    if (memoryStore.similarity(text, it.content) >= 0.8) return it;
+  }
+  return null;
+}
+
 // —— 单人条目上限：超出时删最旧（画像要短小精悍）——
 function enforcePerUser(gid, uid, c) {
   c = c || cfg();
@@ -399,16 +437,40 @@ function allProfiles() {
 /**
  * 画像总字节上限治理：超限优先淘汰「低置信度 + 最久未更新」的条目。
  * 明确陈述（stated，高置信）尽量保留，推测类先走。
- * 只在写入前调用；失败不影响写入本身。
- * @returns {number} 淘汰条数
+ *
+ * ⚠ 关键：治理依据是**本次写入后的预计总量**，不是"当前已经超了才治"。
+ *   调用方通过 opts.reserveBytes 声明"即将写入的这条将占用多少字节"，
+ *   于是现有条目的可用预算 = maxTotalBytes − reserveBytes。
+ *   这样"当前未超限、但再写一条就超"的情形也会被治理，写入后总量恒 ≤ 上限。
+ *
+ * @param {object} c 配置（cfg()）
+ * @param {object} [opts] { reserveBytes:number, protectId:string }
+ *        reserveBytes — 即将写入条目占用的字节（0 表示不预留）
+ *        protectId    — 该 id 的条目不参与淘汰（用于"更新旧条目"：旧条目会被本条覆盖，
+ *                       不应被自己的容量治理删掉）
+ * @returns {{ok:boolean, removed:number, bytes:number, budget:number, reason:string|null}}
+ *   ok=false 表示腾不出足够空间（reason: 'single-item' 单条即超限 / 'evict-failed' 淘汰失败），
+ *   调用方必须据此**拒绝写入**，不能当作成功。
+ *
+ * 只淘汰画像条目（source 以 'profile:' 开头），绝不碰普通长期记忆。
  */
-function enforceTotalBytes(c) {
+function enforceTotalBytes(c, opts) {
   c = c || cfg();
-  if (!c.maxTotalBytes) return 0;
-  const all = allProfiles();
+  opts = opts || {};
+  if (!c.maxTotalBytes) return { ok: true, removed: 0, bytes: 0, budget: Infinity, reason: null };
+
+  const reserve = Math.max(0, Number(opts.reserveBytes) || 0);
+  const protectId = opts.protectId == null ? null : String(opts.protectId);
+  // ① 单条（即将写入的那条）就比总预算还大 → 淘汰任何条目都救不了，直接判失败
+  if (reserve > c.maxTotalBytes) {
+    return { ok: false, removed: 0, bytes: currentBytes(protectId), budget: c.maxTotalBytes - reserve, reason: 'single-item' };
+  }
+
+  const budget = c.maxTotalBytes - reserve;      // 现有（不含被保护条目）允许的字节数
+  const all = allProfiles().filter((x) => !(protectId && String(x.id) === protectId));
   let bytes = 0;
   for (const it of all) bytes += byteLen(it);
-  if (bytes <= c.maxTotalBytes) return 0;
+  if (bytes <= budget) return { ok: true, removed: 0, bytes, budget, reason: null };
 
   const sorted = all.slice().sort((a, b) => {
     const ca = Number(a.confidence) || 0, cb = Number(b.confidence) || 0;
@@ -417,13 +479,27 @@ function enforceTotalBytes(c) {
   });
   let removed = 0;
   for (const it of sorted) {
-    if (bytes <= c.maxTotalBytes) break;
+    if (bytes <= budget) break;
+    // 双保险：只淘汰画像条目，任何情况下都不删普通长期记忆
+    if (String(it.source || '').indexOf(PROFILE_SOURCE) !== 0) continue;
     try {
       const r = memoryStore.remove(it.id, { userId: it.userId, isAdmin: true });
       if (r && r.ok) { bytes -= byteLen(it); removed++; }
     } catch (e) { /* 单条失败不影响其它 */ }
   }
-  return removed;
+  // ② 淘汰完仍然放不下（例如删除全部失败 / 权限被拒）→ 明确失败，由调用方拒绝写入
+  return { ok: bytes <= budget, removed, bytes, budget, reason: bytes <= budget ? null : 'evict-failed' };
+}
+
+/** 当前画像总字节（可排除 protectId 那一条） */
+function currentBytes(protectId) {
+  const pid = protectId == null ? null : String(protectId);
+  let n = 0;
+  for (const it of allProfiles()) {
+    if (pid && String(it.id) === pid) continue;
+    n += byteLen(it);
+  }
+  return n;
 }
 
 // ================= 单条删除 / 更正（任务书 B6）=================
@@ -600,7 +676,8 @@ function stats() {
 module.exports = {
   DEFAULTS, PROFILE_SOURCE,
   cfg, enabled, observe, extract, view, clearProfile, rebuild, injectText, stats,
-  profileKey, listRaw, writeProfile, enforcePerUser, enforceTotalBytes, allProfiles,
+  profileKey, listRaw, writeProfile, findMergable, enforcePerUser, enforceTotalBytes,
+  allProfiles, currentBytes, byteLen,
   removeProfile, correctProfile, looksSensitiveAttr,
   setConfig: (fn) => { module.exports.getCFG = fn; },
   _resetSamples: () => { samples.clear(); },

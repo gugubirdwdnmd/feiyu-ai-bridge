@@ -27,6 +27,7 @@ const OFFLINE = [
   'v154_rich_features.test.js', // V15.4 语音识别/风格优化/表情包检索/生图确认（纯离线，联网检索用注入 mock）
   'v155_video_deepthink.test.js', // V15.5 短视频识别 + 深度思考判定（纯离线，不抓第三方页面）
   'v156_phase1_acceptance.test.js', // 第一阶段验收：群聊决策 + 群友画像 + 检索与成本（对应任务书 30 项）
+  'v157_profile_budget.test.js',    // 画像容量治理专项：满员更新不误删 / 预计总量治理 / 失败不误报成功
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];
