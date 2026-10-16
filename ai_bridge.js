@@ -33,6 +33,9 @@ const voiceAsr = require('./feiyu/voice_asr');
 const styleOpt = require('./feiyu/style_optimizer');
 const memeSearch = require('./feiyu/meme_search');
 const imageConfirm = require('./feiyu/image_confirm');
+// V15.5：短视频识别（只认平台、不抓第三方页面）+ 深度思考判定（本地规则）
+const shortVideo = require('./feiyu/short_video');
+const deepThink = require('./agent/deep_think');
 // V15.3：群友戳一戳（主动戳群友 + 对群友被戳的反应）；与既有 poke（自己被戳）互不重叠
 const pokeSocial = require('./feiyu/poke_social');
 
@@ -256,6 +259,24 @@ const DEFAULT_CONFIG = {
   },
 
   // V15.4 生图确认：识别到生图意图先复述确认，用户说「画」才真的开画
+  // V15.5 深度思考：需要长思考的任务优先用推理模型（用户明确要求，故默认开）
+  deepThink: {
+    enabled: true,
+    minChars: 4,
+    boostContext: true,          // 命中时按 complex 带更多上下文
+    model: '',                   // 空 = 沿用 model.reasoning
+    // 各类触发信号，可单独关
+    explicit: true, reasoning: true, planning: true,
+    code: true, compare: true, math: true, longform: true,
+  },
+
+  // V15.5 短视频识别：只认平台、如实说明，**不抓取第三方页面**（默认开识别、默认关解析）
+  shortVideo: {
+    enabled: true,
+    injectHint: true,
+    parser: { enabled: false, endpoint: '', allowHosts: [], timeoutMs: 10000 },
+  },
+
   imageConfirm: {
     enabled: false,
     ttlMs: 300000,
@@ -3348,6 +3369,14 @@ function pickModel(text, imgSegs) {
       return (CFG.model && CFG.model.normal) || CFG.api.model || MODEL;
     }
     const c = classifyComplexity(text, imgSegs);
+    // V15.5：需要长思考的任务优先走深度思考模型（推理型）。
+    //   注意：judge() 在「有图」时一律返回 not-deep —— reasoner 不支持图片输入，
+    //   把图发给它会返回空内容（之前踩过这个坑），所以有图必须让位给多模态模型。
+    const dt = deepThink.judge(text, { hasImage: !!(imgSegs && imgSegs.length) });
+    if (dt.deep) {
+      log('[深度思考] 命中 ' + dt.signals.join('/') + ' → 推理模型');
+      return dt.model || (CFG.model && CFG.model.reasoning) || CFG.api.reasoningModel || MODEL;
+    }
     if (c === 'complex') return CFG.model.reasoning || CFG.api.reasoningModel || MODEL;
     if (c === 'short') return CFG.model.fast || MODEL;
     return CFG.model.normal || CFG.api.model || MODEL;
@@ -4112,9 +4141,24 @@ async function processReply(ev, o) {
   }
   if ((o.imgSegs || []).length) log(`[图片] 本条 ${o.imgSegs.length} 张，成功 ${imgOK} 张`);
 
+  // V15.5：短视频链接识别。只认平台 + 如实告知，**不抓取第三方页面**（有反爬也可能违规）。
+  //   本条带真实视频段时不注入——那种情况走既有的 video_analysis（元数据 + 首帧视觉理解）。
+  if (videoSegs.length === 0) {
+    const svDetected = shortVideo.detect(o.text);
+    if (svDetected) {
+      log('[短视频] 识别到 ' + svDetected.platform + ' 链接（不抓取，如实告知）');
+      if (shortVideo.cfg().injectHint) parts.push({ type: 'text', text: shortVideo.hint(svDetected) });
+    }
+  }
+
   // 复杂度分级：既决定带入多少上下文，也决定用哪个模型
   const complexity = classifyComplexity(o.text, o.imgSegs);
   let ctxLimit = Number(CFG.context && CFG.context[complexity]) || Number(CFG.group.contextNormal) || 8;
+  // V15.5：命中深度思考 → 按 complex 带上下文（想清楚需要更多前文）
+  const dtJudge = deepThink.judge(o.text, { hasImage: (o.imgSegs || []).length > 0 });
+  if (dtJudge.deep && deepThink.cfg().boostContext) {
+    ctxLimit = Math.max(ctxLimit, Number(CFG.context && CFG.context.complex) || Number(CFG.group.contextComplex) || 15);
+  }
   if (AI_MODE === 'economy') ctxLimit = Math.min(ctxLimit, 4);  // v12 economy：少带上下文省 token（复杂问题仍走 reasoning 模型）
   // —— 被@/回复机器人：必须联系上下句话，上下文保底（杜绝只看着当前一句回答）——
   const botDirected = msgType === 'group' && isBotDirected(o.decision);
@@ -5905,6 +5949,8 @@ voiceAsr.setConfig(() => CFG);
 styleOpt.setConfig(() => CFG);
 memeSearch.setConfig(() => CFG);
 imageConfirm.setConfig(() => CFG);
+shortVideo.setConfig(() => CFG);
+deepThink.setConfig(() => CFG);
 
 // ===== 群聊每日总结：自动定时器（**默认关闭**，必须显式打开且配置白名单才会发群）=====
 let dailySummaryTimer = null;

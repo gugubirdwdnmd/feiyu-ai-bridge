@@ -196,6 +196,33 @@
     "requireForText2Img": true,
     "requireForImg2Img": true
   },
+  "deepThink": {
+    "_说明": "V15.5 深度思考：需要长思考的任务优先用推理模型先想清楚再回答（默认开启）。纯本地规则判定，判定本身不新增任何模型调用。触发信号：显式要求（深度思考/一步步）、推理型（为什么/原因是/推导）、规划型（方案/架构/怎么实现）、代码调试型、对比权衡型（哪个更好/该不该）、计算数学型、长文总结型。命中后换用 model.reasoning 并按 complex 带上下文。**有图时一律让位给多模态模型**（推理模型实测不支持图片输入，发了会返回空内容）。各类信号可单独关；enabled=false 则行为与原来完全一致。",
+    "enabled": true,
+    "minChars": 4,
+    "boostContext": true,
+    "model": "",
+    "explicit": true,
+    "reasoning": true,
+    "planning": true,
+    "code": true,
+    "compare": true,
+    "math": true,
+    "longform": true
+  },
+
+  "shortVideo": {
+    "_说明": "V15.5 短视频识别（识别默认开、解析默认关）。只认平台（抖音/快手/B站/小红书/视频号/微博/西瓜/微视/QQ短视频）并如实告知：目前只看得到标题文案，看不到视频画面，不会编造内容，会提示对方直接发视频或截图。**不会去抓取第三方页面**（有强反爬、也可能违反其条款）。真正能看内容的是 QQ 原生视频段，走既有的 video_analysis（元数据 + 首帧视觉理解）。若要接入合规解析接口，配 parser.endpoint + allowHosts（过 SSRF 校验）；未配置时一律返回看不了，不猜。",
+    "enabled": true,
+    "injectHint": true,
+    "parser": {
+      "enabled": false,
+      "endpoint": "",
+      "allowHosts": [],
+      "timeoutMs": 10000
+    }
+  },
+
 
   "files": {
     "enable": true
