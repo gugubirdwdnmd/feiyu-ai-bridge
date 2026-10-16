@@ -211,5 +211,12 @@
     "defaultSymbol": "BTC",
     "defaultUseAI": true,
     "timeoutMs": 15000
-  }
+  },
+
+  "_feiyuV15": "肥鱼 V15 行动型助手（任务/浏览器/通知/TTS/QQ空间）。以下均为【顶层键】（不是嵌套 'feiyu' 段），默认全关、真实能力默认关闭、mock 仅占位。详见 feiyu/V15_GUIDE.md。",
+  "taskManager": { "enabled": false, "maxConcurrent": 3, "maxRetries": 2, "maxSteps": 10, "taskTimeoutMs": 300000, "runWindowMs": 60000, "stepGapMs": 200, "_说明": "任务生命周期（创建/调度/暂停/取消/超时）。未注入真实执行器(deps.runTask)时仅做生命周期登记（executed=false），不假称已执行任何工作。取消/超时通过 AbortSignal 通知执行器；忽略信号的长任务不会被标记为已停止（executionStopped=false）。字段与代码默认值一致。" },
+  "browser": { "enabled": false, "provider": "mock", "allow": [], "timeoutMs": 30000, "allowRealBrowse": false, "_说明": "浏览器自动化默认关。provider=mock 不依赖任何第三方库。真实 Playwright 需 allowRealBrowse=true 且由宿主注入 playwright 实例；默认关闭，且仓库内零第三方依赖、未安装浏览器库，真实浏览路径【未经端到端验证 UNVERIFIED】，不保证绝对安全。" },
+  "notifier": { "enabled": false, "targets": [], "quietHours": null, "rateLimitPerTarget": 10, "rateWindowMs": 60000, "dedupWindowMs": 300000, "maxRetries": 3, "retryBaseMs": 30000, "maxQueue": 500, "sentRetentionMs": 86400000, "deadRetentionMs": 604800000, "_说明": "主动通知默认关。targets 留空则回退 admin.qq；启用后仅向授权名单内的主人 QQ 发送，传入名单外 target 会在通知模块内部被拒（target-not-allowed / target-invalid），不依赖上层 admin 检查。运行时调用 notifier.setTargets() 会同步刷新白名单（已撤销目标立即失效）。" },
+  "tts": { "enabled": false, "provider": "mock", "maxBytes": 1048576, "maxDurationMs": 30000, "format": "mp3", "outDir": "workspace/feiyu/tts", "_说明": "语音默认关。provider=mock 仅生成占位音频（MP3 帧头+静音体），不是真实中文朗读，仅供格式/体积校验；真实语音需另行授权并配置 local/cloud 引擎。" },
+  "qzone": { "enabled": false, "realEnabled": false, "maxPerDay": 3, "_说明": "QQ空间默认关。无合规开放发布接口，仅预览/模拟发布；realEnabled 默认 false，即便 true 且无合规渠道也拒绝真实发布。" }
 }

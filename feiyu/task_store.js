@@ -27,6 +27,9 @@ class JsonStore {
     this._loadError = null;      // 'enoent' | 'corrupt' | 'format' | null
     this._lastError = null;      // 原始 Error 对象（若发生）
     this._corruptBackup = null;  // 损坏时保留的原文件副本路径
+    this._corruptKind = null;    // 'corrupt' | 'format'
+    this._quarantined = false;   // V15.1：备份失败 → 拒绝 save() 覆盖原文件
+    this._quarantineReason = null;
   }
 
   /**
@@ -82,7 +85,10 @@ class JsonStore {
   /**
    * 将损坏/未知格式的原数据保留为副本，避免静默丢失。
    * 副本命名：<file>.corrupt-<ISO时间戳>-<随机hex>
-   * 若副本写入失败（磁盘满等），记录到 _lastError 但不影响从空启动。
+   * V15.1：若副本写入失败（磁盘满、只读、权限等），进入【隔离模式】——
+   *   原文件仍留在磁盘上，但本实例拒绝再对其执行 save()，以免"从空启动"把唯一的
+   *   原始数据覆盖掉。调用方须先人工处理该文件（或显式 discardQuarantine()）。
+   * @returns {boolean} 副本是否成功写入
    */
   _preserveCorrupt(raw, kind) {
     try {
@@ -92,9 +98,14 @@ class JsonStore {
       fs.writeFileSync(backup, raw);
       this._corruptBackup = backup;
       this._corruptKind = kind;
+      return true;
     } catch (e) {
       this._lastError = e;
-      // 副本失败也不抛，从空启动优先
+      // 副本失败：不能"当作空覆盖"。置隔离标志，save() 将拒绝写此文件。
+      this._quarantined = true;
+      this._quarantineReason = '损坏数据备份失败（' + kind + '），已拒绝覆盖原文件以防数据丢失: ' +
+        String((e && e.message) || e).slice(0, 200);
+      return false;
     }
   }
 
@@ -127,10 +138,19 @@ class JsonStore {
    * - 临时文件命名包含进程 pid 与随机串，避免并发/重入时的冲突与残留。
    * - 写临时文件失败：清理 tmp 并向上抛（调用方感知写入失败，不残留半截文件）。
    * - rename 失败：清理 tmp，保留原文件不变，向上抛。
+   * - V15.1 隔离模式：若 load() 时损坏数据备份失败，本方法【拒绝写入】，
+   *   避免把唯一的原始损坏数据用空数组覆盖（数据丢失）。
    * 返回写入条目数。
    */
   save() {
     this.load();
+    if (this._quarantined) {
+      const err = new Error('JsonStore.save: ' + (this._quarantineReason || '处于隔离模式') +
+        '。请先人工备份/处理该文件后再写入。');
+      err.code = 'EQUARANTINE';
+      this._lastError = err;
+      throw err;
+    }
     const arr = this.list();
     const t = nowMs();
     for (const it of arr) if (!it.storedAt) it.storedAt = t;
@@ -159,6 +179,15 @@ class JsonStore {
   corruptBackup() { return this._corruptBackup || null; }
   /** 最近一次原始错误对象（若有） */
   lastError() { return this._lastError; }
+  /** V15.1：损坏数据备份失败时为 true —— 此时 save() 会拒绝覆盖原文件 */
+  isQuarantined() { return !!this._quarantined; }
+  /** 隔离原因（可写入日志/告警） */
+  quarantineReason() { return this._quarantineReason || null; }
+  /**
+   * 显式解除隔离（仅供运维在已人工备份原文件后调用）。
+   * 不建议程序自动调用——那会重新引入"静默覆盖原始数据"的风险。
+   */
+  discardQuarantine() { this._quarantined = false; this._quarantineReason = null; }
 }
 
 module.exports = { JsonStore, nowMs };

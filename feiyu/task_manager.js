@@ -166,6 +166,8 @@ class TaskManager {
   }
 
   // ---------- 可取消执行上下文 ----------
+  // V15.1：提供真正的 AbortSignal，让"可中断"的执行器（fetch/http/子进程）能立即中断；
+  // 同时如实区分"已请求取消"与"已确认停止"——忽略信号的长任务不得被当作已停止。
   _makeCtx(t) {
     const ctx = {
       taskId: t.id,
@@ -173,14 +175,43 @@ class TaskManager {
       cancelled: false,
       pauseRequested: false,
       timedOut: false,
-      // 供执行器轮询：是否已取消 / 是否已请求暂停
-      isCancelled() { return ctx.cancelled; },
-      isPauseRequested() { return ctx.pauseRequested; },
-      // 由 cancel()/pause()/超时 设置
-      cancel() { ctx.cancelled = true; },
-      pause() { ctx.pauseRequested = true; },
+      // 已请求取消的时刻（尚未确认底层停止）
+      cancelRequestedAt: null,
+      // 底层执行是否已确认停止（true=确已停止；false/null=仅请求了取消，底层可能仍在跑）
+      executionStopped: null,
+      // 取消原因：'user' | 'timeout'
+      cancelReason: null,
     };
+    // 真实中断信号：Node 内置 AbortController，零第三方依赖。
+    // 执行器应把它透传给 fetch/http.request/spawn，从而真正中断长耗时操作。
+    try {
+      const ac = new AbortController();
+      ctx.abortController = ac;
+      ctx.signal = ac.signal;
+      ctx.abort = (reason) => { try { ac.abort(reason || 'cancelled'); } catch (e) {} };
+    } catch (e) {
+      ctx.abortController = null; ctx.signal = null; ctx.abort = () => {};
+    }
+    // 供执行器轮询：是否已取消 / 是否已请求暂停
+    ctx.isCancelled = () => ctx.cancelled;
+    ctx.isPauseRequested = () => ctx.pauseRequested;
+    // 由 cancel()/pause()/超时 设置
+    ctx.cancel = (reason) => {
+      ctx.cancelled = true;
+      if (!ctx.cancelRequestedAt) ctx.cancelRequestedAt = nowMs();
+      if (reason) ctx.cancelReason = reason;
+      ctx.abort(ctx.cancelReason || 'cancelled');   // 发出真实中断信号
+    };
+    ctx.pause = () => { ctx.pauseRequested = true; ctx.abort('paused'); };
     return ctx;
+  }
+
+  /** 供 cancel()/超时 复用：给运行中任务发中断信号并记录"已请求"。 */
+  _signalCancel(id, reason) {
+    const ctx = this._ctxs.get(id);
+    if (!ctx) return false;
+    ctx.cancel(reason);
+    return true;
   }
 
   // ---------- 控制 ----------
@@ -217,19 +248,28 @@ class TaskManager {
     if (!t) return { ok: false, error: '任务不存在' };
     if (t.status === 'completed' || t.status === 'cancelled') return { ok: false, error: '已终态，无需取消' };
     const wasRunning = t.status === 'running';
+    const signalled = this._signalCancel(id, 'user');   // 先发真实中断信号（AbortSignal）
     t.status = 'cancelled';
     t.finishedAt = nowMs();
     t.updatedAt = nowMs();
-    t.history.push({ at: nowMs(), ev: 'cancelled' });
-    const ctx = this._ctxs.get(id);
-    if (ctx) ctx.cancel(); // 信号运行中执行器尽快于步骤边界停止
+    // V15.1：如实区分"已请求取消"与"已确认停止"。
+    // 未接入执行器（未在运行中）视为无需中断；运行中则先标记 cancelRequested，
+    // 待执行器真正退出时由 _finalizeCancelled 置 executionStopped=true。
+    t.cancelRequested = true;
+    t.cancelRequestedAt = nowMs();
+    t.executionStopped = !wasRunning;
+    t.history.push({ at: nowMs(), ev: 'cancelled', requested: true, signalled });
     this.store.set(t); this._persist(t);
     this._emit('cancelled', t);
     return {
       ok: true, task: t,
+      cancelRequested: true,
+      executionStopped: !!t.executionStopped,
       note: wasRunning
-        ? '已请求取消。若底层执行当前正在运行中，将尽快于步骤边界停止；无法立即中断的底层操作（如已发起的网络请求、子进程）可能仍会执行完毕，本系统不保证瞬时中止。'
-        : '已取消（任务尚未开始执行）。',
+        ? '已【请求】取消（已向执行器发出中断信号）。响应信号的执行器会尽快停止；'
+          + '无法立即中断的底层操作（如已发起的网络请求、子进程）可能仍会执行完毕，'
+          + '本系统不保证瞬时中止，也不会把它标记为"已停止"（executionStopped=false）。'
+        : '已取消（任务尚未开始执行，无底层动作需要中断）。',
     };
   }
   setGlobalPause(on) { this.globalPaused = !!on; return { ok: true, globalPaused: this.globalPaused }; }
@@ -285,6 +325,21 @@ class TaskManager {
     return true;
   }
 
+  /**
+   * V15.1：在步骤边界观察到取消信号 ⇒ 底层执行循环确实退出了。
+   * 无论 status 是否已被 cancel() 置为 'cancelled'，都要补记"已确认停止"，
+   * 否则"仅请求取消"与"真正停止"将永远无法区分。
+   */
+  _confirmStoppedIfCancelled(t) {
+    if (t.status !== 'cancelled') this._finalizeCancelled(t);
+    else if (t.executionStopped !== true) {
+      t.executionStopped = true;
+      t.stoppedAt = nowMs();
+      t.history.push({ at: nowMs(), ev: 'stop-confirmed' });
+      this.store.set(t); this._persist(t);
+    }
+  }
+
   async _runSteps(t, ctx) {
     const now = nowMs();
     if (!this.executor) {
@@ -301,13 +356,13 @@ class TaskManager {
     }
     try {
       for (let i = t.stepIndex; i < t.steps.length; i++) {
-        if (ctx.isCancelled()) { if (t.status !== 'cancelled') this._finalizeCancelled(t); return; }
+        if (ctx.isCancelled()) { this._confirmStoppedIfCancelled(t); return; }
         if (ctx.isPauseRequested()) { if (t.status !== 'paused') this._finalizePaused(t); return; }
         if (i >= this.cfg.maxSteps) { t.error = '超过步骤上限'; break; }
         const step = t.steps[i];
         const r = await this._withTimeout(this.executor(step, t, ctx), this.cfg.taskTimeoutMs, ctx);
         // 步骤边界再次检查：已被取消/暂停则停止推进
-        if (ctx.isCancelled()) { if (t.status !== 'cancelled') this._finalizeCancelled(t); return; }
+        if (ctx.isCancelled()) { this._confirmStoppedIfCancelled(t); return; }
         if (ctx.isPauseRequested()) { if (t.status !== 'paused') this._finalizePaused(t); return; }
         t.stepIndex = i + 1;
         t.completedSteps = i + 1;
@@ -319,6 +374,11 @@ class TaskManager {
             t.executed = true;
             t.timedOut = true;
             t.error = (r && r.error) || '步骤执行超时';
+            // V15.1：已向执行器发出中断信号，但若执行器忽略信号则底层可能仍在运行，
+            // 如实记录"未确认停止"，不得声称已停止。
+            t.cancelRequested = true;
+            t.executionStopped = false;
+            t.error += '（已发出中断信号；若执行器忽略信号，底层操作可能仍在运行）';
             t.finishedAt = nowMs();
             t.updatedAt = nowMs();
             this.store.set(t); this._persist(t);
@@ -342,7 +402,7 @@ class TaskManager {
         }
         if (this.cfg.stepGapMs) await new Promise((s) => setTimeout(s, this.cfg.stepGapMs));
       }
-      if (ctx.isCancelled()) { if (t.status !== 'cancelled') this._finalizeCancelled(t); return; }
+      if (ctx.isCancelled()) { this._confirmStoppedIfCancelled(t); return; }
       if (ctx.isPauseRequested()) { if (t.status !== 'paused') this._finalizePaused(t); return; }
       if (t.status === 'running') {
         t.status = 'completed';
@@ -366,11 +426,17 @@ class TaskManager {
     }
   }
 
+  /** 执行器已真正退出（观察到取消信号）→ 此刻才可确认"已停止"。 */
   _finalizeCancelled(t) {
+    const wasCancelled = t.status === 'cancelled';
     t.status = 'cancelled';
     t.updatedAt = nowMs();
     if (!t.finishedAt) t.finishedAt = nowMs();
-    t.history.push({ at: nowMs(), ev: 'cancelled-mid' });
+    // V15.1：执行器循环在此返回 ⇒ 底层确实已停止
+    t.executionStopped = true;
+    t.cancelRequested = true;
+    t.stoppedAt = nowMs();
+    t.history.push({ at: nowMs(), ev: 'cancelled-mid', executionStopped: true, alreadyCancelled: wasCancelled });
     this.store.set(t); this._persist(t);
     this._emit('cancelled', t);
   }
@@ -412,7 +478,12 @@ class TaskManager {
       let done = false;
       const timer = setTimeout(() => {
         if (done) return; done = true;
-        if (ctx) { ctx.timedOut = true; } // 仅标记超时；不调用 cancel()，否则会与"取消"语义混淆
+        if (ctx) {
+          ctx.timedOut = true;
+          // V15.1：超时同样发出真实中断信号，让响应信号的执行器能立即中断。
+          // 不置 ctx.cancelled —— 超时与"用户取消"是两种不同语义，不可混淆。
+          if (typeof ctx.abort === 'function') { try { ctx.abort('timeout'); } catch (_) {} }
+        }
         resolve({ ok: false, error: '步骤超时(' + ms + 'ms)', timedOut: true });
       }, ms);
       Promise.resolve(p).then(

@@ -5501,7 +5501,9 @@ try {
     adminList: (CFG.admin && CFG.admin.qq) || [],
     sendToMaster: async (text, opts) => {
       const list = (CFG.admin && CFG.admin.qq) || [];
-      const targets = (opts && opts.target) ? [String(opts.target)] : list;
+      // 纵深防御（要求④）：即便上游传入 opts.target，也只向配置的主人 QQ 列表发送；越权 target 被忽略
+      const override = (opts && opts.target != null) ? String(opts.target).trim() : null;
+      const targets = (override && list.map(String).indexOf(override) >= 0) ? [override] : list;
       for (const q of targets) {
         try { await napcatCall('send_private_msg', { user_id: Number(q), message: String(text) }); } catch (e) {}
       }

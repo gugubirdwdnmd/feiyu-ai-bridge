@@ -9,7 +9,11 @@
 //   - _check 在白名单之外，额外调用 url_safety.isSafeUrl 拒绝内网/环回/链路本地/云元数据/带凭据 URL；
 //   - Playwright 真实浏览默认关闭，必须显式 allowRealBrowse 才启用；且每个请求（含重定向、子资源）
 //     都经 url_safety.resolveTarget 做「DNS 解析后 IP 分类」校验，阻断 DNS 重绑定；
-//   - 无法保证绝对安全（Playwright 不支持对任意主机做 IP 固定）时，保持 Playwright 关闭、只留 mock。
+//   - 本项目为「零第三方依赖」，仓库内并未安装 playwright/puppeteer，故真实浏览路径在仓库内
+//     属于【未验证 UNVERIFIED】：仅在宿主另行注入兼容的 playwright 实例且显式 allowRealBrowse 时才可能启用，
+//     且 Playwright 不支持对任意主机做 IP 固定，不保证绝对安全——默认保持关闭、只留 mock。
+//   - 拦截 API 采用与 chromium.launch() 同一套的 Playwright page.route() 接口（非 Puppeteer 的
+//     setRequestInterception/req.continue），并在缺少兼容实例时 fail-safe 拒绝。
 
 const fs = require('fs');
 const path = require('path');
@@ -78,23 +82,30 @@ class BrowserAdapter {
    * 「DNS 解析后 IP 分类」校验，阻断内网/环回/链路本地/云元数据与 DNS 重绑定。
    * 注意：本实现对每个请求重新解析校验，属尽力而为；Playwright 不支持对任意主机做
    * IP 固定，故真实浏览默认关闭，仅当操作者明确接受残留风险时才开启。
+   * 【未验证 UNVERIFIED】本项目零第三方依赖，仓库未安装浏览器库，此路径未经端到端验证；
+   * 启用需宿主另行注入兼容的 playwright 实例并显式 allowRealBrowse。
+   * 拦截 API 采用 Playwright 的 page.route()（与 chromium.launch() 同一套），非 Puppeteer 风格。
    */
   async _openPlaywright(url) {
+    // 能力守卫：要求注入对象具备 Playwright 形态的 chromium.launch，否则 fail-safe 拒绝（绝不调用未知 API）
+    if (!this._pw || typeof this._pw.chromium !== 'object' || typeof this._pw.chromium.launch !== 'function') {
+      return { ok: false, error: '真实浏览不可用：未注入兼容的浏览器实例（chromium.launch），已 fail-safe 拒绝' };
+    }
     let browser;
     try {
       browser = await this._pw.chromium.launch({ args: ['--no-sandbox'] });
       const page = await browser.newPage();
       let blocked = null;
-      await page.setRequestInterception(true);
-      page.on('request', async (req) => {
-        const u = req.url();
-        if (blocked) { try { await req.abort(); } catch (_) {} return; }
-        if (!/^https?:/i.test(u)) { try { await req.continue(); } catch (_) {} return; }
+      // Playwright 拦截 API：page.route + route.continue()/abort()（与上面的 chromium.launch 同一套库）
+      await page.route('**/*', async (route) => {
+        const u = route.request().url();
+        if (blocked) { try { await route.abort(); } catch (_) {} return; }
+        if (!/^https?:/i.test(u)) { try { await route.continue(); } catch (_) {} return; }
         try {
           const r = await resolveTarget(u, { lookup: this._dnsLookup });
-          if (!r.ok) { blocked = u + ' => ' + r.why; try { await req.abort(); } catch (_) {} return; }
-        } catch (e) { /* 解析异常按保守拒绝：阻断该请求 */ blocked = u + ' => 解析异常'; try { await req.abort(); } catch (_) {} return; }
-        try { await req.continue(); } catch (_) {}
+          if (!r.ok) { blocked = u + ' => ' + r.why; try { await route.abort(); } catch (_) {} return; }
+        } catch (e) { /* 解析异常按保守拒绝：阻断该请求 */ blocked = u + ' => 解析异常'; try { await route.abort(); } catch (_) {} return; }
+        try { await route.continue(); } catch (_) {}
       });
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.timeoutMs });
       if (blocked) { await browser.close(); return { ok: false, error: '导航被 SSRF 防护拦截: ' + blocked }; }
