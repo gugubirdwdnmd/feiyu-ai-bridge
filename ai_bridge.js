@@ -28,6 +28,8 @@ const dailySummary = require('./memory/daily_summary');
 // V15.2：群友轻量画像（复用 memory_store，不另建存储）+ 群聊智能决策（纯本地规则）
 const groupProfile = require('./memory/group_profile');
 const groupDecision = require('./agent/group_decision');
+// V15.3：群友戳一戳（主动戳群友 + 对群友被戳的反应）；与既有 poke（自己被戳）互不重叠
+const pokeSocial = require('./feiyu/poke_social');
 
 // ================= 配置 =================
 // API Key 不写死在代码里：优先环境变量 DEEPSEEK_API_KEY，其次同目录 secrets.json
@@ -400,6 +402,39 @@ const DEFAULT_CONFIG = {
       '你再戳，我就…就回你一句！',
       '哎哟，谁在戳我👀',
     ],
+  },
+
+  // ===== V15.3：群友戳一戳（**默认全关**，与上面 poke「自己被戳」互不重叠）=====
+  // ① pokeOthers：管理员在群里发「/戳 @某人」让机器人去戳群友。
+  //    必须明确 @ 到具体成员（不猜昵称），带冷却/每小时/每日三重限频，
+  //    且不戳机器人自己、不戳发起者、不戳管理员。
+  // ② react：对「群友戳群友」事件的反应（可回戳被戳者、可接话）。
+  //    被戳者是机器人自己时一律让位给上面的 poke 逻辑，不会重复回。
+  pokeOthers: {
+    _说明: 'V15.3 群友戳一戳。默认全关。仅群聊、默认仅管理员可触发「/戳 @某人」；'
+      + '必须明确@到人（不猜昵称，避免戳错）；带冷却与每小时/每日限频防刷屏；不戳机器人自己、不戳发起者、不戳管理员。'
+      + 'react 段用于响应「群友戳群友」，可回戳+接话，纯本地决策不新增模型调用（useAI 默认关）。',
+    enabled: false,
+    adminOnly: true,
+    cooldownMs: 60000,
+    maxPerHour: 10,
+    maxPerDay: 30,
+    react: {
+      enabled: false,
+      mode: 'poke+text',        // 'off' | 'poke' | 'text' | 'poke+text'
+      cooldownMs: 30000,
+      reactMinIntervalGroupMs: 180000,
+      maxReactPerHour: 20,
+      useAI: false,
+      aiMaxTokens: 80,
+      texts: [
+        '别戳了别戳了，人家在忙呢',
+        '你们戳来戳去，我看着都疼',
+        '再戳我要收费了啊',
+        '互相戳，也不嫌手痒',
+        '这波啊，这波是戳不动了',
+      ],
+    },
   },
 
   // 主动聊天：按计划在群里主动发开场白（默认关，避免刷屏；要开在 ai_config.json 置 enabled=true）
@@ -4399,6 +4434,42 @@ async function handleUserCommand(text, ctx) {
     return '用法：/记忆 | /记忆搜索 关键词 | /记忆删除 关键词 | /记忆清空确认 | /记忆状态';
   }
 
+  // ============ V15.3 戳一戳群友（/戳 @某人）============
+  // 真实动作由本函数发起（group_poke），决策与限频在 feiyu/poke_social 内部完成。
+  if (head === '/戳' || head === '/戳一戳') {
+    const ps = CFG.pokeOthers || {};
+    if (!isGroup) return '戳一戳只能在群里用。';
+    if (!ps.enabled) return '戳群友功能已关闭（ai_config.json 里 pokeOthers.enabled=true 才启用）。';
+    const atTarget = pokeSocial.pickAtTarget(ev && ev.message);
+    const decision = pokeSocial.decidePokeOther({
+      groupId: ev.group_id,
+      actorId: userId,
+      targetId: atTarget,
+      selfId: ev.self_id,
+      isAdmin: isAdmin(userId),
+      isTargetAdmin: atTarget ? isAdmin(atTarget) : false,
+      segs: ev && ev.message,
+    });
+    if (!decision.ok) {
+      const why = {
+        'admin-only': '只有管理员能用这个命令。',
+        'need-at': '用法：/戳 @某人（必须明确@到人，我不会靠猜昵称去戳，避免戳错人）。',
+        self: '不能戳我自己。',
+        'self-poke': '不能戳你自己。',
+        'target-is-admin': '不戳管理员（避免骚扰主人）。',
+        cooldown: '刚戳过Ta了，等一会儿再来。',
+        'rate-hour': '你戳得有点频繁，歇会儿吧。',
+        'rate-day': '今天的戳一戳额度用完了，明天再来。',
+      }[decision.reason] || ('戳不了：' + decision.reason);
+      log(`[戳友] 群${maskId(ev.group_id)} 用户${maskId(userId)} 被拒: ${decision.reason}`);
+      return why;
+    }
+    pokeSocial.commitPoke(decision);
+    await napcatCall('group_poke', { group_id: Number(ev.group_id), target_id: Number(decision.target) });
+    log(`[戳友] 群${maskId(ev.group_id)} 管理员${maskId(userId)} 戳了 ${maskId(decision.target)}`);
+    return '戳了～';
+  }
+
   // ============ V15.2 群友画像管理（复用既有命令风格）============
   // 白名单子命令，避免误劫持将来可能新增的 /画像xxx 指令
   // 隐私：默认只能看/清自己的画像；看别人需管理员；默认不向群内公开。
@@ -4531,6 +4602,29 @@ async function handleAiCommand(text, ctx) {
     CFG.poke.enabled = (v === 'on');
     return `已${v === 'on' ? '开启' : '关闭'}戳一戳回应。`;
   }
+  // V15.3：戳群友（/戳 @某人）与「群友被戳反应」两个独立开关
+  if (sub === 'pokeothers' || sub === '戳友') {
+    const po = CFG.pokeOthers || (CFG.pokeOthers = {});
+    if (!po.react) po.react = {};
+    const which = (parts[2] || '').toLowerCase();
+    const v = (parts[3] || '').toLowerCase();
+    if (which === 'react' && (v === 'on' || v === 'off')) {
+      po.react.enabled = (v === 'on');
+      return `已${v === 'on' ? '开启' : '关闭'}「群友被戳」反应（模式 ${po.react.mode || 'poke+text'}）。`;
+    }
+    if ((v === 'on' || v === 'off')) {
+      po.enabled = (v === 'on');
+      return `已${v === 'on' ? '开启' : '关闭'}戳群友（群里发 /戳 @某人${po.adminOnly !== false ? '，仅管理员可用' : ''}）。`;
+    }
+    const ps = pokeSocial.cfg();
+    return [
+      `【戳群友】主动戳：${po.enabled ? '开' : '关'}${po.adminOnly !== false ? '（仅管理员）' : ''}`,
+      `  冷却 ${Math.round(ps.cooldownMs / 1000)}s | 每小时 ${ps.maxPerHour} 次 | 每日 ${ps.maxPerDay} 次`,
+      `【群友被戳反应】${po.react && po.react.enabled ? '开' : '关'} | 模式 ${ps.reactMode}`,
+      `  对冷却 ${Math.round(ps.reactCooldownMs / 1000)}s | 群接话间隔 ${Math.round(ps.reactMinIntervalGroupMs / 60000)}min | 每小时 ${ps.maxReactPerHour} 次 | AI现编 ${ps.useAI ? '开' : '关'}`,
+      '用法：/ai pokeothers on | off | react on | off',
+    ].join('\n');
+  }
   if (sub === 'mood') {
     const arg = parts.slice(2).join(' ').trim();
     if (!arg || arg === 'clear') { RUNTIME_MOOD = ''; return '已清除临时心情/状态。'; }
@@ -4549,8 +4643,8 @@ async function handleAiCommand(text, ctx) {
     if (!img.enabled) return '生图当前未启用（ai_config.json 里 image.enabled=false）。配好 endpoint/model/apiKey 后即可用。';
     return `生图已启用：endpoint=${img.endpoint} model=${img.model || '(默认)'} size=${img.size || '默认'}。`;
   }
-  if (sub === 'help' || !sub) return '可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|mood|reload|image\n群聊总结与记忆：/今日总结 | /昨日总结 | /记忆 | /记忆搜索 词 | /记忆删除 词 | /记忆清空确认 | /记忆状态';
-  return '未知命令。可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|mood|reload|image';
+  if (sub === 'help' || !sub) return '可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|pokeothers|mood|reload|image\n群聊总结与记忆：/今日总结 | /昨日总结 | /记忆 | /记忆搜索 词 | /记忆删除 词 | /记忆清空确认 | /记忆状态\n戳群友：/戳 @某人（默认关，见 /ai pokeothers）| 群友画像：/画像 | /画像状态 | /画像清空确认';
+  return '未知命令。可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|pokeothers|mood|reload|image';
 }
 
 // ———— 聚合：同群 + 同人 + 连续发送 → 合并成一次请求 ————
@@ -5374,9 +5468,59 @@ async function handlePoke(ev) {
 
 async function handleNotice(ev) {
   // OneBot 11：戳一戳事件为 post_type=notice, notice_type=notify, sub_type=poke
-  if (ev.notice_type === 'notify' && ev.sub_type === 'poke' && Number(ev.target_id) === Number(ev.self_id)) {
-    await handlePoke(ev);
+  if (ev.notice_type === 'notify' && ev.sub_type === 'poke') {
+    const isSelf = Number(ev.target_id) === Number(ev.self_id);
+    // 被戳的是机器人自己 → 走既有 poke 逻辑（戳回去 + 俏皮话）
+    if (isSelf) {
+      await handlePoke(ev);
+      return;
+    }
+    // V15.3：被戳的是**群友**（群友戳群友）→ 可选反应；默认关闭
+    if (ev.group_id != null && ev.group_id !== '') {
+      try { await handleOtherPoke(ev); }
+      catch (e) { log('[戳友] 反应异常（已忽略）: ' + String((e && e.message) || e).slice(0, 60)); }
+    }
   }
+}
+
+// —— V15.3：对「群友戳群友」的反应（回戳被戳者 / 接话）——
+// 与 handlePoke 完全分离：那条只管"机器人自己被戳"，本函数只管"群友被戳"。
+async function handleOtherPoke(ev) {
+  const decision = pokeSocial.decideReactToOtherPoke({
+    groupId: ev.group_id,
+    actorId: ev.user_id,
+    targetId: ev.target_id,
+    selfId: ev.self_id,
+  });
+  if (!decision.ok) return false;
+  pokeSocial.commitReact(decision);
+
+  const c = pokeSocial.cfg();
+  // 回戳被戳的人（帮他不亏）
+  if (decision.action === 'poke' || decision.action === 'poke+text') {
+    try {
+      await napcatCall('group_poke', { group_id: Number(ev.group_id), target_id: Number(decision.target) });
+    } catch (e) { /* 回戳失败不阻断接话 */ }
+  }
+
+  // 接话（默认仅在群间隔允许时；文案优先固定池，useAI 开启才现编）
+  if (decision.speaks && (decision.action === 'text' || decision.action === 'poke+text')) {
+    let line = '';
+    if (c.useAI) {
+      try {
+        line = await genText(
+          `群里有人被戳了一下。用真人口吻接一句短话，一两句，别太长，别每句都带表情。`,
+          { system: POKE_SYSTEM, model: CFG.api.model, maxTokens: c.aiMaxTokens, temperature: 1.0 }
+        );
+      } catch (e) { line = ''; }
+    }
+    if (!line) line = pokeSocial.pickText(c);
+    const out = [{ type: 'at', data: { qq: String(decision.target) } }, { type: 'text', data: { text: ' ' + line } }];
+    try { await napcatCall('send_group_msg', { group_id: Number(ev.group_id), message: out }); }
+    catch (e) { /* 发送失败不影响已完成的回戳 */ }
+  }
+  log(`[戳友] 群${maskId(ev.group_id)} ${maskId(ev.user_id)} 戳了 ${maskId(decision.target)} → ${decision.action}`);
+  return true;
 }
 
 // ================= 主动聊天（定时向群发开场白）=================
@@ -5557,6 +5701,7 @@ groupLog.setConfig(() => CFG);
 memoryStore.setConfig(() => CFG);
 dailySummary.setConfig(() => CFG);
 groupProfile.setConfig(() => CFG);
+pokeSocial.setConfig(() => CFG);
 
 // ===== 群聊每日总结：自动定时器（**默认关闭**，必须显式打开且配置白名单才会发群）=====
 let dailySummaryTimer = null;
@@ -5669,6 +5814,9 @@ if (CFG.stats.enable) { const t = setInterval(saveStats, 60000); if (t.unref) t.
     try { runProactiveOnce(); } catch (e) {}
     try { const f = require('./tools/feiyu').getFeiyu(); if (f) await f.tick(); } catch (e) {}
   }, 60 * 1000); if (t.unref) t.unref(); }
+// V15.3：定期清理戳一戳的内存计数（限频用），避免长时间运行无限增长。
+// 只清理过期计数，不影响任何用户数据（这些计数本来就不落盘）。
+{ const t = setInterval(() => { try { pokeSocial.sweep(); } catch (e) {} }, 10 * 60 * 1000); if (t.unref) t.unref(); }
 
 server.listen(LISTEN_PORT, '127.0.0.1', () => {
   log('='.repeat(46));

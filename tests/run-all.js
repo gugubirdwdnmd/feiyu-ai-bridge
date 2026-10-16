@@ -23,6 +23,7 @@ const OFFLINE = [
   'feature_summary_memory.test.js',
   'feiyu_upgrade.test.js',
   'v152_group_intel.test.js',   // V15.2 群聊智能决策 + 群友轻量画像（纯离线）
+  'v153_poke.test.js',          // V15.3 群友戳一戳（纯离线，不发真实戳一戳）
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];
