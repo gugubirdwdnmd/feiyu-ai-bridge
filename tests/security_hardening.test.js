@@ -440,7 +440,12 @@ async function postEvent(port, bodyStr, headers) {
 
     // Windows 大小写 & 分隔符差异
     const upper = T.safeVideoPath(allowed.toUpperCase());
-    ok('Windows 大小写差异：仍正确识别为白名单内', upper === allowed || upper === allowed.toUpperCase(), upper);
+    // 大小写：Windows 文件系统大小写不敏感，应仍能识别为白名单内；
+    // 其余平台(如 Linux)大小写敏感，大写路径实际不存在 → 保守拒绝(null)，两者均属正确行为
+    const upperOk = process.platform === 'win32'
+      ? (upper === allowed || upper === allowed.toUpperCase())
+      : (upper === null);
+    ok('大小写差异：平台相关处理正确（Windows 识别 / 其他平台保守拒绝）', upperOk, upper);
     const fwd = allowed.replace(/\\/g, '/');
     const fwdRes = T.safeVideoPath(fwd);
     ok('正斜杠分隔符：行为正确', fwdRes === allowed || fwdRes === fwd, fwdRes);
@@ -549,7 +554,9 @@ async function postEvent(port, bodyStr, headers) {
     ok('isUnderDir：白名单内子文件 → true', T.isUnderDir(path.join(WS, 'a.txt'), base) === true);
     ok('isUnderDir：白名单外同级目录（同名前缀）文件 → false', T.isUnderDir(path.join(b.tmp, 'workspace_backup', 'a.txt'), base) === false);
     ok('isUnderDir：.. 穿越出白名单 → false', T.isUnderDir(path.join(WS, '..', 'outside.txt'), base) === false);
-    ok('isUnderDir：跨盘符 → false', T.isUnderDir('D:\\somewhere\\a.txt', base) === false);
+    // 跨盘符/跨根：Windows 用 D:\ 另一块盘，其他平台用 /somewhere 这种根外绝对路径
+    const crossRoot = process.platform === 'win32' ? 'D:\\somewhere\\a.txt' : '/somewhere/a.txt';
+    ok('isUnderDir：跨盘符/跨根绝对路径 → false', T.isUnderDir(crossRoot, base) === false);
 
     // ④ 用真实目录联接(junction，本环境可创建且会被 realpath 跟随) 验证
     //    「解析后的真实路径」归属判断：联接指向白名单外时，真实路径应判为越界
