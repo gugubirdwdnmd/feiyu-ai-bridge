@@ -602,6 +602,113 @@ function testResolve(map, extra) {
     await closeServer(srv); await closeServer(plain);
   }
 
+  // ==================================================================
+  group('B15 压缩响应：原始字节超 maxBytes（解压后未超）必须拒绝（B 本地受控）');
+  {
+    // 压缩后原文字节未超限，但「实际接收（压缩）字节」超过 maxBytes → 仍须按 raw 中止
+    const payload = 'a'.repeat(5000);
+    const gz = zlib.gzipSync(Buffer.from(payload));
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip' });
+      res.end(gz);
+    });
+    const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'ok.test': { addrs: ['127.0.0.1'] } }) });
+    const r = await safeHttp.safeFetch('http://ok.test:' + srv.port + '/raw', {
+      policy, testToken: policy.token, maxBytes: 30, maxDecompressedBytes: 8 * 1024 * 1024,
+    });
+    eq(r.ok, false, 'B15-1 原始（压缩）字节超过 maxBytes 即中止（即便解压后未超限）');
+    eq(r.kind, 'size-limit-raw', 'B15-2 类别为 size-limit-raw（与解压后上限相互独立）');
+    ok(r.body === undefined, 'B15-3 超限后不返回响应体');
+    await closeServer(srv);
+  }
+
+  // ==================================================================
+  group('B16 压缩响应：原始字节未超限但解压后超限必须拒绝（B 本地受控）');
+  {
+    // 解压炸弹：原始很小，解压后极大 → 必须按 decompressed 中止，且 raw 确实未超 maxBytes
+    const bomb = zlib.gzipSync(Buffer.alloc(2 * 1024 * 1024, 0x20));
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip' });
+      res.end(bomb);
+    });
+    const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'ok.test': { addrs: ['127.0.0.1'] } }) });
+    const r = await safeHttp.safeFetch('http://ok.test:' + srv.port + '/bomb', {
+      policy, testToken: policy.token,
+      maxBytes: 8 * 1024 * 1024, maxDecompressedBytes: 512 * 1024,
+    });
+    eq(r.ok, false, 'B16-1 解压后超限被中止（原始体积未超限，证明解压后也受限）');
+    eq(r.kind, 'size-limit-decompressed', 'B16-2 类别为 size-limit-decompressed');
+    ok(r.kind !== 'size-limit-raw', 'B16-3 触发的确是解压后上限而非原始字节上限（原始字节检查在流中先发生，若原始超了会是 size-limit-raw）');
+    await closeServer(srv);
+  }
+
+  // ==================================================================
+  group('B17 正常 gzip：bytes 与 decompressedBytes 与实际数据匹配（B 本地受控）');
+  {
+    const payload = 'm'.repeat(4000);
+    const gz = zlib.gzipSync(Buffer.from(payload));
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip' });
+      res.end(gz);
+    });
+    const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'ok.test': { addrs: ['127.0.0.1'] } }) });
+    const r = await safeHttp.safeFetch('http://ok.test:' + srv.port + '/g', {
+      policy, testToken: policy.token, maxBytes: 8 * 1024 * 1024, maxDecompressedBytes: 8 * 1024 * 1024,
+    });
+    eq(r.ok, true, 'B17-1 解压成功');
+    eq(r.bytes, gz.length, 'B17-2 bytes = 实际接收（压缩）字节 ' + gz.length);
+    eq(r.decompressedBytes, payload.length, 'B17-3 decompressedBytes = 解压后字节 ' + payload.length);
+    eq(String(r.body), payload, 'B17-4 解压内容与原文一致');
+    ok(r.decompressedBytes > r.bytes, 'B17-5 解压后大于压缩前（' + r.decompressedBytes + ' > ' + r.bytes + '）');
+    await closeServer(srv);
+  }
+
+  // ==================================================================
+  group('B18 压缩响应 body 空闲超时：真实空闲必须中止，稳定慢速流不应误杀（B 本地受控）');
+  {
+    // B18-1：先发一块 gzip 数据后长时间空闲 → 必须触发 body 空闲超时
+    const payload = 'n'.repeat(8000);
+    const gz = zlib.gzipSync(Buffer.from(payload));
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip' });
+      const half = Math.floor(gz.length / 2);
+      res.write(gz.slice(0, half));
+      setTimeout(() => { try { res.end(gz.slice(half)); } catch (e) {} }, 800); // 空闲 800ms，远超 bodyIdleTimeoutMs
+    });
+    const policy = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'ok.test': { addrs: ['127.0.0.1'] } }) });
+    const r = await safeHttp.safeFetch('http://ok.test:' + srv.port + '/idle', {
+      policy, testToken: policy.token, bodyIdleTimeoutMs: 300, totalTimeoutMs: 8000,
+    });
+    eq(r.kind, 'timeout:body', 'B18-1 压缩流空闲超时被中止（body 空闲超时在压缩分支真实生效）');
+    await closeServer(srv);
+
+    // B18-2：稳定但缓慢的 gzip 流（每块间隔 < bodyIdleTimeoutMs，但总时长 > bodyIdleTimeoutMs）
+    //        修复前 body 空闲超时只在响应头时武装一次、不随数据刷新，会误杀此类正常慢速流；
+    //        修复后每个数据分片都刷新空闲计时，应成功完成。
+    const payload2 = 'p'.repeat(200000);
+    const gz2 = zlib.gzipSync(Buffer.from(payload2));
+    const srv2 = await startServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip' });
+      const parts = 10;
+      let i = 0;
+      const timer = setInterval(() => {
+        const start = Math.floor(gz2.length * i / parts);
+        const end = Math.floor(gz2.length * (i + 1) / parts);
+        if (i >= parts) { clearInterval(timer); try { res.end(); } catch (e) {} return; }
+        res.write(gz2.slice(start, end));
+        i += 1;
+      }, 80); // 每块间隔 80ms < bodyIdleTimeoutMs(300)，但总时长 ~800ms > 300
+      res.on('close', () => clearInterval(timer));
+    });
+    const policy2 = safeHttp.createTestPolicy({ resolveTarget: testResolve({ 'ok.test': { addrs: ['127.0.0.1'] } }) });
+    const r2 = await safeHttp.safeFetch('http://ok.test:' + srv2.port + '/drip', {
+      policy: policy2, testToken: policy2.token, bodyIdleTimeoutMs: 300, totalTimeoutMs: 8000,
+    });
+    eq(r2.ok, true, 'B18-2 稳定慢速 gzip 流成功完成（body 空闲超时随数据刷新，未误杀）');
+    eq(String(r2.body), payload2, 'B18-3 慢速流解压内容完整');
+    await closeServer(srv2);
+  }
+
   console.log('\n====================================================');
   console.log('V14 阶段三 B2 测试：通过 ' + pass + '，失败 ' + fail);
   console.log('分类：A=单元/模拟（不连网），B=本地受控网络（服务器只绑 127.0.0.1）');

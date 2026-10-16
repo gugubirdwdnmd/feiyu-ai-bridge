@@ -2557,6 +2557,14 @@ function workspacePath(name) {
   return p;
 }
 
+// 通用目录归属判断：real 是否真实位于 base 目录之内。
+// 基于 path.relative，杜绝 startsWith 字符串前缀误判（如 workspace_backup 被误判为 workspace 子项）；
+// Windows 大小写不敏感先归一；跨盘符时 path.relative 返回绝对路径由 isAbsolute 拦截。
+function isUnderDir(real, base) {
+  const rel = path.relative(String(base).toLowerCase(), String(real).toLowerCase());
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 function fmtBytes(n) {
   if (n < 1024) return n + 'B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + 'KB';
@@ -3522,6 +3530,11 @@ function memorySearch(sessionId, query) {
 function readWorkspaceFile(name) {
   const p = workspacePath(name);
   if (!p) return { ok: false, error: '文件名不合法' };
+  // 符号链接边界：必须先 realpath 拿到规范化真实路径，确认其仍落在 WORKSPACE_DIR 内，
+  // 否则指向工作区外的软链/联接会被 statSync/readFileSync 跟随而越界读取。
+  let real;
+  try { real = fs.realpathSync(p); } catch (e) { return { ok: false, error: '读取失败' }; }
+  if (!isUnderDir(real, WORKSPACE_DIR)) return { ok: false, error: '文件名不合法' };
   let st;
   try { if (!fs.existsSync(p)) return { ok: false, error: '找不到文件：' + name }; st = fs.statSync(p); }
   catch (e) { return { ok: false, error: '读取失败' }; }
@@ -3614,10 +3627,8 @@ const VISION_PROMPT =
 // Windows 文件系统大小写不敏感，故先统一 lower-case 再比对；跨盘符时 path.relative
 // 返回绝对路径，由 isAbsolute 检查拦截；.. 穿越会使 rel 以 '..' 开头，同样拦截。
 function isUnderAllowedVideoRoot(real) {
-  const realNorm = real.toLowerCase();
   for (const r of VIDEO_ALLOWED_ROOTS) {
-    const rel = path.relative(r.toLowerCase(), realNorm);
-    if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+    if (isUnderDir(real, r)) return true;
   }
   return false;
 }

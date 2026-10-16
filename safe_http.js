@@ -296,7 +296,22 @@ function once(u, resolved, addr, headersIn, o, state) {
         abort(kind, '响应体超过上限（' + limit + ' 字节），已中止并释放连接');
       };
 
+      // 压缩与未压缩两条路径统一：① 累计「实际接收字节」并受 maxBytes 约束；
+      // ② 每收到一个数据分片都刷新 body 空闲超时（真正的空闲超时而非固定截止）；
+      // 超限立即中止并清空已缓冲内容、释放 decoder/socket/请求。
+      const onRawChunk = (c) => {
+        rawBytes += c.length;
+        if (rawBytes > o.maxBytes) {
+          chunks.length = 0;
+          return onLimit('size-limit-raw', o.maxBytes);
+        }
+        clearTimer(phaseTimer);
+        phaseTimer = armTimer('body', o.bodyIdleTimeoutMs);
+      };
+
       if (decoder) {
+        // 压缩分支：原始字节来自 res 流（onRawChunk），解压后字节来自 decoder（独立限额）
+        res.on('data', onRawChunk);
         decoder.on('data', (c) => {
           outBytes += c.length;
           if (outBytes > o.maxDecompressedBytes) {
@@ -320,14 +335,9 @@ function once(u, resolved, addr, headersIn, o, state) {
       } else {
         // 未压缩：单一数据流，超限即为「实际接收字节超限」
         res.on('data', (c) => {
-          rawBytes += c.length;
-          if (rawBytes > o.maxBytes) {
-            chunks.length = 0;
-            return onLimit('size-limit-raw', o.maxBytes);
-          }
+          onRawChunk(c);
+          if (settled) return;          // 超限已中止则不继续累积
           chunks.push(c);
-          clearTimer(phaseTimer);
-          phaseTimer = armTimer('body', o.bodyIdleTimeoutMs);
         });
         res.on('end', () => {
           finish({
@@ -342,16 +352,7 @@ function once(u, resolved, addr, headersIn, o, state) {
         res.on('error', (e) => abort('body-error', '读取响应体失败：' + (e && e.message)));
       }
 
-      // 解压路径下另需统计「实际接收字节」（无论是否解压都要受 maxBytes 约束）
-      if (decoder) {
-        res.on('data', (c) => {
-          rawBytes += c.length;
-          if (rawBytes > o.maxBytes) {
-            chunks.length = 0;
-            return onLimit('size-limit-raw', o.maxBytes);
-          }
-        });
-      }
+      // 无论压缩与否，从收到响应头起开启 body 空闲超时（之后每收到数据分片都会刷新）
       clearTimer(phaseTimer);
       phaseTimer = armTimer('body', o.bodyIdleTimeoutMs);
     });

@@ -80,7 +80,7 @@ function loadBridge(opts) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(SRC + '\n;globalThis.__T={fetchUrl,webSearch,fetchImageAsBase64,napcatCall,rememberNote,safeFileName,workspacePath,writeWorkspaceFile,readLocalAsBase64,isPathAllowed,handleMessage,resolveVideoFile,callImageGen,safeVideoPath};',
+  vm.runInContext(SRC + '\n;globalThis.__T={fetchUrl,webSearch,fetchImageAsBase64,napcatCall,rememberNote,safeFileName,workspacePath,writeWorkspaceFile,readLocalAsBase64,isPathAllowed,handleMessage,resolveVideoFile,callImageGen,safeVideoPath,readWorkspaceFile,isUnderDir};',
     sandbox, { filename: 'ai_bridge.js' });
 
   // 还原环境变量，避免污染后续用例
@@ -507,6 +507,62 @@ async function postEvent(port, bodyStr, headers) {
       ok('resolveVideoFile ① 非法(workspace_backup)视频：安全回退 null', bad === null, bad);
     } catch (e) {
       ok('resolveVideoFile 本地路径回归：执行异常', false, e.message);
+    }
+
+    b.cleanup();
+  }
+
+  // ================= H. 工作区读取符号链接边界（readWorkspaceFile） =================
+  section('H. 工作区读取符号链接边界：readWorkspaceFile 必须先 realpath 校验再读取');
+  {
+    const b = loadBridge({});
+    const T = b.T;
+    const WS = path.join(b.tmp, 'workspace');
+
+    // ① 工作区内正常文件仍可读取（功能保持）
+    const w = T.writeWorkspaceFile('read_ok.txt', Buffer.from('workspace-content', 'utf-8'));
+    ok('工作区内正常文件可写入', w.ok === true, w);
+    const txt = T.readWorkspaceFile('read_ok.txt');
+    ok('工作区内正常文件可读取（功能保持）', txt.ok === true && txt.text === 'workspace-content', txt);
+
+    // ② 工作区外文件软链必须被拒：先尝试创建「真实可跟随」的文件符号链接
+    const outsideFile = path.join(b.tmp, 'outside_secret.txt');
+    fs.writeFileSync(outsideFile, Buffer.from('TOPSECRET-outside'));
+    const linkPath = path.join(WS, 'evil_link.txt');
+    let symReal = false;
+    try {
+      fs.symlinkSync(outsideFile, linkPath, 'file');
+      const resolved = (() => { try { return fs.realpathSync(linkPath); } catch (e) { return null; } })();
+      symReal = !!resolved && resolved.toLowerCase() !== linkPath.toLowerCase() && (() => { try { return fs.lstatSync(linkPath).isSymbolicLink(); } catch (e) { return false; } })();
+    } catch (e) { symReal = false; }
+    if (symReal) {
+      const r = T.readWorkspaceFile('evil_link.txt');
+      ok('工作区外文件符号链接被拒绝', r.ok === false, r);
+    } else {
+      // 本环境（无提权/Developer Mode）无法创建真实可跟随的文件软链：明确报告 SKIP，不计入通过/失败
+      console.log('  ⚠ 文件符号链接测试环境不支持（无提权/Developer Mode，fs.symlinkSync 未生成真实可跟随软链）：'
+        + '按任务要求明确报告 SKIP，不计入通过。越界防护由 realpath + isUnderDir 边界判断保证，并由 H-3/H-4 单元+junction 验证覆盖。');
+    }
+
+    // ③ 边界判断单元验证（isUnderDir）：直接验证符号链接/联接解析后的真实路径归属，不依赖软链创建能力
+    const base = WS.toLowerCase();
+    ok('isUnderDir：白名单内子文件 → true', T.isUnderDir(path.join(WS, 'a.txt'), base) === true);
+    ok('isUnderDir：白名单外同级目录（同名前缀）文件 → false', T.isUnderDir(path.join(b.tmp, 'workspace_backup', 'a.txt'), base) === false);
+    ok('isUnderDir：.. 穿越出白名单 → false', T.isUnderDir(path.join(WS, '..', 'outside.txt'), base) === false);
+    ok('isUnderDir：跨盘符 → false', T.isUnderDir('D:\\somewhere\\a.txt', base) === false);
+
+    // ④ 用真实目录联接(junction，本环境可创建且会被 realpath 跟随) 验证
+    //    「解析后的真实路径」归属判断：联接指向白名单外时，真实路径应判为越界
+    try {
+      const outsideDir = path.join(b.tmp, 'outside_dir');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(path.join(outsideDir, 'j.txt'), Buffer.from('out'));
+      const junc = path.join(WS, 'junc_dir');
+      fs.symlinkSync(outsideDir, junc, 'junction');
+      const resolved = fs.realpathSync(path.join(junc, 'j.txt'));
+      ok('isUnderDir：junction 解析到白名单外的真实路径 → false（越界判定对软链/联接生效）', T.isUnderDir(resolved, base) === false, resolved);
+    } catch (e) {
+      console.log('  ⚠ 目录联接边界验证未执行（' + e.code + '）：按任务要求明确报告 SKIP。');
     }
 
     b.cleanup();

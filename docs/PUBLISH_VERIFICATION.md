@@ -30,7 +30,7 @@ secrets.example.json              新增（脱敏密钥模板，仅含占位符�
 
 ai_bridge.js                      主程序
 url_safety.js                     SSRF 防护
-safe_http.js                      安全 HTTP 客户端（已过测试，未接入生产入口）
+safe_http.js                      安全 HTTP 客户端（已接入生产入口：fetchUrl / fetchImageAsBase64 / 网页搜索 / callImageGen 云端图 URL / 视频 URL 兜底下载；离线测试见 tests/s3_net.test.js，110 通过 / 0 失败）
 share_card.js                     分享卡片解析
 ai_prompt.txt                     人设提示词
 
@@ -215,7 +215,7 @@ docs/PUBLISH_VERIFICATION.md       新增（本文件）
 
 | # | 事项 | 原因 |
 |---|---|---|
-| V-1 | `s3_net` 的 85 条断言 | 会启动本地 TCP 服务，按约束跳过 |
+| V-1 | `s3_net` 的 110 条断言 | ✅ 已本地执行（仅绑 127.0.0.1 的受控服务，无外网流量）：通过 110 / 失败 0（`npm run test:net`），不再归入"未验证" |
 | V-2 | 真实运行链路（收消息→回复→发 QQ） | 本阶段禁止连接真实 QQ |
 | V-3 | NapCat 侧 OneBot 行为 | 未启动 NapCat |
 | V-4 | `napcat/` 与 `win64/` 内部逐文件 | 整目录排除，未深挖（审计 U1/U2） |
