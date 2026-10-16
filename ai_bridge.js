@@ -25,6 +25,9 @@ const { createGroupAdmin, runGroupCommand } = require('./tools/group_admin');
 const groupLog = require('./memory/group_log');
 const memoryStore = require('./memory/memory_store');
 const dailySummary = require('./memory/daily_summary');
+// V15.2：群友轻量画像（复用 memory_store，不另建存储）+ 群聊智能决策（纯本地规则）
+const groupProfile = require('./memory/group_profile');
+const groupDecision = require('./agent/group_decision');
 
 // ================= 配置 =================
 // API Key 不写死在代码里：优先环境变量 DEEPSEEK_API_KEY，其次同目录 secrets.json
@@ -295,6 +298,35 @@ const DEFAULT_CONFIG = {
     retrieveChars: 900,            // 注入提示词的记忆总字数上限
     minLen: 2,
     maxLen: 200,
+  },
+
+  // ===== V15.2：群友轻量画像（**默认关闭**，扩展 memoryStore，不另建存储）=====
+  groupProfile: {
+    _说明: '群友轻量画像。只记低敏感且对聊天有帮助的信息（称呼/风格/明确兴趣/进行中项目/被纠正过的偏好），'
+      + '以「群号+QQ号」为隔离键，不同群不同成员绝不混用。区分「用户明确说过」(stated,高置信) 与'
+      + '「系统推测」(inferred,低置信且注入时标注)。年龄/性别/婚恋/健康/宗教/政治/收入/住址等敏感属性一律拒收，'
+      + '不凭单条消息给成员贴标签。默认关闭；默认不向群内公开任何人的画像。',
+    enabled: false,
+    maxPerUser: 12,           // 单人画像条目上限（超出删最旧）
+    maxLen: 60,               // 单条画像长度上限（画像要简洁）
+    injectLimit: 3,           // 单次注入模型上下文的条数上限
+    injectChars: 200,         // 单次注入的总字数上限
+    minIntervalMs: 600000,    // 同一成员两次更新画像的最小间隔（10 分钟，避免每条消息都写）
+    minSamples: 3,            // 推测类升为画像所需最少样本数（推测不能凭一条就定性）
+    ttlDays: 90,              // 画像保留天数（比普通记忆短，避免长期贴标签）
+    shareToGroup: false,      // 默认不向群内公开成员画像
+  },
+
+  // ===== V15.2：群聊智能决策（**默认关闭**，纯本地规则，不增加模型调用）=====
+  groupDecision: {
+    _说明: '群聊发言决策复核。复用现有群缓冲与既有判定结果，只做一次本地复核，**不新增任何模型请求**。'
+      + '@机器人/回复机器人/命令/明确提问/明确要求继续 一律保持原优先级不被降级；'
+      + '已回答过的问题不重复回答；未成句的消息建议等待聚合而不是抢答。',
+    enabled: false,
+    dedupWindow: 20,          // 回看最近多少条判断"是否已回答过"
+    dedupWindowMs: 600000,    // 认为"刚答过"的时间窗（10 分钟）
+    minTopicLen: 6,           // 话题指纹最少长度（太短易误判重复）
+    deferMinChars: 4,         // 短于该字数且像未完句 → 建议等待
   },
 
   // v11/v12：AI 模式 chat / enhanced / economy / normal
@@ -4068,6 +4100,25 @@ async function processReply(ev, o) {
     }
   }
 
+  // ===== V15.2 群友轻量画像注入（**默认关闭**）=====
+  // 只在群聊注入；内容极简且受条数/字数双上限；带「（推测）」的低置信内容不得当事实。
+  // 提示词已明确要求模型"不要主动向群里提及此人的个人信息"，默认不公开。
+  if (msgType === 'group' && CFG.groupProfile && CFG.groupProfile.enabled === true) {
+    try {
+      const pinj = groupProfile.injectText({
+        groupId: String(ev.group_id),
+        userId: String(userId),
+        text: o.text || '',
+      });
+      if (pinj) {
+        parts.push({ type: 'text', text: pinj });
+        log(`[画像] 注入 ${CFG.groupProfile.injectLimit || 3} 条以内该成员画像（群聊）`);
+      }
+    } catch (e) {
+      log('[画像] 注入失败（已忽略）：' + String((e && e.message) || e).slice(0, 60));
+    }
+  }
+
   let res;
   try {
     res = await askDeepSeek(sessionId, parts, ev, {
@@ -4346,6 +4397,61 @@ async function handleUserCommand(text, ctx) {
     }
 
     return '用法：/记忆 | /记忆搜索 关键词 | /记忆删除 关键词 | /记忆清空确认 | /记忆状态';
+  }
+
+  // ============ V15.2 群友画像管理（复用既有命令风格）============
+  // 白名单子命令，避免误劫持将来可能新增的 /画像xxx 指令
+  // 隐私：默认只能看/清自己的画像；看别人需管理员；默认不向群内公开。
+  const PROF_SUBS = ['', '清空', '清空确认', '状态'];
+  if (PROF_SUBS.some((s) => head === '/画像' + s)) {
+    const gp = CFG.groupProfile || {};
+    if (gp.enabled !== true) return '群友画像功能已关闭（ai_config.json 里 groupProfile.enabled=true 才启用）。';
+    if (!isGroup) return '画像按群隔离，请在群聊中使用该命令。';
+    const admin = isAdmin(userId);
+    const actor = { userId: String(userId), isAdmin: admin };
+    const gid = String(ev.group_id);
+    const sub = parts[0].slice('/画像'.length) || '';
+
+    // /画像 —— 查看自己的画像
+    if (!sub) {
+      const v = groupProfile.view({ groupId: gid, userId: String(userId), actor });
+      if (!v.ok) return '读取画像失败：' + (v.error || '未知错误');
+      if (!v.items.length) return '还没有你的画像。画像只在你明确自述偏好、称呼、兴趣或正在做的事时才会记录，且默认不公开。';
+      const lines = v.items.map((x, i) => `${i + 1}. ${x.content}\n   ${x.stated ? '你明确说过' : '系统推测（不确定）'} · ${fmtAgo(x.updatedAt)}`);
+      return `你在这个群的画像（共 ${v.items.length} 条，上限 ${v.limits.maxPerUser} 条）：\n` + lines.join('\n');
+    }
+
+    // /画像清空确认（二次确认，沿用既有确认机制）
+    if (sub === '清空' || sub === '清空确认') {
+      const key = String(ctx.sessionId || userId) + ':profclear';
+      const st = clearConfirmState.get(key);
+      const v = groupProfile.view({ groupId: gid, userId: String(userId), actor });
+      if (!v.ok) return '读取画像失败：' + (v.error || '未知错误');
+      if (!v.items.length) return '你名下没有可清空的画像。';
+      if (!st || Date.now() - st.at > 60000) {
+        clearConfirmState.set(key, { at: Date.now() });
+        return `将清空你在这个群的 ${v.items.length} 条画像。\n确认请在 1 分钟内再发一次 /画像清空确认`;
+      }
+      clearConfirmState.delete(key);
+      const r = groupProfile.clearProfile({ groupId: gid, userId: String(userId), actor });
+      log(`[画像] 用户${maskId(userId)} 清空群${maskId(ev.group_id)}画像 ${r.removed}条`);
+      return `已清空 ${r.removed} 条画像。`;
+    }
+
+    // /画像状态
+    if (sub === '状态') {
+      const ps = groupProfile.stats();
+      const v = groupProfile.view({ groupId: gid, userId: String(userId), actor });
+      return [
+        `【画像】${ps.enabled ? '已启用' : '已关闭'}，共 ${ps.total} 条（明确自述 ${ps.stated} / 推测 ${ps.inferred}）`,
+        `上限：单人 ${gp.maxPerUser || 12} 条 / 单条 ${gp.maxLen || 60} 字；注入 ${gp.injectLimit || 3} 条 / ${gp.injectChars || 200} 字`,
+        `更新最小间隔 ${Math.round((gp.minIntervalMs || 600000) / 60000)} 分钟，推测类需 ${gp.minSamples || 3} 条样本，保留 ${gp.ttlDays || 90} 天`,
+        `你在这个群可见 ${v.ok ? v.items.length : 0} 条${admin ? '（你是管理员）' : ''}`,
+        '不推断敏感属性（年龄/性别/婚恋/健康/宗教/政治/收入/住址等一律不记录）；默认不向群内公开。',
+      ].join('\n');
+    }
+
+    return '用法：/画像 | /画像清空确认 | /画像状态';
   }
 
   return null;
@@ -4842,6 +4948,16 @@ async function handleMessage(ev) {
       });
     }
 
+    // V15.2：群友轻量画像观察（**默认关闭**；纯本地规则、零模型调用）。
+    //   失败绝不影响聊天主流程；画像以「群号+QQ号」隔离，不跨群/跨成员混用。
+    if (CFG.groupProfile && CFG.groupProfile.enabled === true && text) {
+      try {
+        groupProfile.observe({ groupId: ev.group_id, userId, text });
+      } catch (e) {
+        log('[画像] 观察失败（已忽略）: ' + String((e && e.message) || e).slice(0, 60));
+      }
+    }
+
     // V13.6：缓存本条图片引用（放在预筛之前，纯图片消息即使被丢弃也能留住）
     if (imgSegs.length) storePendingGroupImages(ev.group_id, userId, imgSegs);
 
@@ -4864,13 +4980,39 @@ async function handleMessage(ev) {
       requireAt: !!CFG.group.requireAt,
     });
 
+    // ②b V15.2 群聊智能决策（默认关闭；纯本地复核，不新增模型调用）
+    //     在既有判定之后做一次廉价复核：避免重复回答已解决的问题、避免对未成句抢答。
+    //     高优先级（@ / 回复机器人 / 聊天记录 / 明确提问）由 review() 保证不被降级。
+    let gdReview = null;
+    if (CFG.groupDecision && CFG.groupDecision.enabled === true) {
+      try {
+        gdReview = groupDecision.review({
+          text,
+          buffer: getGroupBuffer(ev.group_id),
+          decision,
+          isGroup: true,
+          cfg: CFG.groupDecision,
+        });
+        if (gdReview.changed && gdReview.action === 'drop') {
+          recordAvoided('gd-dup'); logDrop('群' + maskId(ev.group_id), '群智决', '已回答过: ' + (gdReview.reason || ''));
+          return;
+        }
+        if (gdReview.changed && gdReview.action === 'defer') {
+          // 未成句：不抢答，交给既有聚合窗口（与同人连发合并）后续再判
+          decision = { reply: false, needsJudge: false, reason: 'gd-defer', bypassCooldown: false, deferToAggregator: true };
+        }
+      } catch (e) {
+        log('[群智决] 复核异常（已忽略，保持原行为）: ' + String((e && e.message) || e).slice(0, 60));
+      }
+    }
+
     // 「立即行动」模式：群里每条消息都回（仍保留 @ 强制放行、冷却与聚合）
-    if (CFG.group.mode === 'all') {
+    if (CFG.group.mode === 'all' && !decision.deferToAggregator) {
       decision = { reply: true, needsJudge: false, reason: 'all', bypassCooldown: atMe };
     } else if (CFG.group.mode === 'at') {
       // 兼容旧模式：mode='at' 时退回「仅@才回」；但合并转发（聊天记录）一律视为对着机器人，不需要 @
       if (!atMe && !hasForwardSeg) { recordAvoided('l0'); logDrop('群' + maskId(ev.group_id), '群预筛', '未@我'); return; }
-    } else if (!decision.reply && !decision.needsJudge) {
+    } else if (!decision.reply && !decision.needsJudge && !decision.deferToAggregator) {
       recordAvoided('l0'); logDrop('群' + maskId(ev.group_id), '群预筛', decision.reason || 'normal-chat'); return;
     }
 
@@ -4917,7 +5059,9 @@ async function handleMessage(ev) {
     // ④ 聚合（带图片就不聚合，直接处理）
     const aggMs = Number(CFG.group.aggregateMs) || 0;
     const pureText = extractText(stripAt(msgSegs));
-    if (aggMs > 0 && imgSegs.length === 0 && pureText) {
+    // V15.2：智能决策判定为"未成句→建议等待"时，也走聚合窗口 ——
+    //   等同一发言人的后续消息合并后，由 decideAndReply 重新判定，避免抢答半句话。
+    if ((aggMs > 0 || decision.deferToAggregator) && imgSegs.length === 0 && pureText) {
       // V13.6：把缓冲里的图带进聚合请求（群里「先发图、再打字问」）
       scheduleAggregate('g' + ev.group_id + ':' + userId, ev, pureText, takePendingGroupImages(ev.group_id, userId), decision, grpName);
       return;
@@ -5412,6 +5556,7 @@ loadStats();
 groupLog.setConfig(() => CFG);
 memoryStore.setConfig(() => CFG);
 dailySummary.setConfig(() => CFG);
+groupProfile.setConfig(() => CFG);
 
 // ===== 群聊每日总结：自动定时器（**默认关闭**，必须显式打开且配置白名单才会发群）=====
 let dailySummaryTimer = null;

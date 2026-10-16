@@ -275,6 +275,32 @@ function add(o) {
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
 
+// ———— V15.2：按 id 直接写入/覆盖一条条目，**不做相似合并**（与 add 明确区分）————
+// 为什么需要：add() 的相似合并只按 scope + userId 过滤，**不比对 groupId**
+//   （普通个人记忆的设计是「同一人跨群可见」，属既有行为，不应改动）。
+//   群友画像的隔离键是「群号+QQ号」，若用 add()，不同群里内容相似的画像会互相覆盖
+//   （实测「希望被称呼为「阿甲」」与「希望被称呼为「阿丙」」相似度 0.857 ≥ 0.8）。
+//   因此画像自行判断"合并 or 新增"，需要一种"按 id 精确写入、不触发相似合并"的能力。
+// 本函数只操作本模块的 cache（与 add/list/remove 同一份数据），不新建独立存储，
+// 也不会绕过容量治理：写入后照常 markDirty + prune。
+function upsertRaw(item) {
+  if (!item || !item.id) return { ok: false, error: 'item-need-id' };
+  const text = String(item.content == null ? '' : item.content);
+  if (!text) return { ok: false, error: 'empty' };
+  // 复用既有的凭据拒收规则，保持与 add() 一致的安全边界
+  if (looksSecret(text)) return { ok: false, error: 'looks-like-secret' };
+  const all = load();
+  const it = clone(item);
+  if (!it.createdAt) it.createdAt = Date.now();
+  if (!it.updatedAt) it.updatedAt = Date.now();
+  if (it.storedAt == null) it.storedAt = Date.now();
+  if (it.hits == null) it.hits = 0;
+  all.items.push(it);
+  markDirty();
+  prune();
+  return { ok: true, item: clone(it) };
+}
+
 // ———— 查询 / 搜索 / 检索 ————
 function list(filter, limit) {
   const all = load();
@@ -396,6 +422,11 @@ module.exports = {
   FILE, DEFAULTS,
   add, list, search, retrieve, remove, removeByKeyword, clear, stats, prune, flush,
   looksSecret, similarity, isExpired,
+  // V15.2：按 id 直接写入/覆盖一条条目，**不做相似合并**（与 add 明确区分）。
+  // 群友画像需要「严格按 群号+QQ号 隔离」：add() 的相似合并只比对 userId，
+  // 会把不同群里内容相似的画像互相覆盖。画像因此自行判断合并与新增，用本函数落盘。
+  // 仅新增导出，不改变 add/remove/list 等任何既有函数的行为。
+  upsertRaw,
   setConfig: (fn) => { module.exports.getCFG = fn; },
   _setFile: (p) => { FILE = p; cache = null; dirty = false; if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; } },
   _setLegacyFile: (p) => { LEGACY = p; cache = null; },

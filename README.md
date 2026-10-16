@@ -47,7 +47,9 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 | 输出安全过滤 | 自动抹除 API Key、本机绝对路径、端口号、内部模块名、"我是 GPT"类身份误称 |
 | 入网安全 | `url_safety.js`：IPv4/IPv6 全特殊段识别、拒绝 userinfo、DNS 解析后分类、防 DNS 重绑 |
 | 任务与主动汇报（V15，默认全关） | `feiyu/`：任务调度（可取消/超时）、主动通知、预算控制。**所有新功能默认关闭**，未配置执行器时任务仅登记不执行 |
-| 测试 | 15 个测试文件、上千条断言；离线用例零网络依赖，live 用例（本机 ComfyUI）在无后端时自动跳过 |
+| 群聊智能决策（V15.2，默认关） | 复用既有群缓冲与判定结果做一次**本地**复核：已回答过的问题不重复回答、未成句的消息等后续而不是抢答。**不新增任何模型调用** |
+| 群友轻量画像（V15.2，默认关） | 扩展既有记忆体系（非第二套存储）：按「群号+QQ号」隔离记住称呼/风格/明确兴趣/进行中项目；区分「用户明确说过」与「系统推测」，敏感属性一律不记录，默认不公开 |
+| 测试 | 16 个测试文件、上千条断言；离线用例零网络依赖，live 用例（本机 ComfyUI）在无后端时自动跳过 |
 
 ---
 
@@ -102,6 +104,8 @@ export DEEPSEEK_API_KEY="sk-你的密钥"
 | `agent.enabled` | 多步 Agent 开关 |
 | `image.*` | 生图后端（本机 ComfyUI），工作流配置见 `workflows/README.md` |
 | `taskManager` / `browser` / `notifier` / `tts` / `qzone` | **V15 功能，默认全部 `false`**；均为**顶层键**（不是嵌套在 `feiyu` 下）。详见 `feiyu/V15_GUIDE.md` |
+| `groupDecision` | **V15.2 群聊智能决策，默认 `false`**。纯本地规则复核，**不增加模型调用** |
+| `groupProfile` | **V15.2 群友轻量画像，默认 `false`**。按「群号+QQ号」隔离，敏感属性不记录，默认不公开 |
 
 删掉 `ai_config.json` 则全部走内置默认值。
 
@@ -109,6 +113,10 @@ export DEEPSEEK_API_KEY="sk-你的密钥"
 > 模板里它们**默认全关**，真实浏览器（`allowRealBrowse`）、真实通知、真实 QQ 空间发布
 > （`realEnabled`）也**默认关闭**。启用前请先读 `feiyu/V15_GUIDE.md` 了解各模块的
 > 未验证项与安全边界。
+
+> **V15.2 说明**：`groupDecision` 与 `groupProfile` 也**默认关闭**，需显式设为 `true`。
+> 画像只在你**明确自述**（"我叫…"、"我喜欢…"、"以后叫我…"）或多次重复表现出稳定风格时才记录；
+> 推测类内容注入时会标注「（推测）」且置信度低，不会当作事实。管理命令：`/画像`、`/画像状态`、`/画像清空确认`。
 
 3. **NapCat 侧**：新增一个 OneBot11 HTTP 服务端，监听 `127.0.0.1:3000`，消息格式设为 `array`，上报地址指向本桥接层的 `3001` 端口；Token 填到 `secrets.json` 的 `onebotToken`。
 
@@ -151,13 +159,13 @@ live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行�
 ├─ ai_prompt.txt           人设提示词（修改它即可调整说话风格）
 ├─ ai_config.example.json  配置模板（真实配置 ai_config.json 不入库）
 ├─ secrets.example.json    密钥模板（真实 secrets.json 不入库）
-├─ agent/                  多步 Agent 子系统（agent_core / intent / state / tool_router）
+├─ agent/                  多步 Agent 子系统（agent_core / intent / state / tool_router / group_decision）
 ├─ tools/                  工具层：web / bilibili / image / video / file / memory / result / chat_record / feiyu
 ├─ feiyu/                  V15 行动型助手（**默认全关**，详见 feiyu/V15_GUIDE.md）
 │                          task_manager / task_store / notifier / browser_adapter /
 │                          tts / qzone_adapter / cost_control / permissions
+├─ memory/                 记忆模块（group_log / memory_store / daily_summary / **group_profile**）
 ├─ chat_record_parser/     合并转发与聊天记录解析
-├─ memory/                 记忆模块（运行时数据 json 不入库）
 ├─ workflows/              ComfyUI 图像工作流（含说明）
 ├─ dashboard/index.html    用量看板（单文件）
 ├─ stickers/               本地表情包目录（图片丢进去即可，需自备）
@@ -181,6 +189,7 @@ live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行�
 9. **任务取消与超时（V15）**：任务上下文提供真实 `AbortSignal`，执行器可透传给 `fetch`/`http`/`spawn` 真正中断。系统**如实区分「已请求取消」与「已确认停止」**：忽略信号的长任务不会被显示为已停止（`executionStopped=false`），系统不保证瞬时中止。无执行器时任务仅登记（`executed=false`），不假称已执行。
 10. **任务数据保护（V15）**：JSON 损坏/未知格式时保留 `.corrupt-*` 原文件副本；**若备份写入失败则进入隔离模式**，`save()` 抛 `EQUARANTINE` 拒绝覆盖原文件，绝不静默清空或覆盖唯一的原始数据（需人工处理后显式解除）。临时写入失败与原子替换失败均抛错、清理残留并保持原文件不变。
 11. **QQ 空间发布**：无合规开放接口，代码层拒绝真实发布（即便 `realEnabled=true`）。
+12. **群友画像（V15.2）**：默认关闭。画像是**既有长期记忆的扩展**（同一份存储、同一套治理），不是第二套记忆。隔离键为「群号+QQ号」，**不同群、不同成员的画像绝不混用**。严格区分「用户明确说过」（高置信）与「系统推测」（低置信，注入时标注「（推测）」，不会当作事实）。**年龄、性别、婚恋、健康、宗教、政治、收入、住址、证件等敏感属性一律拒收**（即使本人自述也不记录），且推测类需多条样本才成立，避免凭单条消息给成员贴标签。默认**不向群内公开**任何人的画像，非管理员也无法查看他人画像。
 
 ---
 

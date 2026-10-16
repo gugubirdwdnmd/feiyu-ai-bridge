@@ -85,6 +85,29 @@
     "maxLen": 200
   },
 
+  "groupProfile": {
+    "_说明": "V15.2 群友轻量画像（默认关闭）。扩展 memoryStore，不另建存储：以「群号+QQ号」为隔离键，不同群、不同成员绝不混用。只记低敏感且对聊天有帮助的信息（称呼/交流风格/明确兴趣/进行中项目/被纠正过的偏好）；区分「用户明确说过」(stated,高置信) 与「系统推测」(inferred,低置信且注入时标注「（推测）」)。年龄/性别/婚恋/健康/宗教/政治/收入/住址/证件等敏感属性一律拒收，不凭单条消息给成员贴标签。默认不向群内公开任何人的画像；可用 /画像、/画像状态、/画像清空确认 管理自己的画像。",
+    "enabled": false,
+    "maxPerUser": 12,
+    "maxLen": 60,
+    "injectLimit": 3,
+    "injectChars": 200,
+    "minIntervalMs": 600000,
+    "minSamples": 3,
+    "ttlDays": 90,
+    "shareToGroup": false
+  },
+
+  "groupDecision": {
+    "_说明": "V15.2 群聊发言决策复核（默认关闭）。复用现有群缓冲与既有判定结果，只做一次本地复核，不新增任何模型请求。@机器人 / 回复机器人 / 聊天记录 / 命令 / 明确提问 / 明确要求继续 一律保持原优先级不被降级；已经回答过的相同问题不再重复回答；未成句的消息建议交给聚合窗口等待后续，而不是抢答。",
+    "enabled": false,
+    "dedupWindow": 20,
+    "dedupWindowMs": 600000,
+    "minTopicLen": 6,
+    "deferMinChars": 4
+  },
+
+
   "judge": {
     "enabled": true,
     "model": "deepseek-chat",

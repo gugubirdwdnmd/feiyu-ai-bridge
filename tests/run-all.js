@@ -22,6 +22,7 @@ const OFFLINE = [
   'feature_command_integration.test.js',
   'feature_summary_memory.test.js',
   'feiyu_upgrade.test.js',
+  'v152_group_intel.test.js',   // V15.2 群聊智能决策 + 群友轻量画像（纯离线）
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];
