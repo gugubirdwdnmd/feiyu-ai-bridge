@@ -140,6 +140,63 @@
   "sticker": {
     "enable": true
   },
+  "voice": {
+    "_说明": "V15.4 语音识别（默认关闭）。把 QQ 语音消息转成文字再走正常对话流程。provider=mock 只产出占位文本、不联网；local=调用本机命令（需显式配 cmd，用数组参数不经 shell）；cloud=调用你自己的识别端点（host 必须在 allowHosts，且要过 SSRF 校验）。超过 maxDurationSec 不识别。识别失败一律降级为不识别，不影响聊天。本仓库未安装任何 ASR 引擎，真实识别【未验证 UNVERIFIED】。",
+    "enabled": false,
+    "provider": "mock",
+    "mockText": "[语音]",
+    "maxDurationSec": 120,
+    "maxBytes": 8388608,
+    "timeoutMs": 20000,
+    "cmd": [],
+    "endpoint": "",
+    "allowHosts": [],
+    "apiKeyRef": ""
+  },
+
+  "style": {
+    "_说明": "V15.4 发言风格优化（默认关闭）：去人机感 + 简化 + emoji。纯本地规则，不新增任何模型调用。去掉开头客套、AI 自我介绍、结尾『希望对你有帮助』、『总之/首先/其次』这类连接词；按 maxSentences/maxChars 精简；emoji 子段默认仍关闭（改语气属明显行为变化，需显式开启），开启后按情绪确定性地点缀，数量不超过 max。style.sticker 开启后会按情绪建议表情包关键词，交给既有 sticker 链路发送。",
+    "enabled": false,
+    "stripGreeting": true,
+    "stripSignOff": true,
+    "stripAiSelf": true,
+    "stripFiller": true,
+    "simplify": true,
+    "maxChars": 120,
+    "maxSentences": 3,
+    "collapsePunct": true,
+    "emoji": {
+      "enabled": false,
+      "max": 3,
+      "density": 0.6,
+      "allowRepeat": false,
+      "pool": ["😄", "😅", "🙂", "😉", "😏", "🤔", "😮", "🥲", "😴", "👍", "👀", "🙌", "✨", "💡", "🔥"]
+    },
+    "sticker": { "enabled": false, "maxKeywords": 1 }
+  },
+
+  "meme": {
+    "_说明": "V15.4 表情包联网检索（默认关闭）。只认你自己配置的端点（provider=custom），不内置任何第三方站点，避免请求打到未知的、可能变更或收费的接口。endpoint 的 host 必须在 allowHosts，且要过 SSRF 校验；返回的图片 URL 也会逐个校验，私网/回环/云元数据一律剔除。带缓存与每小时上限。本仓库零第三方依赖、未配置任何接口，真实检索【未验证 UNVERIFIED】。",
+    "enabled": false,
+    "provider": "none",
+    "endpoint": "",
+    "allowHosts": [],
+    "timeoutMs": 8000,
+    "maxItems": 5,
+    "cacheTtlMs": 600000,
+    "maxPerHour": 60,
+    "apiKeyRef": ""
+  },
+
+  "imageConfirm": {
+    "_说明": "V15.4 生图确认（默认关闭）：识别到生图意图后先把要画的内容复述一遍请用户确认，用户回『画』才真的开画，回『算了』就作废，省算力也少画错。纯内存、带 TTL 自动过期，不落盘任何用户数据。requireForText2Img / requireForImg2Img 可分别关掉某类场景的确认。",
+    "enabled": false,
+    "ttlMs": 300000,
+    "maxPromptChars": 200,
+    "requireForText2Img": true,
+    "requireForImg2Img": true
+  },
+
   "files": {
     "enable": true
   },

@@ -24,6 +24,7 @@ const OFFLINE = [
   'feiyu_upgrade.test.js',
   'v152_group_intel.test.js',   // V15.2 群聊智能决策 + 群友轻量画像（纯离线）
   'v153_poke.test.js',          // V15.3 群友戳一戳（纯离线，不发真实戳一戳）
+  'v154_rich_features.test.js', // V15.4 语音识别/风格优化/表情包检索/生图确认（纯离线，联网检索用注入 mock）
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];

@@ -28,6 +28,11 @@ const dailySummary = require('./memory/daily_summary');
 // V15.2：群友轻量画像（复用 memory_store，不另建存储）+ 群聊智能决策（纯本地规则）
 const groupProfile = require('./memory/group_profile');
 const groupDecision = require('./agent/group_decision');
+// V15.4：语音识别 / 发言风格优化 / 表情包联网检索 / 生图确认（全部默认关闭）
+const voiceAsr = require('./feiyu/voice_asr');
+const styleOpt = require('./feiyu/style_optimizer');
+const memeSearch = require('./feiyu/meme_search');
+const imageConfirm = require('./feiyu/image_confirm');
 // V15.3：群友戳一戳（主动戳群友 + 对群友被戳的反应）；与既有 poke（自己被戳）互不重叠
 const pokeSocial = require('./feiyu/poke_social');
 
@@ -212,6 +217,52 @@ const DEFAULT_CONFIG = {
     filterSensitive: true,        // v10 新增：记忆敏感信息拦截
   },
   sticker: { enable: ENABLE_STICKER },
+
+  // V15.4 语音识别：默认关、默认不联网。provider=mock 只占位；local/cloud 必须显式配置。
+  voice: {
+    enabled: false,
+    provider: 'mock',            // mock | local | cloud
+    mockText: '[语音]',
+    maxDurationSec: 120,
+    maxBytes: 8 * 1024 * 1024,
+    timeoutMs: 20000,
+    cmd: [],                     // local：如 ['whisper', '{file}', '--model', 'base']
+    endpoint: '',                // cloud：识别端点（host 必须在 allowHosts）
+    allowHosts: [],
+    apiKeyRef: '',
+  },
+
+  // V15.4 发言风格：去人机感 + 简化 + emoji（纯本地，不新增模型调用）
+  style: {
+    enabled: false,
+    stripGreeting: true, stripSignOff: true, stripAiSelf: true, stripFiller: true,
+    simplify: true, maxChars: 120, maxSentences: 3, collapsePunct: true,
+    emoji: {
+      enabled: false,            // 改语气属明显行为变化，需显式开启
+      max: 3, density: 0.6, allowRepeat: false,
+      pool: ['😄', '😅', '🙂', '😉', '😏', '🤔', '😮', '🥲', '😴', '👍', '👀', '🙌', '✨', '💡', '🔥'],
+    },
+    sticker: { enabled: false, maxKeywords: 1 },
+  },
+
+  // V15.4 表情包联网检索：默认关，且只认你自己配置的端点（不内置任何第三方站点）
+  meme: {
+    enabled: false,
+    provider: 'none',            // none | custom
+    endpoint: '',                // 支持 {q} 占位
+    allowHosts: [],
+    timeoutMs: 8000, maxItems: 5, cacheTtlMs: 600000, maxPerHour: 60,
+    apiKeyRef: '',
+  },
+
+  // V15.4 生图确认：识别到生图意图先复述确认，用户说「画」才真的开画
+  imageConfirm: {
+    enabled: false,
+    ttlMs: 300000,
+    maxPromptChars: 200,
+    requireForText2Img: true,
+    requireForImg2Img: true,
+  },
   files: { enable: ENABLE_FILES },
   web: { enable: ENABLE_WEB },
 
@@ -1196,7 +1247,23 @@ async function callComfyUIImage(prompt, img) {
 
 // 简单文本回执（群带 @ + 引用，私聊带引用）
 async function sendSimpleReply(ev, isGroup, userId, text) {
-  const out = [{ type: 'text', data: { text } }];
+  // V15.4：发言风格优化（默认关闭）。关时 polish 原样返回，行为不变。
+  let outText = String(text == null ? '' : text);
+  if (styleOpt.cfg().enabled) {
+    try {
+      const r = styleOpt.polish(outText);
+      outText = r.text;
+      // 需要发表情包时，交给既有 sticker 链路（一次只发一个，且不重复发）
+      if (r.stickers && r.stickers.length && CFG.sticker && CFG.sticker.enable) {
+        const seg = await resolveStickerAsync(r.stickers[0]);
+        try {
+          if (isGroup) await napcatCall('send_group_msg', { group_id: ev.group_id, message: [seg] });
+          else await napcatCall('send_private_msg', { user_id: userId, message: [seg] });
+        } catch (e) { /* 表情发不出去不影响文字 */ }
+      }
+    } catch (e) { /* 风格优化异常 → 原样发送 */ }
+  }
+  const out = [{ type: 'text', data: { text: outText } }];
   if (isGroup) {
     out.unshift({ type: 'at', data: { qq: String(userId) } });
     if (ev.message_id != null) out.unshift({ type: 'reply', data: { id: String(ev.message_id) } });
@@ -1265,6 +1332,60 @@ async function enhanceImagePrompt(prompt) {
   const hasQ = IMAGE_QUALITY_TAGS.split(', ').some(w => new RegExp(w.replace(/[+]/g, '\\+'), 'i').test(p));
   if (!hasQ) p = p + ', ' + IMAGE_QUALITY_TAGS;
   return p;
+}
+
+// ================= V15.4 生图确认（默认关闭）=================
+// 命中生图意图 → 先把要画的内容复述一遍请用户确认；用户回「画」才真的开画，
+// 回「算了」就作废。关闭时这两个函数都是直通，行为与原来完全一致。
+function imgConfirmKey(ev, isGroup, userId) {
+  return imageConfirm.chatKeyOf({ isGroup: !!isGroup, groupId: ev && ev.group_id, userId });
+}
+
+/**
+ * 入口处检查：用户这句是不是在回应「上一条待确认的生图」。
+ * 命中确认 → 真的去画（用当时登记的 prompt）；命中取消 → 作废。
+ * @returns {Promise<boolean>} true = 已处理完，调用方应 return
+ */
+async function maybeResumeConfirmedImage(ev, o) {
+  const c = imageConfirm.cfg();
+  if (!c.enabled) return false;
+  const key = imgConfirmKey(ev, o.isGroup, o.userId);
+  const pend = imageConfirm.peek(key);
+  if (!pend) return false;
+  const act = imageConfirm.match(key, o.text);
+  if (act === 'cancel') {
+    imageConfirm.cancel(key);
+    log('[生图确认] 用户取消（会话=' + key + '）');
+    await sendSimpleReply(ev, o.isGroup, o.userId, c.cancelReply);
+    return true;
+  }
+  if (act !== 'confirm') return false;   // 不是回应 → 交给正常流程
+  const v = imageConfirm.take(key);
+  const prompt = (v && v.prompt) || String(o.text || '');
+  log('[生图确认] 用户确认，开始生成（会话=' + key + '）');
+  const ok = await handleImageGen(prompt, ev, {
+    isGroup: o.isGroup, userId: o.userId, imgSegs: (v && v.kind === 'img2img') ? (o.imgSegs || []) : [],
+  });
+  if (!ok) await sendSimpleReply(ev, o.isGroup, o.userId, '没画出来，可能是后端没开或者排队满了～');
+  return true;
+}
+
+/**
+ * 命中生图意图时：先登记并发出确认询问（而不是直接开画）。
+ * @returns {Promise<boolean>} true = 已发出确认询问，调用方应 return
+ */
+async function maybeAskImageConfirm(ev, o) {
+  const c = imageConfirm.cfg();
+  if (!c.enabled) return false;
+  const kind = (o.imgSegs && o.imgSegs.length && isImg2ImgIntent(o.text, o.imgSegs.length)) ? 'img2img' : 'text2img';
+  if (kind === 'text2img' && !c.requireForText2Img) return false;
+  if (kind === 'img2img' && !c.requireForImg2Img) return false;
+  const key = imgConfirmKey(ev, o.isGroup, o.userId);
+  const r = imageConfirm.request(key, { prompt: String(o.text || ''), kind });
+  if (!r.ok || !r.askText) return false;
+  log('[生图确认] 已发出确认询问（会话=' + key + ' kind=' + kind + '）');
+  await sendSimpleReply(ev, o.isGroup, o.userId, r.askText);
+  return true;
 }
 
 // 处理生图意图：命中则返回 true（已消费该消息）
@@ -2038,7 +2159,7 @@ function toolsForMode(text) {
 
 // 单独发一个表情包（工具调用）；target 从 sessionId 解析
 async function sendStickerTo(sessionId, keyword, ctx) {
-  const seg = resolveSticker(keyword);
+  const seg = await resolveStickerAsync(keyword);
   const kind = seg.type === 'image' ? '图片' : 'face' + seg.data.id;
   if (sessionId.startsWith('group_')) {
     await napcatCall('send_group_msg', { group_id: Number(sessionId.slice(6)), message: [seg] });
@@ -2500,6 +2621,18 @@ function buildSystemPrompt(sessionId) {
       '想发图时，在回复末尾加一个标记 [[表情:关键词]]（没有合适的就写 [[表情]] 随机发一个）。' +
       '心情词也可以，比如 开心、无语、点赞、委屈、偷笑、加油。' +
       '随心发，群聊斗图不必收着；但严肃说明/长解释/写代码/道歉/安慰人时别发。';
+    // V15.4：开了联网检索才告诉模型"可以联网找表情"，没开就不提，避免它写出用不了的能力
+    if (memeSearch.cfg().enabled) {
+      sys += '\n现在还开了表情包联网检索，本地没有合适的表情时，直接按上面的标记写就行，会去网上找来发。';
+    }
+  }
+
+  // V15.4：开了风格优化就把"怎么说话"写进提示词，让模型从源头少说废话（本地规则再兜一层）
+  if (styleOpt.cfg().enabled) {
+    sys += '\n\n【说话方式】\n'
+      + '别客套、别铺垫，别写「总之/首先/其次/另外」这类连接词，结尾不要加「希望对你有帮助」「如有问题随时问我」。'
+      + '能一句说完就别写三句，能不解释就不解释。像群里随口接话，不要像写报告。'
+      + (styleOpt.cfg().emoji.enabled ? 'emoji 想带就带，自然会带，不必每句都带，也别一条里堆一堆。' : '');
   }
 
   // 运行时临时心情/状态（管理员 /ai mood 设置，仅内存、不落盘）
@@ -2539,6 +2672,23 @@ function listStickers() {
   } catch (e) {
     return [];
   }
+}
+
+// V15.4：联网检索表情包（**默认关闭、真实效果未验证**）。
+// 本地表情包优先；检索失败 / 未配置 / 拿到不安全 URL → 一律退回既有的本地或内置表情。
+async function resolveStickerAsync(kw) {
+  if (!memeSearch.cfg().enabled) return resolveSticker(kw);
+  try {
+    const r = await memeSearch.search(kw);
+    if (r && r.ok && r.items && r.items.length) {
+      const it = r.items[Math.floor(Math.random() * r.items.length)];
+      // meme_search 内已对每个 URL 过 isSafeUrl；这里再收一道：只接受 https 的公网地址
+      if (it && /^https:\/\//i.test(String(it.url || ''))) {
+        return { type: 'image', data: { file: String(it.url) } };
+      }
+    }
+  } catch (e) { /* 检索失败 → 退回本地 */ }
+  return resolveSticker(kw);
 }
 
 // 关键词清单（去掉文件名末尾的编号/下划线，如「开心_1.png」→「开心」）
@@ -4643,8 +4793,22 @@ async function handleAiCommand(text, ctx) {
     if (!img.enabled) return '生图当前未启用（ai_config.json 里 image.enabled=false）。配好 endpoint/model/apiKey 后即可用。';
     return `生图已启用：endpoint=${img.endpoint} model=${img.model || '(默认)'} size=${img.size || '默认'}。`;
   }
-  if (sub === 'help' || !sub) return '可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|pokeothers|mood|reload|image\n群聊总结与记忆：/今日总结 | /昨日总结 | /记忆 | /记忆搜索 词 | /记忆删除 词 | /记忆清空确认 | /记忆状态\n戳群友：/戳 @某人（默认关，见 /ai pokeothers）| 群友画像：/画像 | /画像状态 | /画像清空确认';
-  return '未知命令。可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|pokeothers|mood|reload|image';
+  // ============ V15.4 运行时开关（仅内存，不写回配置文件）============
+  if (sub === 'voice' || sub === 'style' || sub === 'meme' || sub === 'imgconfirm') {
+    const KEYS = { voice: 'voice', style: 'style', meme: 'meme', imgconfirm: 'imageConfirm' };
+    const key = KEYS[sub];
+    const v = (parts[2] || '').toLowerCase();
+    if (v !== 'on' && v !== 'off') {
+      const cur = !!(CFG[key] && CFG[key].enabled);
+      return `${sub} 当前${cur ? '开启' : '关闭'}。用法：/ai ${sub} on | off`;
+    }
+    if (!CFG[key]) CFG[key] = {};
+    CFG[key].enabled = (v === 'on');
+    return `已${v === 'on' ? '开启' : '关闭'} ${sub}。`;
+  }
+
+  if (sub === 'help' || !sub) return '可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|pokeothers|voice|style|meme|imgconfirm|mood|reload|image\n群聊总结与记忆：/今日总结 | /昨日总结 | /记忆 | /记忆搜索 词 | /记忆删除 词 | /记忆清空确认 | /记忆状态\n戳群友：/戳 @某人（默认关，见 /ai pokeothers）| 群友画像：/画像 | /画像状态 | /画像清空确认';
+  return '未知命令。可用：/ai mode|status|budget|stats|group|pause|resume|at|poke|pokeothers|voice|style|meme|imgconfirm|mood|reload|image';
 }
 
 // ———— 聚合：同群 + 同人 + 连续发送 → 合并成一次请求 ————
@@ -5013,10 +5177,38 @@ async function handleMessage(ev) {
   // V14-B 修复：QQ 里「纯合并转发」通常不带任何文字，以前会在这一行被静默丢弃，
   // 导致聊天记录功能在真实场景里根本触发不了（只有转发+文字同时存在时才work）。
   const hasForwardSeg = msgSegs.some((s) => s && s.type === 'forward');
+
+  // V15.4：语音识别（**默认关闭**）。把 record 段转成文字并入 text 再走既有流程。
+  //   关闭 / 识别失败 → 一个字都不改，语音仍按旧行为处理（纯语音会被上面的空消息判断丢弃），
+  //   保证不开这个功能时行为 100% 不变。日志只记原因码，不记转写内容。
+  if (voiceAsr.cfg().enabled && voiceAsr.hasVoice(msgSegs)) {
+    try {
+      const tr = await voiceAsr.transcribe(voiceAsr.pickVoice(msgSegs));
+      const merged = voiceAsr.mergeIntoText(text, tr);
+      if (merged.changed) {
+        text = merged.text;
+        log('[语音] 已转写（provider=' + (merged.provider || '?') + '），继续走正常流程');
+      } else {
+        log('[语音] 未识别（原因=' + ((tr && tr.reason) || '?') + '）');
+      }
+    } catch (e) {
+      log('[语音] 识别异常（已忽略）: ' + String((e && e.message) || e).slice(0, 60));
+    }
+  }
+
   if (!text && imgSegs.length === 0 && !hasForwardSeg) {
     logDrop((msgType === 'group' ? ('群' + maskId(ev.group_id)) : ('私聊' + maskId(userId))),
       '入口', '无可处理内容', msgSegs.map((s) => s && s.type).join(','));
     return;
+  }
+
+  // ================= V15.4：生图确认的「回应」检查 =================
+  // 放在预筛之前：用户回的「画」「算了」是很短的词，走预筛很可能被当成闲聊丢掉。
+  // 关时 peek() 直接返回 null，零开销、行为不变。
+  if (msgType === 'group') {
+    if (await maybeResumeConfirmedImage(ev, { isGroup: true, userId, text, imgSegs })) return;
+  } else {
+    if (await maybeResumeConfirmedImage(ev, { isGroup: false, userId, text, imgSegs })) return;
   }
 
   // ================= 群聊 =================
@@ -5137,8 +5329,12 @@ async function handleMessage(ev) {
 
     // 生图意图（群）：V14-D 起优先交给 Agent 的 generate_image（AI 自己决定画什么 / 是否图生图），
     // 老正则路径只作兜底（Agent 不可用、工具没注册、或配置关掉 agentFirst）
-    if (!genByAgent() && (isImageGenIntent(text) || isImg2ImgIntent(text, imgSegs.length))) {
-      if (await handleImageGen(text, ev, { isGroup: true, userId, imgSegs })) return;
+    if (isImageGenIntent(text) || isImg2ImgIntent(text, imgSegs.length)) {
+      // V15.4：开了生图确认就先问一句（关时直通，行为不变）
+      if (await maybeAskImageConfirm(ev, { isGroup: true, userId, text, imgSegs })) return;
+      if (!genByAgent()) {
+        if (await handleImageGen(text, ev, { isGroup: true, userId, imgSegs })) return;
+      }
     }
 
     // V13.5：合并转发（聊天记录）处理（仅 @/回复机器人 等 bot-directed 才会走到这里）
@@ -5204,8 +5400,11 @@ async function handleMessage(ev) {
   }
 
   // 生图意图（私聊）：V14-D 起同样优先交给 Agent 的 generate_image
-  if (!genByAgent() && (isImageGenIntent(text) || isImg2ImgIntent(text, imgSegs.length))) {
-    if (await handleImageGen(text, ev, { isGroup: false, userId, imgSegs })) return;
+  if (isImageGenIntent(text) || isImg2ImgIntent(text, imgSegs.length)) {
+    if (await maybeAskImageConfirm(ev, { isGroup: false, userId, text, imgSegs })) return;
+    if (!genByAgent()) {
+      if (await handleImageGen(text, ev, { isGroup: false, userId, imgSegs })) return;
+    }
   }
 
   // V13.5：合并转发（聊天记录）处理（私聊一律视为对着机器人）
@@ -5702,6 +5901,10 @@ memoryStore.setConfig(() => CFG);
 dailySummary.setConfig(() => CFG);
 groupProfile.setConfig(() => CFG);
 pokeSocial.setConfig(() => CFG);
+voiceAsr.setConfig(() => CFG);
+styleOpt.setConfig(() => CFG);
+memeSearch.setConfig(() => CFG);
+imageConfirm.setConfig(() => CFG);
 
 // ===== 群聊每日总结：自动定时器（**默认关闭**，必须显式打开且配置白名单才会发群）=====
 let dailySummaryTimer = null;
