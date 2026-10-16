@@ -388,6 +388,8 @@ const DEFAULT_CONFIG = {
     minIntervalMs: 600000,    // 同一成员两次更新画像的最小间隔（10 分钟，避免每条消息都写）
     minSamples: 3,            // 推测类升为画像所需最少样本数（推测不能凭一条就定性）
     ttlDays: 90,              // 画像保留天数（比普通记忆短，避免长期贴标签）
+    maxTotalBytes: 262144,    // 画像总字节上限（256KB）：超了优先淘汰「低置信 + 最久未更新」
+                              // 只限条数不够，必须同时限制总体积，避免画像把记忆文件撑大
     shareToGroup: false,      // 默认不向群内公开成员画像
   },
 
@@ -4667,7 +4669,7 @@ async function handleUserCommand(text, ctx) {
   // ============ V15.2 群友画像管理（复用既有命令风格）============
   // 白名单子命令，避免误劫持将来可能新增的 /画像xxx 指令
   // 隐私：默认只能看/清自己的画像；看别人需管理员；默认不向群内公开。
-  const PROF_SUBS = ['', '清空', '清空确认', '状态'];
+  const PROF_SUBS = ['', '清空', '清空确认', '状态', '删除', '更正'];
   if (PROF_SUBS.some((s) => head === '/画像' + s)) {
     const gp = CFG.groupProfile || {};
     if (gp.enabled !== true) return '群友画像功能已关闭（ai_config.json 里 groupProfile.enabled=true 才启用）。';
@@ -4703,6 +4705,34 @@ async function handleUserCommand(text, ctx) {
       return `已清空 ${r.removed} 条画像。`;
     }
 
+    // /画像删除 关键词 —— 只删自己的（管理员可指定他人 userId，但这里保持最小权限：仅本人）
+    if (sub === '删除') {
+      const kw = String(parts[1] || '').trim();
+      if (!kw) return '用法：/画像删除 关键词（只删你自己的画像，例如 /画像删除 咖啡）';
+      const r = groupProfile.removeProfile({ groupId: gid, userId: String(userId), actor, keyword: kw });
+      if (!r.ok) {
+        const msg = { disabled: '画像功能已关闭。', 'no-isolation-key': '缺少群号或用户号，无法定位画像。', forbidden: '只能删除你自己的画像。', 'not-found': '没找到包含「' + kw + '」的画像。' }[r.error];
+        return msg || ('删除失败：' + (r.error || '未知错误'));
+      }
+      log(`[画像] 用户${maskId(userId)} 删除群${maskId(ev.group_id)}画像 1 条`);
+      return '已删除这条画像：' + r.content;
+    }
+
+    // /画像更正 关键词 新内容 —— 更新旧值，而不是同时保留矛盾的两条
+    if (sub === '更正') {
+      const kw = String(parts[1] || '').trim();
+      const rest = parts.slice(2).join(' ').trim();
+      if (!kw || !rest) return '用法：/画像更正 关键词 新内容（例如 /画像更正 阿甲 叫我老甲）';
+      const r = groupProfile.correctProfile({ groupId: gid, userId: String(userId), actor, keyword: kw, newText: rest });
+      if (!r.ok) {
+        const msg = { disabled: '画像功能已关闭。', forbidden: '只能更正你自己的画像。', 'not-found': '没找到包含「' + kw + '」的画像。', sensitive: '这条内容涉及敏感信息或凭据，已拒绝写入。', empty: '新内容为空。' }[r.error];
+        return msg || ('更正失败：' + (r.error || '未知错误'));
+      }
+      log(`[画像] 用户${maskId(userId)} 更正群${maskId(ev.group_id)}画像 1 条`);
+      return `已更新：「${r.before}」→「${r.after}」`
+        + (r.mergedAway ? `（顺带合并掉 ${r.mergedAway} 条相似旧记录，避免矛盾并存）` : '');
+    }
+
     // /画像状态
     if (sub === '状态') {
       const ps = groupProfile.stats();
@@ -4716,7 +4746,7 @@ async function handleUserCommand(text, ctx) {
       ].join('\n');
     }
 
-    return '用法：/画像 | /画像清空确认 | /画像状态';
+    return '用法：/画像 | /画像删除 关键词 | /画像更正 关键词 新内容 | /画像清空确认 | /画像状态';
   }
 
   return null;

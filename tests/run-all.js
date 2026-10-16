@@ -26,6 +26,7 @@ const OFFLINE = [
   'v153_poke.test.js',          // V15.3 群友戳一戳（纯离线，不发真实戳一戳）
   'v154_rich_features.test.js', // V15.4 语音识别/风格优化/表情包检索/生图确认（纯离线，联网检索用注入 mock）
   'v155_video_deepthink.test.js', // V15.5 短视频识别 + 深度思考判定（纯离线，不抓第三方页面）
+  'v156_phase1_acceptance.test.js', // 第一阶段验收：群聊决策 + 群友画像 + 检索与成本（对应任务书 30 项）
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];

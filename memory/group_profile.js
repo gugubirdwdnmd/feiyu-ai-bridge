@@ -40,6 +40,9 @@ const DEFAULTS = {
   inferredConfidence: 0.3,   // 推测类固定低置信度
   statedConfidence: 0.8,     // 明确陈述类置信度
   shareToGroup: false,       // 默认不向群内公开任何成员的画像
+  // 任务书 B5：不能只限条数而忽略总体积。这是**全部画像条目**的总字节上限，
+  // 超了优先淘汰「低置信 + 最久未更新」的，避免画像把记忆文件撑大。
+  maxTotalBytes: 256 * 1024, // 画像总字节上限（默认 256KB）
 };
 
 function cfg() {
@@ -59,6 +62,7 @@ function cfg() {
     minIntervalMs: num(s.minIntervalMs, DEFAULTS.minIntervalMs, 0),
     minSamples: num(s.minSamples, DEFAULTS.minSamples, 2),
     ttlDays: num(s.ttlDays, DEFAULTS.ttlDays, 1),
+    maxTotalBytes: num(s.maxTotalBytes, DEFAULTS.maxTotalBytes, 4096),
     inferredConfidence: DEFAULTS.inferredConfidence,   // 不允许调高（保持"推测"低置信）
     statedConfidence: num(s.statedConfidence, DEFAULTS.statedConfidence, 0.5),
     shareToGroup: s.shareToGroup === true,             // 默认不公开
@@ -236,6 +240,8 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
 
   // 先按单人上限裁剪（腾出空间，保证合并/更新而非堆积）
   try { enforcePerUser(gid, uid, c); } catch (e) { /* 裁剪失败不阻断写入 */ }
+  // 再按全库总字节上限治理（任务书 B5：不能只限条数而忽略总体积）
+  try { enforceTotalBytes(c); } catch (e) { /* 同上 */ }
 
   const src = PROFILE_SOURCE + ':' + source + ':' + kind;
   // ① 只在「本群 + 本人」的画像条目里找相似项（严格群隔离）
@@ -246,6 +252,8 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
       it.hits = (it.hits || 0) + 1;
       it.updatedAt = Date.now();
       it.lastHitAt = 0;
+      // 再次陈述同一件事 → 视为「再次确认」，刷新最后确认时间（B5 过期淘汰用）
+      it.lastConfirmedAt = Date.now();
       // 再次陈述同一件事 → 置信度小幅提升；推测类不因重复而变成事实
       if (String(it.source || '').indexOf(PROFILE_SOURCE + ':stated') === 0) {
         it.confidence = Math.min(1, (Number(it.confidence) || 0.6) + 0.05);
@@ -268,6 +276,7 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
     source: src,
     createdAt: now,
     updatedAt: now,
+    lastConfirmedAt: now,        // B3：最后确认时间（过期/淘汰策略用）
     expireAt: now + c.ttlDays * 86400000,
     confidence: Math.max(0, Math.min(1, Number(confidence) || 0.6)),
     hits: 0,
@@ -281,8 +290,11 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
 function enforcePerUser(gid, uid, c) {
   c = c || cfg();
   const mine = listRaw(gid, uid);
-  if (mine.length <= c.maxPerUser) return 0;
-  const overflow = mine.length - c.maxPerUser;
+  // ⚠ 必须是「条数已达上限就腾位置」，不能写成 `<=` 才裁剪。
+  //   用 `<=` 时：已有 2 条（上限 2）→ 2<=2 不裁剪 → 写入后变 3 条，上限形同虚设。
+  //   正确做法：满员时先删掉最旧的一条，再写入新条目，保证结果恒 <= maxPerUser。
+  if (mine.length < c.maxPerUser) return 0;
+  const overflow = mine.length - c.maxPerUser + 1;   // +1 是给即将写入的新条目腾位
   // mine 已按时间倒序（新的在前），从尾部删最旧的
   const victims = mine.slice(-overflow);
   let removed = 0;
@@ -370,6 +382,131 @@ function clearProfile(o) {
   return { ok: true, removed };
 }
 
+// ================= 总字节治理（任务书 B5：不能只限条数）=================
+function byteLen(it) {
+  // 内容 + 元数据（id/scope/source/时间等）的粗略开销
+  return String(it.content || '').length + 120;
+}
+
+/** 取出全库所有画像条目（跨群，仅用于总量治理与统计） */
+function allProfiles() {
+  try {
+    return memoryStore.list({ groupId: null, userId: null, allowAll: true }, 5000)
+      .filter((x) => String(x.source || '').indexOf(PROFILE_SOURCE) === 0);
+  } catch (e) { return []; }
+}
+
+/**
+ * 画像总字节上限治理：超限优先淘汰「低置信度 + 最久未更新」的条目。
+ * 明确陈述（stated，高置信）尽量保留，推测类先走。
+ * 只在写入前调用；失败不影响写入本身。
+ * @returns {number} 淘汰条数
+ */
+function enforceTotalBytes(c) {
+  c = c || cfg();
+  if (!c.maxTotalBytes) return 0;
+  const all = allProfiles();
+  let bytes = 0;
+  for (const it of all) bytes += byteLen(it);
+  if (bytes <= c.maxTotalBytes) return 0;
+
+  const sorted = all.slice().sort((a, b) => {
+    const ca = Number(a.confidence) || 0, cb = Number(b.confidence) || 0;
+    if (ca !== cb) return ca - cb;                                   // 低置信先淘汰
+    return (Number(a.updatedAt) || 0) - (Number(b.updatedAt) || 0);  // 再按最久未更新
+  });
+  let removed = 0;
+  for (const it of sorted) {
+    if (bytes <= c.maxTotalBytes) break;
+    try {
+      const r = memoryStore.remove(it.id, { userId: it.userId, isAdmin: true });
+      if (r && r.ok) { bytes -= byteLen(it); removed++; }
+    } catch (e) { /* 单条失败不影响其它 */ }
+  }
+  return removed;
+}
+
+// ================= 单条删除 / 更正（任务书 B6）=================
+/** 权限：本人或管理员；作用域严格限定「本群 + 本人」 */
+function _canManage(o, gid, uid) {
+  const actor = o.actor || {};
+  const actorId = actor.userId == null ? null : String(actor.userId);
+  return String(actorId) === uid || actor.isAdmin === true;
+}
+
+/**
+ * 删除单条画像（按关键词或 id 命中）。
+ * @returns {{ok:boolean, removed?:number, content?:string, error?:string}}
+ *   error: 'disabled' | 'no-isolation-key' | 'forbidden' | 'not-found'
+ */
+function removeProfile(o) {
+  o = o || {};
+  if (!cfg().enabled) return { ok: false, error: 'disabled' };
+  const gid = o.groupId == null ? null : String(o.groupId);
+  const uid = o.userId == null ? null : String(o.userId);
+  if (!gid || !uid) return { ok: false, error: 'no-isolation-key' };
+  if (!_canManage(o, gid, uid)) return { ok: false, error: 'forbidden' };
+
+  const items = listRaw(gid, uid);
+  const kw = String(o.keyword || '').trim();
+  const hit = kw
+    ? items.find((x) => String(x.content || '').includes(kw))
+    : (o.id ? items.find((x) => x.id === o.id) : null);
+  if (!hit) return { ok: false, error: 'not-found' };
+  try {
+    const r = memoryStore.remove(hit.id, { userId: uid, isAdmin: true });
+    if (r && r.ok) return { ok: true, removed: 1, content: hit.content };
+  } catch (e) { /* 落到下面 */ }
+  return { ok: false, error: 'remove-failed' };
+}
+
+/**
+ * 更正某条画像：更新旧条目内容，而不是同时保留互相矛盾的两条事实。
+ * - 命中条目的内容被替换为 newText，来源标记为 stated（用户明确纠正）、置信度提到 statedConfidence，
+ *   并刷新 lastConfirmedAt。
+ * - 与本条高度相似（>=0.8）的其它条目会被一并删除，避免矛盾并存。
+ * @returns {{ok:boolean, before?:string, after?:string, mergedAway?:number, error?:string}}
+ */
+function correctProfile(o) {
+  o = o || {};
+  const c = cfg();
+  if (!c.enabled) return { ok: false, error: 'disabled' };
+  const gid = o.groupId == null ? null : String(o.groupId);
+  const uid = o.userId == null ? null : String(o.userId);
+  if (!gid || !uid) return { ok: false, error: 'no-isolation-key' };
+  if (!_canManage(o, gid, uid)) return { ok: false, error: 'forbidden' };
+
+  const newText = String(o.newText || '').replace(/\s+/g, ' ').trim().slice(0, c.maxLen);
+  if (!newText) return { ok: false, error: 'empty' };
+  if (looksSecret(newText) || looksSensitiveAttr(newText)) return { ok: false, error: 'sensitive' };
+
+  const items = listRaw(gid, uid);
+  const kw = String(o.keyword || '').trim();
+  const hit = kw
+    ? items.find((x) => String(x.content || '').includes(kw))
+    : (o.id ? items.find((x) => x.id === o.id) : null);
+  if (!hit) return { ok: false, error: 'not-found' };
+
+  const before = hit.content;
+  // 删掉其它高度相似的条目，避免「旧值和新值同时存在」这种矛盾状态
+  let mergedAway = 0;
+  for (const it of items) {
+    if (it.id === hit.id) continue;
+    if (memoryStore.similarity(newText, it.content) >= 0.8) {
+      try { if (memoryStore.remove(it.id, { userId: uid, isAdmin: true }).ok) mergedAway++; } catch (e) {}
+    }
+  }
+
+  const now = Date.now();
+  hit.content = newText;
+  hit.source = PROFILE_SOURCE + ':stated:corrected';
+  hit.confidence = c.statedConfidence;
+  hit.updatedAt = now;
+  hit.lastConfirmedAt = now;
+  try { memoryStore.upsertRaw(hit); } catch (e) { return { ok: false, error: 'write-failed' }; }
+  return { ok: true, before, after: newText, mergedAway };
+}
+
 /**
  * 重建某成员画像：先清除，再把给定语料重新观察一遍（不调用任何模型，纯规则重放）。
  * @param {object} o { groupId, userId, actor, texts:[] }
@@ -412,7 +549,8 @@ function injectText(o) {
   if (q.length >= 2) {
     const grams = new Set();
     for (let i = 0; i + 2 <= q.length; i++) grams.add(q.slice(i, i + 2));
-    items = items.slice().sort((a, b) => score(b, grams) - score(a, grams));
+    const total = Math.max(1, grams.size);
+    items = items.slice().sort((a, b) => score(b, grams, total) - score(a, grams, total));
   }
 
   const out = [];
@@ -431,11 +569,18 @@ function injectText(o) {
     + '带「（推测）」的是低置信观察、不可当成事实）：\n- ' + out.join('\n- ');
 }
 
-function score(item, grams) {
+// —— 相关性打分：与 memory_store.retrieve() 保持同一套权重 ——
+// 说明：任务书要求「优先复用 retrieve()」。评估结论是**不能直接复用**：
+//   retrieve() 内部走 list(filter)，而 list() 对 scope='user' 只比对 userId、不比对 groupId
+//   （普通个人记忆的既有设计是「同一人跨群共享」）。画像的隔离键是「群号+QQ号」，
+//   直接复用会把别的群画像检索进来。因此这里仍走严格隔离的 listRaw()，
+//   但打分公式与 retrieve() 对齐（重合度 0.7 + 置信度 0.2 + 命中 0.02），保证排序语义一致。
+function score(item, grams, totalGrams) {
+  let inter = 0;
   const t = String(item.content || '');
-  let hit = 0;
-  for (const g of grams) if (t.includes(g)) hit++;
-  return hit + (Number(item.confidence) || 0) * 0.1;
+  for (const g of grams) if (t.includes(g)) inter++;
+  const overlap = totalGrams ? inter / totalGrams : 0;
+  return overlap * 0.7 + (Number(item.confidence) || 0) * 0.2 + Math.min(0.1, (Number(item.hits) || 0) * 0.02);
 }
 
 function stats() {
@@ -455,7 +600,8 @@ function stats() {
 module.exports = {
   DEFAULTS, PROFILE_SOURCE,
   cfg, enabled, observe, extract, view, clearProfile, rebuild, injectText, stats,
-  profileKey, listRaw, writeProfile, enforcePerUser, looksSensitiveAttr,
+  profileKey, listRaw, writeProfile, enforcePerUser, enforceTotalBytes, allProfiles,
+  removeProfile, correctProfile, looksSensitiveAttr,
   setConfig: (fn) => { module.exports.getCFG = fn; },
   _resetSamples: () => { samples.clear(); },
 };

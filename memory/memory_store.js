@@ -295,7 +295,12 @@ function upsertRaw(item) {
   if (!it.updatedAt) it.updatedAt = Date.now();
   if (it.storedAt == null) it.storedAt = Date.now();
   if (it.hits == null) it.hits = 0;
-  all.items.push(it);
+  // ⚠ 必须「按 id 覆盖」而不是无脑 push。
+  //   初版这里写成了 all.items.push(it)，导致同一条画像每次更新（hits++/更正）
+  //   都会被追加成一份副本 —— 画像越用越多、磁盘越涨，且出现互相矛盾的多份。
+  //   upsert 的语义就是「存在则替换」，这里按 id 精确定位后再决定替换或追加。
+  const idx = all.items.findIndex((x) => x && x.id === it.id);
+  if (idx >= 0) all.items[idx] = it; else all.items.push(it);
   markDirty();
   prune();
   return { ok: true, item: clone(it) };
