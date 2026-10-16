@@ -13,6 +13,7 @@ const image = require('./image');       // V14-C
 const video = require('./video');       // V14-C
 const bilibili = require('./bilibili'); // V14-C
 const genimg = require('./genimg');    // 生图 / 表情包（generate_image、send_sticker）
+const feiyu = require('./feiyu');      // 肥鱼：行动型助手（任务/浏览器/通知/TTS/空间）
 
 function registerAll(deps) {
   deps = deps || {};
@@ -47,6 +48,7 @@ function registerAll(deps) {
   try { names.push(...video.register(deps)); } catch (e) {}      // V14-C
   try { names.push(...bilibili.register(deps)); } catch (e) {}   // V14-C
   try { names.push(...genimg.register(deps)); } catch (e) {}     // 生图 / 表情包
+  try { names.push(...feiyu.register(deps)); } catch (e) {}      // 肥鱼：行动型助手（任务/浏览器/通知/TTS/空间）
 
   return names;
 }
@@ -60,4 +62,4 @@ function permissionMap() {
   return map;
 }
 
-module.exports = { registerAll, permissionMap, web, memory, file, chatRecord, image, video, bilibili, genimg };
+module.exports = { registerAll, permissionMap, web, memory, file, chatRecord, image, video, bilibili, genimg, feiyu };

@@ -5496,6 +5496,18 @@ try {
       generateImageTool(String((ctx && ctx.sessionId) || ''), { prompt, source }, ctx || {}),
     sendSticker: (keyword, ctx) =>
       sendStickerTo(String((ctx && ctx.sessionId) || ''), keyword, ctx || {}),
+    // 肥鱼升级：注入配置与对外发送能力（新功能默认全关，仅按配置启用）
+    config: CFG,
+    adminList: (CFG.admin && CFG.admin.qq) || [],
+    sendToMaster: async (text, opts) => {
+      const list = (CFG.admin && CFG.admin.qq) || [];
+      const targets = (opts && opts.target) ? [String(opts.target)] : list;
+      for (const q of targets) {
+        try { await napcatCall('send_private_msg', { user_id: Number(q), message: String(text) }); } catch (e) {}
+      }
+    },
+    authorizedQZone: false,
+    // runTask：真实自主执行需注入 Agent 调用；默认不注入（任务仅做生命周期登记，零模型成本）
   });
 } catch (e) {
   log('[Agent] 初始化失败，已回退为纯 V13.5 行为: ' + e.message);
@@ -5505,8 +5517,11 @@ try { fs.mkdirSync(STICKER_DIR, { recursive: true }); } catch (e) {}
 try { fs.mkdirSync(WORKSPACE_DIR, { recursive: true }); } catch (e) {}
 // 统计定期落盘（防进程被杀丢数据），并把内存态缓存的配置写出来便于排查
 if (CFG.stats.enable) { const t = setInterval(saveStats, 60000); if (t.unref) t.unref(); }
-// 主动聊天：每分钟检查一次计划，到点向群发开场白
-{ const t = setInterval(runProactiveOnce, 60 * 1000); if (t.unref) t.unref(); }
+// 主动聊天：每分钟检查一次计划，到点向群发开场白；同时驱动肥鱼任务调度与通知冲刷
+{ const t = setInterval(async () => {
+    try { runProactiveOnce(); } catch (e) {}
+    try { const f = require('./tools/feiyu').getFeiyu(); if (f) await f.tick(); } catch (e) {}
+  }, 60 * 1000); if (t.unref) t.unref(); }
 
 server.listen(LISTEN_PORT, '127.0.0.1', () => {
   log('='.repeat(46));
