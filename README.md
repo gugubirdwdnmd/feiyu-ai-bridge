@@ -46,7 +46,8 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 | 用量看板与分账 | 单文件 HTML 看板；按 `answer` / `judge` / `vision` / `agent` 分类统计 token |
 | 输出安全过滤 | 自动抹除 API Key、本机绝对路径、端口号、内部模块名、"我是 GPT"类身份误称 |
 | 入网安全 | `url_safety.js`：IPv4/IPv6 全特殊段识别、拒绝 userinfo、DNS 解析后分类、防 DNS 重绑 |
-| 测试 | 18 个测试文件、上千条断言；离线用例零网络依赖，live 用例（本机 ComfyUI）在无后端时自动跳过 |
+| 任务与主动汇报（V15，默认全关） | `feiyu/`：任务调度（可取消/超时）、主动通知、预算控制。**所有新功能默认关闭**，未配置执行器时任务仅登记不执行 |
+| 测试 | 15 个测试文件、上千条断言；离线用例零网络依赖，live 用例（本机 ComfyUI）在无后端时自动跳过 |
 
 ---
 
@@ -100,8 +101,14 @@ export DEEPSEEK_API_KEY="sk-你的密钥"
 | `budget.enabled` / `daily_tokens` | 每日 token 预算，默认关闭 |
 | `agent.enabled` | 多步 Agent 开关 |
 | `image.*` | 生图后端（本机 ComfyUI），工作流配置见 `workflows/README.md` |
+| `taskManager` / `browser` / `notifier` / `tts` / `qzone` | **V15 功能，默认全部 `false`**；均为**顶层键**（不是嵌套在 `feiyu` 下）。详见 `feiyu/V15_GUIDE.md` |
 
 删掉 `ai_config.json` 则全部走内置默认值。
+
+> **V15 说明**：这 5 个顶层键控制任务调度、浏览器自动化、主动通知、语音、QQ 空间。
+> 模板里它们**默认全关**，真实浏览器（`allowRealBrowse`）、真实通知、真实 QQ 空间发布
+> （`realEnabled`）也**默认关闭**。启用前请先读 `feiyu/V15_GUIDE.md` 了解各模块的
+> 未验证项与安全边界。
 
 3. **NapCat 侧**：新增一个 OneBot11 HTTP 服务端，监听 `127.0.0.1:3000`，消息格式设为 `array`，上报地址指向本桥接层的 `3001` 端口；Token 填到 `secrets.json` 的 `onebotToken`。
 
@@ -145,7 +152,10 @@ live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行�
 ├─ ai_config.example.json  配置模板（真实配置 ai_config.json 不入库）
 ├─ secrets.example.json    密钥模板（真实 secrets.json 不入库）
 ├─ agent/                  多步 Agent 子系统（agent_core / intent / state / tool_router）
-├─ tools/                  工具层：web / bilibili / image / video / file / memory / result / chat_record
+├─ tools/                  工具层：web / bilibili / image / video / file / memory / result / chat_record / feiyu
+├─ feiyu/                  V15 行动型助手（**默认全关**，详见 feiyu/V15_GUIDE.md）
+│                          task_manager / task_store / notifier / browser_adapter /
+│                          tts / qzone_adapter / cost_control / permissions
 ├─ chat_record_parser/     合并转发与聊天记录解析
 ├─ memory/                 记忆模块（运行时数据 json 不入库）
 ├─ workflows/              ComfyUI 图像工作流（含说明）
@@ -166,6 +176,11 @@ live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行�
 4. **管理员命令**：仅私聊管理员可用（默认 `private_only`），不会被群消息触发。
 5. **输出过滤**：抹除本机绝对路径、端口号、内部模块名、身份误称。
 6. **安全下载传输层**：`safe_http.js` 已接入网页抓取 / 图片下载 / 网页搜索 / 云端图 URL / 视频 URL 兜底下载等生产入口（统一走 `safeFetch`：固定已校验 IP + socket 远端 IP 复核 + 逐跳重定向重校验 + 压缩前/后双字节上限 + 四档超时），消除「先校验 DNS 再裸连接」的 DNS 重绑定窗口。防护行为由 `tests/s3_net.test.js`（110 条断言，本地 127.0.0.1 受控服务）真实验证。
+7. **主动通知收件人（V15）**：`feiyu/notifier.js` 在 `enqueue()` **模块内部**强制校验接收人必须属于配置的授权名单（主人 QQ / `admin.qq`），传入名单外目标一律拒绝（`target-not-allowed`），非法格式拒绝（`target-invalid`），**未配置合法接收人时拒绝发送**（`no-target`）。不依赖上层工具层的管理员检查，也不静默改投其他目标；运行时 `setTargets()` 会同步刷新名单，已撤销的目标立即失效。
+8. **真实浏览器【未验证 UNVERIFIED】**：`feiyu/browser_adapter.js` **默认关闭真实浏览**（`allowRealBrowse=false`，`provider=mock`）。开启需同时显式开启开关**并**由宿主注入兼容的 Playwright 实例，缺实例即 fail-safe 拒绝。仓库为「零第三方依赖」、未安装任何浏览器库，**真实浏览路径未经端到端验证**——其请求级 SSRF / 重定向 / DNS 重绑定拦截逻辑仅有确定性单测覆盖（mock 浏览器 + 注入 DNS，不联网）。请勿据此宣称端到端验证；且 Playwright 不支持对任意主机做 IP 固定，防护属尽力而为。
+9. **任务取消与超时（V15）**：任务上下文提供真实 `AbortSignal`，执行器可透传给 `fetch`/`http`/`spawn` 真正中断。系统**如实区分「已请求取消」与「已确认停止」**：忽略信号的长任务不会被显示为已停止（`executionStopped=false`），系统不保证瞬时中止。无执行器时任务仅登记（`executed=false`），不假称已执行。
+10. **任务数据保护（V15）**：JSON 损坏/未知格式时保留 `.corrupt-*` 原文件副本；**若备份写入失败则进入隔离模式**，`save()` 抛 `EQUARANTINE` 拒绝覆盖原文件，绝不静默清空或覆盖唯一的原始数据（需人工处理后显式解除）。临时写入失败与原子替换失败均抛错、清理残留并保持原文件不变。
+11. **QQ 空间发布**：无合规开放接口，代码层拒绝真实发布（即便 `realEnabled=true`）。
 
 ---
 
@@ -184,7 +199,7 @@ A：确认本机 ComfyUI 已在运行、对应工作流文件与自定义节点�
 A：本地预筛不花钱；只有进入判定和生成才调用模型。建议开启 `budget.enabled` 设置每日上限。
 
 **Q：有语音功能吗？**
-A：**没有**，本项目不含任何语音识别或语音合成能力。
+A：**没有内置的真实语音能力**。本项目不含任何语音识别（STT）能力。V15 起提供了 TTS 接口层（`feiyu/tts.js`），但默认 `provider=mock` 只产出**占位音频**（MP3 帧头 + 静音体，仅供格式/体积校验），**不是真实中文朗读**；真实引擎需自行接入 `local`/`cloud` provider 并另行授权。
 
 ---
 
