@@ -25,9 +25,17 @@ class Notifier {
       dedupWindowMs: 5 * 60 * 1000,
       maxRetries: 3,
       retryBaseMs: 30000,
+      maxQueue: 500,            // 待发队列容量上限（超出则丢弃最旧 pending，防止无限膨胀）
+      sentRetentionMs: 24 * 3600 * 1000,  // sent 记录保留时长
+      deadRetentionMs: 7 * 24 * 3600 * 1000, // 失败(dead)记录有限期保留后清理
       targets: [],
     }, opts.config || {});
+    // 兼容别名：quietStart/quietEnd → quietHours；maxPerTargetPerHour → rateLimitPerTarget
+    const c = opts.config || {};
+    if (!this.cfg.quietHours && (c.quietStart || c.quietEnd)) this.cfg.quietHours = { start: c.quietStart, end: c.quietEnd };
+    if (!this.cfg.rateLimitPerTarget && c.maxPerTargetPerHour) this.cfg.rateLimitPerTarget = Number(c.maxPerTargetPerHour);
     this._rate = new Map();     // target -> [timestamp]
+    this._flushing = false;     // 防重入锁：避免并发/重叠调用重复处理同一条
   }
 
   _dedupKey(kind, text) {
@@ -65,11 +73,13 @@ class Notifier {
       const key = this._dedupKey(kind, text);
       const recent = this.store.filter((n) => n.key === key && (now - (n.lastSentAt || 0)) < this.cfg.dedupWindowMs && n.status === 'sent');
       if (recent.length) { results.push({ target: tg, skipped: 'dedup' }); continue; }
+      // 容量限制：超出 maxQueue 则丢弃最旧 pending
+      this._enforceCapacity();
       const item = {
         id: (crypto.randomUUID ? crypto.randomUUID() : 'n_' + now + '_' + Math.random().toString(36).slice(2)),
         target: tg, kind: String(kind || 'info'), text: String(text || '').slice(0, 4000),
         key, status: 'pending', createdAt: now, lastSentAt: null, retries: 0,
-        quietDefer: (this._inQuiet(now) && !o.urgent),
+        nextRetryAt: null, quietDefer: (this._inQuiet(now) && !o.urgent),
       };
       this.store.set(item);
       results.push({ target: tg, id: item.id });
@@ -78,34 +88,63 @@ class Notifier {
     return { ok: true, results };
   }
 
-  /** 发送待发队列（由每分钟循环调用）。返回 {sent,failed,deferred}。 */
+  /** 发送待发队列（由每分钟循环调用）。返回 {sent,failed,deferred,skipped}。
+   *  V15 修正（要求④）：
+   *   - 防重入：并发/重叠调用时仅第一个真正处理，其余立即返回（避免重复处理同一条）；
+   *   - 重试时间窗：pending 但 nextRetryAt 在未来时跳过本轮（deferred），不提前重试；
+   *   - 队列容量：enqueue 时限制总量；
+   *   - 失败记录有限期保留（deadRetentionMs）后清理，而非立即消失。 */
   async flush() {
-    if (!this.send) return { sent: 0, failed: 0, deferred: 0 };
+    if (!this.send) return { sent: 0, failed: 0, deferred: 0, skipped: 0 };
+    if (this._flushing) return { sent: 0, failed: 0, deferred: 0, skipped: 0, note: 'already-flushing' };
+    this._flushing = true;
     const now = nowMs();
-    let sent = 0, failed = 0, deferred = 0;
-    for (const n of this.store.list()) {
-      if (n.status !== 'pending') continue;
-      if (n.quietDefer && this._inQuiet(now)) { deferred++; continue; }
-      if (!this._rateOk(n.target, now)) { deferred++; continue; }
-      try {
-        await this.send(n.target, n.text);
-        n.status = 'sent'; n.lastSentAt = now; n.sentAt = now; sent++;
-      } catch (e) {
-        n.retries = (n.retries || 0) + 1;
-        if (n.retries >= this.cfg.maxRetries) { n.status = 'dead'; n.error = String((e && e.message) || e).slice(0, 200); failed++; }
-        else n.nextRetryAt = now + this.cfg.retryBaseMs * n.retries;
+    let sent = 0, failed = 0, deferred = 0, skipped = 0;
+    try {
+      for (const n of this.store.list()) {
+        if (n.status !== 'pending') continue;
+        // 重试时间窗未到：跳过本轮
+        if (n.nextRetryAt && n.nextRetryAt > now) { deferred++; continue; }
+        if (n.quietDefer && this._inQuiet(now)) { deferred++; continue; }
+        if (!this._rateOk(n.target, now)) { deferred++; continue; }
+        try {
+          await this.send(n.target, n.text);
+          n.status = 'sent'; n.lastSentAt = now; n.sentAt = now; sent++;
+        } catch (e) {
+          n.retries = (n.retries || 0) + 1;
+          if (n.retries >= this.cfg.maxRetries) {
+            n.status = 'dead'; n.deadAt = now; n.error = String((e && e.message) || e).slice(0, 200); failed++;
+          } else {
+            n.nextRetryAt = now + this.cfg.retryBaseMs * n.retries;
+          }
+        }
       }
+      this._persist();
+      this._cleanup(now);
+      return { sent, failed, deferred, skipped };
+    } finally {
+      this._flushing = false;
     }
-    this._persist();
-    this._cleanup();
-    return { sent, failed, deferred };
   }
 
-  _cleanup() {
-    const now = nowMs();
+  /** 超出容量时丢弃最旧 pending（保留最近优先）。 */
+  _enforceCapacity() {
+    const max = Number(this.cfg.maxQueue) || 500;
+    const pending = this.store.list().filter((n) => n.status === 'pending')
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    while (pending.length >= max) {
+      const old = pending.shift();
+      this.store.remove(old.id);
+    }
+  }
+
+  _cleanup(now) {
+    now = now || nowMs();
+    const sentRet = Number(this.cfg.sentRetentionMs) || 24 * 3600 * 1000;
+    const deadRet = Number(this.cfg.deadRetentionMs) || 7 * 24 * 3600 * 1000;
     for (const n of this.store.list()) {
-      if (n.status === 'sent' && (now - (n.sentAt || 0) > 24 * 3600 * 1000)) this.store.remove(n.id);
-      else if (n.status === 'dead') this.store.remove(n.id);
+      if (n.status === 'sent' && (now - (n.sentAt || n.lastSentAt || 0) > sentRet)) this.store.remove(n.id);
+      else if (n.status === 'dead' && (now - (n.deadAt || n.lastSentAt || 0) > deadRet)) this.store.remove(n.id);
     }
   }
   _persist() { if (this.store.file && this.store.file !== 'memory://notify') { try { this.store.save(); } catch (e) {} } }

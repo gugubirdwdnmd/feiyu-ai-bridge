@@ -21,6 +21,7 @@ const OFFLINE = [
   'group_admin_cmd.test.js',
   'feature_command_integration.test.js',
   'feature_summary_memory.test.js',
+  'feiyu_upgrade.test.js',
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];

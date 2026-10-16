@@ -115,7 +115,7 @@ function register(deps) {
   if (config.tts && config.tts.enabled) {
     router.registerTool({
       name: 'tts_say',
-      description: '将文字合成为语音（仅管理员）。生成音频文件并返回语音消息段，由桥接负责发送。不硬编码任何密钥。',
+      description: '将文字合成为语音（仅管理员）。默认 provider=mock 时仅产出占位音频（MP3 帧头+静音体），不是真实中文朗读，仅供格式/体积校验；需配置 local/cloud 引擎才会生成真实语音。由桥接负责发送。不硬编码任何密钥。',
       inputSchema: { type: 'object', properties: { text: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['text'], additionalProperties: false },
       permission: router.PERMISSION.LIMITED, timeout: 30000, tokenCost: 0, riskLevel: 'medium',
       safety: (a, ctx) => adminOnly(ctx, adminList),
@@ -123,7 +123,14 @@ function register(deps) {
         const r = await F.tts.generate(a.text, { save: true });
         if (!r.ok) return R.failResult('tts_say', r.error, false, {});
         const seg = F.tts.buildAudioMessage(r);
-        return R.okResult('tts_say', { filePath: r.filePath, bytes: r.bytes, durationMs: r.durationMs, seg }, '语音已生成: ' + r.bytes + 'B', { seg });
+        // V15 修正（要求⑧）：mock 占位音频不得宣传为真实语音
+        const isMock = F.tts.provider === 'mock';
+        const note = isMock
+          ? '（占位音频·非真实语音：mock 仅生成 MP3 帧头+静音体用于格式/体积校验，不会发出真实朗读）'
+          : '';
+        return R.okResult('tts_say', { filePath: r.filePath, bytes: r.bytes, durationMs: r.durationMs, seg, mock: isMock },
+          '语音已生成: ' + r.bytes + 'B' + note,
+          { seg, mock: isMock });
       },
     }); out.push('tts_say');
   }

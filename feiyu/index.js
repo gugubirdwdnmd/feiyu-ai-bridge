@@ -45,9 +45,11 @@ function initFeiyu(config, deps) {
   const adminList = (config.admin && config.admin.qq) || deps.adminList || [];
 
   const taskCfg = Object.assign({ storeFile: _dir('tasks.json') }, config.taskManager || {});
-  const executor = typeof deps.runTask === 'function' ? deps.runTask : buildDefaultExecutor(
-    new BrowserAdapter(config.browser), new CostControl(config.budget)
-  );
+  // V15 修正（要求⑥）：无 deps.runTask 时【不】使用默认执行器假装成功，
+  // 而是传入 null 执行器，让任务进入"仅生命周期登记"模式（executed:false），
+  // 任务状态不再被解释为实际工作完成。
+  const hasRealExecutor = typeof deps.runTask === 'function';
+  const executor = hasRealExecutor ? deps.runTask : null;
 
   const notifier = new Notifier({
     storeFile: _dir('notifications.json'),
@@ -59,10 +61,22 @@ function initFeiyu(config, deps) {
   taskManager.init();
 
   // 任务事件 → 主动汇报给主人（仅当通知启用且任务有 owner）
+  // V15 修正（要求⑥）：明确区分"任务执行成功（executed）"与"仅生命周期登记成功（未执行）"
   taskManager.onEvent = (ev, task) => {
     if (!notifier.cfg.enabled) return;
     if (!(ev === 'completed' || ev === 'failed' || ev === 'created' || ev === 'cancelled')) return;
-    const label = { completed: '完成', failed: '失败', created: '已创建', cancelled: '已取消' }[ev] || ev;
+    if (ev === 'completed') {
+      if (!task.executed) {
+        // 仅生命周期登记成功：未真正执行任何工作，不得称为"完成"
+        const text = `[任务已登记·未执行] ${task.title}（${task.id.slice(0, 8)}）仅完成生命周期登记，当前未配置执行器，不会真正执行任何工作。`;
+        notifier.enqueue(null, 'task_registered', text, {});
+        return;
+      }
+      const text = `[任务完成] ${task.title}（${task.id.slice(0, 8)}）`;
+      notifier.enqueue(null, 'task_completed', text, {});
+      return;
+    }
+    const label = { failed: '失败', created: '已创建', cancelled: '已取消' }[ev] || ev;
     const text = `[任务${label}] ${task.title}（${task.id.slice(0, 8)}）` + (task.error ? '：' + task.error.slice(0, 100) : '');
     notifier.enqueue(null, 'task_' + ev, text, { urgent: ev === 'failed' });
   };

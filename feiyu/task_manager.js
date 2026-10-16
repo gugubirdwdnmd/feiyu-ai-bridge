@@ -6,6 +6,13 @@
 //       定时(每日HH:MM)/一次性(ISO或HH:MM)/间隔(每N分钟)调度、过期与重复触发处理。
 // 实际"干活"由外部注入的 executor(step, task, ctx) 完成——本模块只管生命周期与调度，
 // 不假设具体怎么执行，便于离线测试与成本控制（由 executor 内部决定是否调模型）。
+//
+// V15 修正（要求③⑥）：
+//  - 引入可取消执行上下文 ctx（isCancelled/isPauseRequested/cancel/pause/timedOut），
+//    每步 await 之后及时检查，防止已取消/已暂停任务继续推进；
+//  - 取消/暂停 API 在任务运行时仅"请求"中断，并如实说明：无法立即中断的底层操作可能仍会执行完毕；
+//  - 超时不再无脑重试，标记 timedOut 并视为失败（避免反复超时消耗资源）；
+//  - executed 字段区分"任务执行成功"（executed:true）与"仅生命周期登记成功"（executed:false，无执行器时）。
 
 const crypto = require('crypto');
 const { JsonStore, nowMs } = require('./task_store');
@@ -46,12 +53,14 @@ class TaskManager {
     this._active = 0;          // 当前 running 数
     this._seq = 0;
     this._loading = false;
+    /** @type {Map<string, object>} 运行中的任务 id -> 可取消上下文（不持久化） */
+    this._ctxs = new Map();
   }
 
   // ---------- 持久化 / 启动恢复 ----------
   init() {
     const arr = this.store.list();
-    // 重启恢复：running/pending 重新入队；过期一次性任务标记失败
+    // 重启恢复：running/paused 重新入队；过期一次性任务标记失败
     const now = nowMs();
     for (const t of arr) {
       if (t.status === 'running' || t.status === 'paused') {
@@ -91,6 +100,7 @@ class TaskManager {
       stepIndex: 0,
       totalSteps: steps.length,
       completedSteps: 0,
+      executed: false,       // V15：区分"已实际执行"与"仅生命周期登记"
       result: null,
       error: null,
       retries: 0,
@@ -146,7 +156,7 @@ class TaskManager {
     let arr = this.store.list();
     if (filter && filter.status) arr = arr.filter((t) => t.status === filter.status);
     if (filter && filter.ownerId != null) arr = arr.filter((t) => String(t.ownerId) === String(filter.ownerId));
-    return arr.sort((a, b) => (b.priority - a.priority) || (b.createdAt - a.createdAt));
+    return arr.sort((a, b) => (b.priority - a.priority) || (b.createdAt - b.createdAt));
   }
   stats() {
     const s = { pending: 0, running: 0, paused: 0, completed: 0, failed: 0, cancelled: 0, total: 0 };
@@ -155,16 +165,42 @@ class TaskManager {
     return s;
   }
 
+  // ---------- 可取消执行上下文 ----------
+  _makeCtx(t) {
+    const ctx = {
+      taskId: t.id,
+      startAt: nowMs(),
+      cancelled: false,
+      pauseRequested: false,
+      timedOut: false,
+      // 供执行器轮询：是否已取消 / 是否已请求暂停
+      isCancelled() { return ctx.cancelled; },
+      isPauseRequested() { return ctx.pauseRequested; },
+      // 由 cancel()/pause()/超时 设置
+      cancel() { ctx.cancelled = true; },
+      pause() { ctx.pauseRequested = true; },
+    };
+    return ctx;
+  }
+
   // ---------- 控制 ----------
   pause(id) {
     const t = this.store.get(id);
     if (!t) return { ok: false, error: '任务不存在' };
     if (t.status !== 'running' && t.status !== 'pending') return { ok: false, error: '当前状态不可暂停: ' + t.status };
+    const wasRunning = t.status === 'running';
     t.status = 'paused';
     t.updatedAt = nowMs();
+    const ctx = this._ctxs.get(id);
+    if (ctx) ctx.pause(); // 信号运行中执行器尽快于步骤边界暂停
     this.store.set(t); this._persist(t);
     this._emit('paused', t);
-    return { ok: true, task: t };
+    return {
+      ok: true, task: t,
+      note: wasRunning
+        ? '已请求暂停。若底层执行当前正在运行中，将尽快于步骤边界暂停；无法立即中断的底层操作可能仍会执行到该步结束。'
+        : '已暂停（任务尚未开始执行）。',
+    };
   }
   resume(id) {
     const t = this.store.get(id);
@@ -180,12 +216,21 @@ class TaskManager {
     const t = this.store.get(id);
     if (!t) return { ok: false, error: '任务不存在' };
     if (t.status === 'completed' || t.status === 'cancelled') return { ok: false, error: '已终态，无需取消' };
+    const wasRunning = t.status === 'running';
     t.status = 'cancelled';
     t.finishedAt = nowMs();
     t.updatedAt = nowMs();
+    t.history.push({ at: nowMs(), ev: 'cancelled' });
+    const ctx = this._ctxs.get(id);
+    if (ctx) ctx.cancel(); // 信号运行中执行器尽快于步骤边界停止
     this.store.set(t); this._persist(t);
     this._emit('cancelled', t);
-    return { ok: true, task: t };
+    return {
+      ok: true, task: t,
+      note: wasRunning
+        ? '已请求取消。若底层执行当前正在运行中，将尽快于步骤边界停止；无法立即中断的底层操作（如已发起的网络请求、子进程）可能仍会执行完毕，本系统不保证瞬时中止。'
+        : '已取消（任务尚未开始执行）。',
+    };
   }
   setGlobalPause(on) { this.globalPaused = !!on; return { ok: true, globalPaused: this.globalPaused }; }
   setStopNew(on) { this.stopNew = !!on; return { ok: true, stopNew: this.stopNew }; }
@@ -223,26 +268,30 @@ class TaskManager {
   _start(t, now) {
     if (this.globalPaused || this.stopNew) return false;
     if (this._active >= this.cfg.maxConcurrent) return false;
+    if (this._ctxs.has(t.id)) return false; // 已在运行，避免重复启动
     t.status = 'running';
     t.startedAt = t.startedAt || now;
     t.lastRunAt = now;
     t.updatedAt = now;
+    const ctx = this._makeCtx(t);
+    this._ctxs.set(t.id, ctx);
     this._active++;
     this.store.set(t); this._persist(t);
     this._emit('started', t);
-    this._runSteps(t).then(
-      () => { this._active = Math.max(0, this._active - 1); },
-      () => { this._active = Math.max(0, this._active - 1); }
+    this._runSteps(t, ctx).then(
+      () => { this._active = Math.max(0, this._active - 1); this._ctxs.delete(t.id); },
+      () => { this._active = Math.max(0, this._active - 1); this._ctxs.delete(t.id); }
     );
     return true;
   }
 
-  async _runSteps(t) {
+  async _runSteps(t, ctx) {
     const now = nowMs();
     if (!this.executor) {
       // 未配置执行器：标记完成但附说明（不挂起、不假称成功执行了工作）
       t.status = 'completed';
-      t.result = { ok: true, note: '无执行器，仅完成生命周期登记' };
+      t.executed = false;
+      t.result = { ok: true, executed: false, note: '无执行器，仅完成生命周期登记' };
       t.finishedAt = nowMs();
       t.updatedAt = nowMs();
       t.history.push({ at: now, ev: 'no-executor' });
@@ -252,15 +301,30 @@ class TaskManager {
     }
     try {
       for (let i = t.stepIndex; i < t.steps.length; i++) {
-        if (t.status === 'cancelled' || t.status === 'paused') return; // 中途被控
+        if (ctx.isCancelled()) { if (t.status !== 'cancelled') this._finalizeCancelled(t); return; }
+        if (ctx.isPauseRequested()) { if (t.status !== 'paused') this._finalizePaused(t); return; }
         if (i >= this.cfg.maxSteps) { t.error = '超过步骤上限'; break; }
         const step = t.steps[i];
-        const r = await this._withTimeout(this.executor(step, t, { now }), this.cfg.taskTimeoutMs);
+        const r = await this._withTimeout(this.executor(step, t, ctx), this.cfg.taskTimeoutMs, ctx);
+        // 步骤边界再次检查：已被取消/暂停则停止推进
+        if (ctx.isCancelled()) { if (t.status !== 'cancelled') this._finalizeCancelled(t); return; }
+        if (ctx.isPauseRequested()) { if (t.status !== 'paused') this._finalizePaused(t); return; }
         t.stepIndex = i + 1;
         t.completedSteps = i + 1;
-        t.history.push({ at: nowMs(), step: i, ok: !!(r && r.ok), out: r && r.ok ? undefined : (r && r.error) });
+        t.history.push({ at: nowMs(), step: i, ok: !!(r && r.ok), out: (r && r.ok) ? undefined : (r && r.error) });
         if (!r || !r.ok) {
-          // 重试
+          // 超时：不再无脑重试，标记 timedOut 并视为失败
+          if (r && r.timedOut) {
+            t.status = 'failed';
+            t.executed = true;
+            t.timedOut = true;
+            t.error = (r && r.error) || '步骤执行超时';
+            t.finishedAt = nowMs();
+            t.updatedAt = nowMs();
+            this.store.set(t); this._persist(t);
+            this._emit('failed', t);
+            return;
+          }
           if (t.retries < t.maxRetries) {
             t.retries++;
             i--; // 重试当前步
@@ -268,6 +332,7 @@ class TaskManager {
             continue;
           }
           t.status = 'failed';
+          t.executed = true;
           t.error = (r && r.error) || '步骤执行失败';
           t.finishedAt = nowMs();
           t.updatedAt = nowMs();
@@ -277,9 +342,12 @@ class TaskManager {
         }
         if (this.cfg.stepGapMs) await new Promise((s) => setTimeout(s, this.cfg.stepGapMs));
       }
+      if (ctx.isCancelled()) { if (t.status !== 'cancelled') this._finalizeCancelled(t); return; }
+      if (ctx.isPauseRequested()) { if (t.status !== 'paused') this._finalizePaused(t); return; }
       if (t.status === 'running') {
         t.status = 'completed';
-        t.result = { ok: true, steps: t.completedSteps };
+        t.executed = true;
+        t.result = { ok: true, executed: true, steps: t.completedSteps };
         t.finishedAt = nowMs();
         t.updatedAt = nowMs();
         this.store.set(t); this._persist(t);
@@ -289,12 +357,30 @@ class TaskManager {
       this._reschedule(t);
     } catch (e) {
       t.status = 'failed';
+      t.executed = true;
       t.error = String((e && e.message) || e).slice(0, 300);
       t.finishedAt = nowMs();
       t.updatedAt = nowMs();
       this.store.set(t); this._persist(t);
       this._emit('failed', t);
     }
+  }
+
+  _finalizeCancelled(t) {
+    t.status = 'cancelled';
+    t.updatedAt = nowMs();
+    if (!t.finishedAt) t.finishedAt = nowMs();
+    t.history.push({ at: nowMs(), ev: 'cancelled-mid' });
+    this.store.set(t); this._persist(t);
+    this._emit('cancelled', t);
+  }
+
+  _finalizePaused(t) {
+    t.status = 'paused';
+    t.updatedAt = nowMs();
+    t.history.push({ at: nowMs(), ev: 'paused-mid' });
+    this.store.set(t); this._persist(t);
+    this._emit('paused', t);
   }
 
   _reschedule(t) {
@@ -321,10 +407,14 @@ class TaskManager {
     this.store.set(t); this._persist(t);
   }
 
-  _withTimeout(p, ms) {
+  _withTimeout(p, ms, ctx) {
     return new Promise((resolve) => {
       let done = false;
-      const timer = setTimeout(() => { if (done) return; done = true; resolve({ ok: false, error: '步骤超时(' + ms + 'ms)' }); }, ms);
+      const timer = setTimeout(() => {
+        if (done) return; done = true;
+        if (ctx) { ctx.timedOut = true; } // 仅标记超时；不调用 cancel()，否则会与"取消"语义混淆
+        resolve({ ok: false, error: '步骤超时(' + ms + 'ms)', timedOut: true });
+      }, ms);
       Promise.resolve(p).then(
         (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v || { ok: true }); },
         (e) => { if (done) return; done = true; clearTimeout(timer); resolve({ ok: false, error: String((e && e.message) || e).slice(0, 300) }); }

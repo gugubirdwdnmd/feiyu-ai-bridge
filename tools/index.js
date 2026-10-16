@@ -13,7 +13,7 @@ const image = require('./image');       // V14-C
 const video = require('./video');       // V14-C
 const bilibili = require('./bilibili'); // V14-C
 const genimg = require('./genimg');    // 生图 / 表情包（generate_image、send_sticker）
-const feiyu = require('./feiyu');      // 肥鱼：行动型助手（任务/浏览器/通知/TTS/空间）
+const feiyu = require('./feiyu');      // 肥鱼升级：任务/浏览器/通知/TTS/QQ空间（默认全关，按配置启用）
 
 function registerAll(deps) {
   deps = deps || {};
@@ -48,7 +48,7 @@ function registerAll(deps) {
   try { names.push(...video.register(deps)); } catch (e) {}      // V14-C
   try { names.push(...bilibili.register(deps)); } catch (e) {}   // V14-C
   try { names.push(...genimg.register(deps)); } catch (e) {}     // 生图 / 表情包
-  try { names.push(...feiyu.register(deps)); } catch (e) {}      // 肥鱼：行动型助手（任务/浏览器/通知/TTS/空间）
+  try { names.push(...feiyu.register(deps)); } catch (e) {}      // 肥鱼升级：任务/浏览器/通知/TTS/QQ空间（默认全关）
 
   return names;
 }
