@@ -235,31 +235,38 @@ withCfg({ groupProfile: { enabled: true, minIntervalMs: 0, maxLen: 6000, maxPerU
 });
 
 // ==================================================================
-// 6. 淘汰失败 → 拒绝写入，不留下超限状态（模拟 remove 全部失败）
+// 6. 淘汰失败 → 新条目已先写入，旧数据不丢，overBudget 如实上报（延迟淘汰）
 // ==================================================================
-group('6. 淘汰失败 → 不误报成功');
+group('6. 淘汰失败 → 新条目已写入、旧数据不丢、overBudget 如实上报');
 freshStore();
 withCfg(CFG_CAP, () => {
   const c = groupProfile.cfg();
-  for (let i = 0; i < 30; i++) groupProfile.writeProfile('g1', 'uD', mk(i), 'stated', 0.8, '偏好', c);
-  const beforeBytes = bytesNow();
-  const beforeCount = profileCount();
-  eq(beforeBytes, 4080, '6. 夹具：已用 4080 字节');
+  const note = memoryStore.add({ scope: 'user', groupId: 'g1', userId: 'uNote', content: '普通长期记忆：验收材料周五前提交', source: 'note', confidence: 0.8, ttlDays: 180 });
+  eq(note.ok, true, '6. 夹具：普通长期记忆已写入（容量治理不得触碰）');
 
+  for (let i = 0; i < 30; i++) groupProfile.writeProfile('g1', 'uD', mk(i), 'stated', 0.8, '偏好', c);
+  const beforeCount = profileCount();
+  eq(bytesNow(), 4080, '6. 夹具：已用 4080 字节（未超限，再加一条才超）');
+
+  // 模拟「容量治理删除全部失败」：remove 恒返回失败
   const origRemove = memoryStore.remove;
-  memoryStore.remove = () => ({ ok: false, error: 'forbidden' });   // 模拟删除被拒绝
+  memoryStore.remove = () => ({ ok: false, error: 'forbidden' });
   let r = null;
   try {
     r = groupProfile.writeProfile('g1', 'uD', mk(30), 'stated', 0.8, '偏好', c);
   } finally {
     memoryStore.remove = origRemove;
   }
-  eq(r.ok, false, '6. 腾不出空间时拒绝写入（不误报成功）');
-  eq(r.error, 'over-budget', '6. 错误码为 over-budget');
-  eq(r.reason, 'evict-failed', '6. 原因标明 evict-failed（实际 ' + r.reason + '）');
-  eq(bytesNow(), beforeBytes, '6. 淘汰失败后数据量未被改动');
-  eq(profileCount(), beforeCount, '6. 淘汰失败后条数不变');
-  ok(!groupProfile.listRaw('g1', 'uD').some((x) => x.content === mk(30)), '6. 新条目确实没有被写入');
+  // 延迟淘汰：新条目先写入成功，随后治理失败 —— 不得伪装成纯成功，也不得丢失旧数据
+  eq(r.ok, true, '6. 新条目本身写入成功（ok=true）');
+  eq(r.overBudget, true, '6. 容量治理失败被如实标记（overBudget=true，未伪装成纯成功）');
+  eq(r.evictReason, 'evict-failed', '6. 失败原因 evict-failed（实际 ' + r.evictReason + '）');
+  eq(r.evicted, 0, '6. 治理未删除任何条目（remove 被模拟为全部失败）');
+  // 关键数据保护：旧数据一条都没少（remove 失败 → 淘汰动作没有真正发生）
+  eq(profileCount(), beforeCount + 1, '6. 旧 ' + beforeCount + ' 条全保留 + 新 1 条 = ' + (beforeCount + 1) + '（实际 ' + profileCount() + '）');
+  ok(groupProfile.listRaw('g1', 'uD').some((x) => x.content === mk(30)), '6. 新条目确实在库');
+  for (let i = 0; i < 30; i++) ok(groupProfile.listRaw('g1', 'uD').some((x) => x.content === mk(i)), '6. 旧条目 mk(' + i + ') 未被意外删除');
+  ok(memoryStore.list({ groupId: null, userId: null, allowAll: true }, 5000).some((x) => x.id === note.item.id), '6. 普通长期记忆未被容量治理触碰');
 });
 
 // ==================================================================
@@ -336,6 +343,133 @@ withCfg(CFG_CAP, () => {
   eq(ev3.ok, true, '9. 预留后仍能腾出空间（实际淘汰 ' + ev3.removed + ' 条）');
   ok(profileCount() < before, '9. 确实淘汰了条目（避免空转断言）');
   ok(bytesNow() + (c.maxTotalBytes - 100) <= c.maxTotalBytes, '9. 淘汰后剩余空间足够容纳预留量');
+});
+
+// ==================================================================
+// 10. 单人名额已满 + 总容量治理失败 → 旧画像未被意外删除（安全顺序的反向保证）
+// ==================================================================
+group('10. 单人名额已满 + 总容量治理失败 → 旧画像未被意外删除');
+freshStore();
+withCfg({ groupProfile: { enabled: true, minIntervalMs: 0, maxLen: 60, maxPerUser: 2, minSamples: 3, ttlDays: 90, maxTotalBytes: 4096 } }, () => {
+  const c = groupProfile.cfg();
+  // 15 个成员各写 2 条（都占满单人名额），共 30 条 = 4080 字节，贴近总上限 4096
+  for (let u = 0; u < 15; u++) {
+    groupProfile.writeProfile('g1', 'U' + u, mk(100 + u * 2), 'stated', 0.8, '偏好', c);
+    groupProfile.writeProfile('g1', 'U' + u, mk(100 + u * 2 + 1), 'stated', 0.8, '偏好', c);
+  }
+  eq(profileCount(), 30, '10. 夹具：15 成员 × 2 条 = 30 条');
+  eq(bytesNow(), 4080, '10. 夹具：4080 字节，尚未超限但余量极小');
+  eq(groupProfile.listRaw('g1', 'U0').length, 2, '10. U0 已满 2 条（单人名额已满）');
+
+  // 模拟「容量治理删除全部失败」
+  const origRemove = memoryStore.remove;
+  memoryStore.remove = () => ({ ok: false, error: 'forbidden' });
+  let r = null;
+  try {
+    // 给 U0 新增第 3 条：本应触发单人腾位 + 总容量治理
+    r = groupProfile.writeProfile('g1', 'U0', mk(200), 'stated', 0.8, '偏好', c);
+  } finally {
+    memoryStore.remove = origRemove;
+  }
+  // 延迟淘汰：新条目先写成功；治理（含单人腾位 + 总容量）失败只导致"多留一条"，绝非"删旧却没写新"
+  eq(r.ok, true, '10. 新条目写入成功');
+  eq(r.overBudget, true, '10. 总容量治理失败如实标记（overBudget=true，未伪装成纯成功）');
+  ok(groupProfile.listRaw('g1', 'U0').some((x) => x.content === mk(200)), '10. U0 的新条目确实在库');
+  // 关键：所有旧画像都还在（remove 失败 → 淘汰动作没真正发生，没有任何一条"被删旧+没写新"的净损失）
+  for (let u = 0; u < 15; u++) {
+    ok(groupProfile.listRaw('g1', 'U' + u).length >= 2, '10. U' + u + ' 的旧条目未被意外删除（实际 ' + groupProfile.listRaw('g1', 'U' + u).length + ' 条）');
+  }
+  ok(profileCount() >= 30 + 1, '10. 旧 30 条 + 新 1 条全部在场（实际 ' + profileCount() + '）');
+});
+
+// ==================================================================
+// 11. upsertRaw 失败（已满库）→ 任何淘汰都未发生，旧数据完整保留（安全顺序：写入失败在淘汰之前）
+// ==================================================================
+group('11. upsertRaw 失败（已满库）→ 任何淘汰都未发生、旧数据完整保留');
+freshStore();
+withCfg(CFG_CAP, () => {
+  const c = groupProfile.cfg();
+  // 先写满到容量上限（30 条 × 136 = 4080，恰为 4096 上限内可容纳的最大整数条；再写一条必触发淘汰）
+  for (let i = 0; i < 30; i++) groupProfile.writeProfile('g1', 'uE', mk(i), 'stated', 0.8, '偏好', c);
+  eq(profileCount(), 30, '11. 夹具：已写满 30 条（4080 字节，已达容量上限）');
+  const beforeContents = groupProfile.listRaw('g1', 'uE').map((x) => x.content).sort();
+
+  // 模拟「落盘失败」：upsertRaw 返回失败
+  const origUpsert = memoryStore.upsertRaw;
+  memoryStore.upsertRaw = () => ({ ok: false, error: 'write-failed' });
+  let r = null;
+  try {
+    r = groupProfile.writeProfile('g1', 'uE', mk(99), 'stated', 0.8, '偏好', c);
+  } finally {
+    memoryStore.upsertRaw = origUpsert;
+  }
+  eq(r.ok, false, '11. 落盘失败时返回失败');
+  eq(r.error, 'write-failed', '11. 错误码如实透传');
+  // 关键：安全顺序保证"写入失败发生在任何淘汰之前" —— 旧实现会在写之前先淘汰 1 条（变成 29），此处应仍是 30
+  eq(profileCount(), 30, '11. 失败前未执行任何淘汰 → 条数仍是 30（旧实现会先淘汰 1 条变成 29，此处为反例）');
+  const afterContents = groupProfile.listRaw('g1', 'uE').map((x) => x.content).sort();
+  eq(JSON.stringify(afterContents), JSON.stringify(beforeContents), '11. 旧画像内容集合与失败前完全一致（无一条被误删）');
+  ok(!groupProfile.listRaw('g1', 'uE').some((x) => x.content === mk(99)), '11. 新条目确实没有写入');
+});
+
+// ==================================================================
+// 12. 淘汰部分成功部分失败 → 返回值与真实存储状态一致（不静默丢数据）
+// ==================================================================
+group('12. 淘汰部分成功部分失败 → 返回值与真实存储一致');
+freshStore();
+withCfg(CFG_CAP, () => {
+  const c = groupProfile.cfg();
+  for (let i = 0; i < 30; i++) groupProfile.writeProfile('g1', 'uF', mk(i), 'stated', 0.8, '偏好', c);
+  eq(bytesNow(), 4080, '12. 夹具：30 条 = 4080 字节');
+
+  // 让"最旧两条（会被优先淘汰）"的 remove 失败，其余成功并真正删除 → 部分淘汰
+  const origRemove = memoryStore.remove;
+  memoryStore.remove = (id, actor) => {
+    const it = (memoryStore.list({ groupId: null, userId: null, allowAll: true }, 5000) || []).find((x) => x.id === id);
+    const content = it && it.content;
+    // mk(0)、mk(1) 是最旧、最先被淘汰的两条，让它们的删除失败
+    if (content === mk(0) || content === mk(1)) return { ok: false, error: 'forbidden' };
+    return origRemove(id, actor);   // 真正删除，模拟删除成功（必须真正落盘，断言才能反映真实存储）
+  };
+  let r = null;
+  try {
+    r = groupProfile.writeProfile('g1', 'uF', mk(30), 'stated', 0.8, '偏好', c);
+  } finally {
+    memoryStore.remove = origRemove;
+  }
+  eq(r.ok, true, '12. 新条目写入成功');
+  // 治理：budget=4096-136=3960，从最旧开始淘汰。mk0 失败(0)→mk1 失败(0)→mk2 成功(1, 3944≤3960 停)
+  eq(r.evicted, 1, '12. 实际只成功淘汰 1 条（reported evicted 与实际一致，实际 ' + r.evicted + '）');
+  eq(r.overBudget, false, '12. 淘汰到够用即止，未超限');
+  // 真实存储状态：被成功淘汰的 mk(2) 已不在；被"删除失败"的 mk(0)/mk(1) 仍在（未被静默丢弃）
+  ok(!groupProfile.listRaw('g1', 'uF').some((x) => x.content === mk(2)), '12. 被成功淘汰的 mk(2) 已不在库');
+  ok(groupProfile.listRaw('g1', 'uF').some((x) => x.content === mk(0)), '12. 删除失败的 mk(0) 仍在库（未被静默丢弃）');
+  ok(groupProfile.listRaw('g1', 'uF').some((x) => x.content === mk(1)), '12. 删除失败的 mk(1) 仍在库（未被静默丢弃）');
+  ok(groupProfile.listRaw('g1', 'uF').some((x) => x.content === mk(30)), '12. 新条目在库');
+  eq(profileCount(), 30, '12. 真实条数 = 29 旧(剩) + 1 新 = 30（实际 ' + profileCount() + '）');
+  eq(bytesNow(), 4080, '12. 真实字节 = 4080（剔除的 1 条由新条目补齐，实际 ' + bytesNow() + '）');
+  // 普通长期记忆不碰
+  const note = memoryStore.add({ scope: 'user', groupId: 'g1', userId: 'uNote', content: 'note', source: 'note', confidence: 0.8, ttlDays: 180 });
+  ok(memoryStore.list({ groupId: null, userId: null, allowAll: true }, 5000).some((x) => x.id === note.item.id), '12. 普通长期记忆未被触碰');
+});
+
+// ==================================================================
+// 13. 正常新增触发淘汰仍正确（确认延迟淘汰没有误关淘汰机制）
+// ==================================================================
+group('13. 正常新增触发淘汰仍正确（延迟淘汰未误关淘汰）');
+freshStore();
+withCfg(CFG_CAP, () => {
+  const c = groupProfile.cfg();
+  for (let i = 0; i < 30; i++) groupProfile.writeProfile('g1', 'uG', mk(i), 'stated', 0.8, '偏好', c);
+  eq(bytesNow(), 4080, '13. 夹具：30 条 = 4080 字节');
+  const r = groupProfile.writeProfile('g1', 'uG', mk(30), 'stated', 0.8, '偏好', c);
+  eq(r.ok, true, '13. 新增成功');
+  eq(r.merged, false, '13. 是新增（非合并）');
+  ok(r.evicted >= 1, '13. 触发了总容量淘汰（实际淘汰 ' + r.evicted + ' 条）');
+  eq(r.overBudget, false, '13. 治理成功，未超限');
+  ok(groupProfile.listRaw('g1', 'uG').some((x) => x.content === mk(30)), '13. 新条目在库');
+  eq(bytesNow(), 4080, '13. 淘汰后总量仍回到 4080（≤ 4096，实际 ' + bytesNow() + '）');
+  eq(profileCount(), 30, '13. 总数稳定为 30（淘汰旧 1 + 新增 1）');
 });
 
 if (TMP) { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {} }

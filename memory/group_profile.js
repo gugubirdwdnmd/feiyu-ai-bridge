@@ -248,8 +248,14 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
   const hit = findMergable(gid, uid, text);
 
   if (hit) {
-    // ② 更新既有条目：**不调用 enforcePerUser**。
-    //   更新不占用新名额（条目总数不变），因此不需要、也不允许为了它去淘汰其它条目。
+    // ② 更新既有条目（保持原 id）：**不调用 enforcePerUser**（更新不占新名额，不淘汰其它成员）。
+    // 安全顺序（延迟淘汰 / write-first）：先 upsertRaw 覆盖旧条目，确认写入成功后再做容量治理。
+    //   旧实现先跑 enforcePerUser/enforceTotalBytes 再写；若「重复陈述同一件事」后写入因任何原因失败，
+    //   就会出现「旧条目被先删、新数据也没进来」的净损失。改为先写后淘后：
+    //     (a) 写入失败发生在任何淘汰之前 → 旧数据原封不动、新数据也没进，零净损失；
+    //     (b) 容量治理失败也只是多留一条（overBudget 如实上报），不会"删了旧的却没写成新的"。
+    //   刻意不引入回滚：回滚需把被删条目重插回去，可能覆盖并发写出的新版本、
+    //   或恢复被其它操作有意删除的条目（见需求原文对回滚的警示），故采用确定的安全顺序。
     const keep = Object.assign({}, hit);
     keep.hits = (Number(keep.hits) || 0) + 1;
     keep.updatedAt = Date.now();          // 刷新时间 → 更新后不会被当成"最久未更新"淘汰
@@ -260,24 +266,32 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
     if (String(keep.source || '').indexOf(PROFILE_SOURCE + ':stated') === 0) {
       keep.confidence = Math.min(1, (Number(keep.confidence) || 0.6) + 0.05);
     }
-    // 容量：按「写入后的预计总量」治理 —— 预计 =（现有画像总量 − 旧条目）+ 本条目。
-    // 旧条目用 protectId 保护，避免被自己的容量治理淘汰掉（否则更新会变成"什么都没写"）。
-    const need = byteLen(keep);
-    if (c.maxTotalBytes && need > c.maxTotalBytes) {
-      // 单条本身就超过总预算 → 淘汰谁都解决不了，明确拒绝，绝不假装写入成功
-      return { ok: false, error: 'over-budget', reason: 'single-item', needBytes: need, maxBytes: c.maxTotalBytes };
+    const oldSize = byteLen(hit);
+    const newSize = byteLen(keep);
+    // 单条本身就超过总预算 → 淘汰谁都解决不了，直接拒绝（不写、不淘）
+    if (c.maxTotalBytes && newSize > c.maxTotalBytes) {
+      return { ok: false, error: 'over-budget', reason: 'single-item', needBytes: newSize, maxBytes: c.maxTotalBytes };
     }
-    const ev = enforceTotalBytes(c, { reserveBytes: need, protectId: keep.id });
-    if (!ev.ok) {
-      // 腾不出足够空间（单条超限 / 淘汰失败）→ 拒绝写入，不留下"写了但超预算"的状态
-      return { ok: false, error: 'over-budget', reason: ev.reason || 'evict-failed', evicted: ev.removed, needBytes: need, maxBytes: c.maxTotalBytes };
-    }
-    // upsertRaw 按 id 覆盖 → 条目总数不变。
-    // （不再"先 remove 再 upsert"：那会在两步之间留下丢数据的窗口，且旧实现依赖的
-    //   "upsertRaw 是追加" 的假设已经在本次修复后不成立，先删后写纯属多余。）
+    // 先写：upsertRaw 按 id 覆盖 → 条目总数不变（书签：此处发生在任何淘汰之前）
     const w = memoryStore.upsertRaw(keep);
-    if (!w || !w.ok) return { ok: false, error: (w && w.error) || 'write-failed' };
-    return { ok: true, merged: true, id: keep.id };
+    if (!w || !w.ok) {
+      // 写入失败 → 此时尚未执行任何淘汰，旧数据完整保留，绝无净损失
+      return { ok: false, error: (w && w.error) || 'write-failed' };
+    }
+    // 后淘：仅当本次更新"变大"（newSize > oldSize）才可能撑爆预算才治理；
+    //   正常更新（size 不增）绝不为了腾位去淘汰其它画像（需求：正常更新不应淘汰他人）。
+    //   protectId 保护刚写入的条目，避免被自己的容量治理淘汰掉（否则更新会变成"什么都没写"）。
+    let ev = { ok: true, removed: 0, reason: null };
+    if (newSize > oldSize && c.maxTotalBytes) {
+      ev = enforceTotalBytes(c, { reserveBytes: newSize, protectId: keep.id });
+    }
+    return {
+      ok: true, merged: true, id: keep.id,
+      evicted: ev.removed,
+      enforced: ev.ok,
+      overBudget: !ev.ok,
+      evictReason: ev.ok ? null : ev.reason,
+    };
   }
 
   // ③ 本群无相似项 → 新增（upsertRaw 只按 id 覆盖、不做相似合并，天然不跨群污染）
@@ -298,21 +312,31 @@ function writeProfile(gid, uid, content, source, confidence, kind, c) {
     lastHitAt: 0,
     storedAt: now,
   };
-  // 单条就超过总预算 → 直接拒绝（不腾位、不淘汰、不写）
+  // 单条就超过总预算 → 直接拒绝（不写、不淘、不腾位）
   const need = byteLen(item);
   if (c.maxTotalBytes && need > c.maxTotalBytes) {
     return { ok: false, error: 'over-budget', reason: 'single-item', needBytes: need, maxBytes: c.maxTotalBytes };
   }
-  // 只有「新增」才占新名额，所以单人条数上限只在这里治理
-  try { enforcePerUser(gid, uid, c); } catch (e) { /* 裁剪失败不阻断写入 */ }
-  // 容量治理按「写入后的预计总量」：现有条目的预算 = 总上限 − 本次将占用的字节。
-  // 这样"当前还没超限、但加上这条就超限"的情形也能被治理，而不是等超了才管。
-  const ev = enforceTotalBytes(c, { reserveBytes: need });
-  if (!ev.ok) {
-    return { ok: false, error: 'over-budget', reason: ev.reason || 'evict-failed', evicted: ev.removed, needBytes: need, maxBytes: c.maxTotalBytes };
-  }
+  // 先写（延迟淘汰 / write-first）：新增条目先落库，确认成功后再治理。
+  //   这样即便随后的容量治理失败，新条目也已经在库（不会"删了旧的却没写成新的"净损失）。
   const w = memoryStore.upsertRaw(item);
-  return w && w.ok ? { ok: true, merged: false, id: item.id } : { ok: false, error: (w && w.error) || 'write-failed' };
+  if (!w || !w.ok) {
+    // 写入失败 → 此时尚未执行任何淘汰，所有旧画像完整保留，零净损失
+    return { ok: false, error: (w && w.error) || 'write-failed' };
+  }
+  // 后淘：只有「新增」才占新名额，故单人条数上限在这里治理（延迟到写入成功之后）；
+  //   随后按「写入后的预计总量」治理总字节：预算 = 总上限 − 本次占用，protectId 保护刚写入的这条，
+  //   使"当前未超限、但加上这条就超限"的情形也能被治理（且被保护的这条永不被自己淘汰）。
+  const perUserRemoved = enforcePerUser(gid, uid, c);
+  const ev = enforceTotalBytes(c, { reserveBytes: need, protectId: item.id });
+  return {
+    ok: true, merged: false, id: item.id,
+    evicted: ev.removed,
+    perUserEvicted: perUserRemoved,
+    enforced: ev.ok,
+    overBudget: !ev.ok,
+    evictReason: ev.ok ? null : ev.reason,
+  };
 }
 
 // —— 在「本群 + 本人」的画像里找可合并条目（阈值 0.8，与 memory_store.add 一致）——
@@ -325,14 +349,17 @@ function findMergable(gid, uid, text) {
 }
 
 // —— 单人条目上限：超出时删最旧（画像要短小精悍）——
+// ⚠ 本函数在「写入新条目之后」调用（延迟淘汰策略），mine 已包含刚写入的那条。
+//   溢出量 = 当前条数 − 上限：需要删掉最旧的若干条，使结果恒 ≤ maxPerUser。
+//   （旧实现在"写入之前"调用，才有「+1 给新条目腾位」的逻辑；现在属于过期假设。）
 function enforcePerUser(gid, uid, c) {
   c = c || cfg();
   const mine = listRaw(gid, uid);
-  // ⚠ 必须是「条数已达上限就腾位置」，不能写成 `<=` 才裁剪。
-  //   用 `<=` 时：已有 2 条（上限 2）→ 2<=2 不裁剪 → 写入后变 3 条，上限形同虚设。
-  //   正确做法：满员时先删掉最旧的一条，再写入新条目，保证结果恒 <= maxPerUser。
-  if (mine.length < c.maxPerUser) return 0;
-  const overflow = mine.length - c.maxPerUser + 1;   // +1 是给即将写入的新条目腾位
+  // ⚠ 必须是「条数严格超出上限才腾位置」。用 `length < maxPerUser` 会在 length == maxPerUser
+  //   时仍进入淘汰，而此时 overflow = length - maxPerUser = 0，mine.slice(-0) === mine.slice(0)
+  //   会返回「全部条目」而非空数组 → 把本不该删的画像全删掉。故用 `<=` 提前返回。
+  if (mine.length <= c.maxPerUser) return 0;
+  const overflow = mine.length - c.maxPerUser;
   // mine 已按时间倒序（新的在前），从尾部删最旧的
   const victims = mine.slice(-overflow);
   let removed = 0;
