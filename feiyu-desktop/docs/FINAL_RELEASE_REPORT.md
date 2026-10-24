@@ -11,7 +11,7 @@
 | Git 根目录 | `D:\NapCat_publish` |
 | 分支 | `feature/feiyu-desktop-control-center` |
 | 本轮起始 HEAD | `dde513f`（阶段 D） |
-| 本轮结束 HEAD | `4a1f9c2`（见 §11） |
+| 本轮结束 HEAD | `4818899` |
 | 远端分支 | 已推送至 `origin/feiyu-ai-bridge` |
 | **远端 main** | **未动**（`8226b9b`，与本轮开始时一致） |
 | 版本号 | `0.1.0` → **`1.0.0`** |
