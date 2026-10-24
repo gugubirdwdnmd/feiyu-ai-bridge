@@ -20,7 +20,19 @@ const DETAIL_CAP = 2000; // 明细上限，避免极端历史占内存；筛选/
 
 function usageDir(botDir) { return path.join(botDir, 'memory', 'usage'); }
 function statsPath(botDir) { return path.join(botDir, 'memory', 'stats.json'); }
-function fmtDate(d) { return d.toISOString().slice(0, 10); }
+
+/**
+ * 本地日期（YYYY-MM-DD）。
+ * 之前用 toISOString()（UTC），但 rangeFiles 用本地日期推算区间，
+ * 在 UTC+8 会导致「今日」少算/多算一天（例如本地 08:00 之前 UTC 日期还是昨天）。
+ * 机器人写文件用的也是本地日期，故此处统一按本地时区格式化。
+ */
+function fmtDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 function rangeFiles(range) {
   const today = new Date();
@@ -88,11 +100,21 @@ function aggregate(reqs) {
 async function fetchLive(port, range, deps) {
   const fetchFn = (deps && deps.fetch) || globalThis.fetch;
   if (!fetchFn || !port) return null;
+  const params = new URLSearchParams({ range: String(range) });
+  const f = (deps && deps.filters) || {};
+  if (f.provider) params.set('provider', f.provider);
+  if (f.model) params.set('model', f.model);
+  if (f.status) params.set('status', f.status);
+  if (f.limit) params.set('limit', String(f.limit));
+  const headers = Object.assign({ Accept: 'application/json' }, (deps && deps.headers) || {});
   try {
     const ctrl = (deps && deps.AbortSignal && deps.AbortSignal.timeout) ? deps.AbortSignal.timeout(3000) : undefined;
-    const r = await fetchFn(`http://127.0.0.1:${port}/api/usage?range=${encodeURIComponent(range)}`, ctrl ? { signal: ctrl } : {});
+    const r = await fetchFn(`http://127.0.0.1:${port}/api/usage?` + params.toString(), { headers, signal: ctrl });
     if (!r.ok) return null;
-    return await r.json();
+    const data = await r.json();
+    // 新 bot 端点在 detail 中返回白名单投影的明细；优先用其替代旧 recentRequests（向后兼容：无 detail 保持原样）
+    if (data && Array.isArray(data.detail) && data.detail.length) data.recentRequests = data.detail;
+    return data;
   } catch (_) { return null; }
 }
 
@@ -112,10 +134,15 @@ function selectPriceRule(pm, timeISO, fallbackVersion) {
 }
 
 /**
- * 费用估算。priceTable 为空 / 模型未知 → priced:false（显示「未计价/未定价」，绝不冒充账单）。
+ * 费用估算。priceTable 为空 / 模型未知 → priced:false（显示「未定价」，绝不冒充账单）。
  * 单价单位：元 / 计量单位（默认每百万 token，由 price.unit 决定）。
  * 缓存命中按 cacheHit 单价（通常更低）；缓存未命中 = 输入 - 命中。
- * 历史价格：按记录 time 套用生效版本；无适用历史版本则回落当前单价（在报告里标注）。
+ * 历史价格：按记录 time 套用生效版本；无适用历史版本则回落当前单价。
+ *
+ * 精度策略（批次 D）：
+ *  - 单条 cost 不做四舍五入，返回全精度浮点；汇总时对全精度值求和后再一次性舍入。
+ *    避免「逐条四舍五入 → 求和」造成的系统性偏差（记录越多偏差越大）。
+ *  - 显示层用 roundCost() 做最终呈现（默认 6 位小数），不参与内部计算。
  */
 function estimateCost(record, price) {
   const currency = (price && price.currency) || 'CNY';
@@ -136,28 +163,41 @@ function estimateCost(record, price) {
   const cost = cacheMiss * inRate + cacheHit * hitRate + completion * outRate;
   return {
     priced: true,
-    cost: Math.round(cost * 1e6) / 1e6,
+    cost: cost, // 全精度，不提前舍入
     currency, unit,
     priceVersion: rule.version || price.version || null,
     effectiveFrom: rule.effectiveFrom || null,
   };
 }
 
-/** 对一组记录做费用汇总（估算，非实际账单）。 */
+/** 展示层舍入：保留 6 位小数，消除浮点尾差。 */
+function roundCost(v, digits = 6) {
+  if (v == null || !Number.isFinite(Number(v))) return null;
+  const p = Math.pow(10, digits);
+  return Math.round(Number(v) * p) / p;
+}
+
+/** 对一组记录做费用汇总（估算，非实际账单）。
+ *  精度：内部用全精度值累加，仅在最终总额一次性舍入；未定价的记录不计入 totalCost，
+ *  并在 unpricedModels 中列出，避免「部分定价」被误读为完整费用。 */
 function estimateCostForSet(reqs, price) {
   if (!price || !price.models) return { priced: false, totalCost: null, currency: (price && price.currency) || 'CNY', unit: (price && price.unit) || 'M', priceVersion: null, reason: 'no_price_table' };
   let totalCost = 0, anyPriced = false, pricedCount = 0;
+  const unpricedModels = new Set();
   for (const r of reqs) {
     const c = estimateCost(r, price);
     if (c.priced) { totalCost += c.cost; anyPriced = true; pricedCount++; }
+    else unpricedModels.add((r && r.model) || 'unknown');
   }
   return {
     priced: anyPriced,
-    totalCost: anyPriced ? Math.round(totalCost * 1e6) / 1e6 : null,
+    totalCost: anyPriced ? roundCost(totalCost) : null,
     currency: price.currency || 'CNY',
     unit: price.unit || 'M',
     priceVersion: price.version || null,
     pricedCount,
+    unpricedModels: Array.from(unpricedModels),
+    partial: anyPriced && unpricedModels.size > 0,
     note: '估算值，非服务商实际账单',
   };
 }
@@ -239,6 +279,6 @@ async function getUsage(botDir, range, opts = {}) {
 }
 
 module.exports = {
-  getUsage, estimateCost, estimateCostForSet, aggregate, toCSV, rangeFiles,
-  usageDir, statsPath, unitFactor, selectPriceRule, DETAIL_CAP,
+  getUsage, estimateCost, estimateCostForSet, aggregate, toCSV, rangeFiles, roundCost,
+  usageDir, statsPath, unitFactor, selectPriceRule, fmtDate, DETAIL_CAP,
 };

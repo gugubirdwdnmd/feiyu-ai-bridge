@@ -36,6 +36,7 @@ const imageConfirm = require('./feiyu/image_confirm');
 // V15.5：短视频识别（只认平台、不抓第三方页面）+ 深度思考判定（本地规则）
 const shortVideo = require('./feiyu/short_video');
 const deepThink = require('./agent/deep_think');
+const usageReport = require('./usage_report'); // 用量报告纯计算层（筛选/聚合/白名单/鉴权决策）
 // V15.3：群友戳一戳（主动戳群友 + 对群友被戳的反应）；与既有 poke（自己被戳）互不重叠
 const pokeSocial = require('./feiyu/poke_social');
 
@@ -5678,7 +5679,7 @@ function rangeFiles(range) {
 }
 
 // 读取明细 + 聊天聚合，按范围算总量/分账/最近请求/最近聊天（只读，绝不影响主流程）
-function buildUsageReport(range) {
+function buildUsageReport(range, opts) {
   const files = rangeFiles(range);
   const reqs = [];
   const chats = [];
@@ -5694,28 +5695,12 @@ function buildUsageReport(range) {
     } catch (e) {}
   }
 
-  const modelUsage = {};
-  let total = 0, prompt = 0, completion = 0, reasoning = 0, cacheHit = 0, cacheMiss = 0;
-  let judge = 0, answer = 0, tool = 0, chatrecord = 0, chatRecordTokens = 0;
-  for (const r of reqs) {
-    total += Number(r.total_tokens) || 0;
-    prompt += Number(r.prompt_tokens) || 0;
-    completion += Number(r.completion_tokens) || 0;
-    reasoning += Number(r.reasoning_tokens) || 0;
-    cacheHit += Number(r.cache_hit_tokens) || 0;
-    cacheMiss += Number(r.cache_miss_tokens) || 0;
-    if (r.kind === 'judge') judge++;
-    else if (r.kind === 'tool') tool++;
-    else if (r.kind === 'chatrecord') { chatrecord++; chatRecordTokens += Number(r.total_tokens) || 0; }
-    else answer++;
-    const m = r.model || 'unknown';
-    if (!modelUsage[m]) modelUsage[m] = { calls: 0, tokens: 0 };
-    modelUsage[m].calls++; modelUsage[m].tokens += Number(r.total_tokens) || 0;
-  }
+  // 委托纯计算层：筛选（provider/model/status）+ 聚合 + 白名单投影明细（缺失字段按兜底，兼容历史数据）
+  const report = usageReport.computeUsageReport(reqs, opts || {});
 
   chats.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
   const recentChats = chats.slice(0, 50);
-  const recentRequests = reqs.slice(-50).reverse();
+  const recentRequests = reqs.slice(-50).reverse(); // 旧客户端兼容：最近 50 条（未筛选）
 
   // V13.5：读取聊天记录分析明细（chatrecord.<date>.jsonl），不含聊天内容
   const chatRecords = [];
@@ -5741,12 +5726,12 @@ function buildUsageReport(range) {
   return {
     range,
     files: files.length,
-    totalTokens: total, promptTokens: prompt, completionTokens: completion, reasoningTokens: reasoning,
-    cacheHitTokens: cacheHit, cacheMissTokens: cacheMiss,
-    cacheRate: (cacheHit + cacheMiss) > 0 ? Math.round((cacheHit / (cacheHit + cacheMiss)) * 100) : 0,
-    requests: reqs.length, judgeRequests: judge, answerRequests: answer, toolRequests: tool, chatRecordRequests: chatrecord,
-    chatRecordTokens,
-    avg: reqs.length ? Math.round(total / reqs.length) : 0,
+    // —— 以下字段保留旧 /api/usage 语义；未传筛选时等于全量，与旧客户端一致 ——
+    totalTokens: report.totalTokens, promptTokens: report.promptTokens, completionTokens: report.completionTokens, reasoningTokens: report.reasoningTokens,
+    cacheHitTokens: report.cacheHitTokens, cacheMissTokens: report.cacheMissTokens, cacheRate: report.cacheRate,
+    requests: report.requests, judgeRequests: report.judgeRequests, answerRequests: report.answerRequests, toolRequests: report.toolRequests,
+    chatRecordRequests: report.chatRecordRequests, chatRecordTokens: report.chatRecordTokens,
+    avg: report.avg,
     toolExecutions: stats.toolCalls || 0,
     l0Blocked: stats.l0Blocked || 0,
     modelCallsAvoided: stats.modelCallsAvoided || 0,
@@ -5754,7 +5739,11 @@ function buildUsageReport(range) {
     chatRecordMessages: stats.chatRecordMessages || 0,
     chatRecordImages: stats.chatRecordImages || 0,
     chatRecordVideos: stats.chatRecordVideos || 0,
-    modelUsage,
+    modelUsage: report.modelUsage,
+    // —— 新增（向后兼容的可选字段）：成功/失败、Provider 分桶、错误类别、耗时、白名单明细 ——
+    successRequests: report.successRequests, failRequests: report.failRequests, statusCounts: report.statusCounts,
+    providerUsage: report.providerUsage, errorCategories: report.errorCategories, durationMs: report.durationMs,
+    detail: report.detail,
     recentChats,
     recentRequests,
     chatRecords: chatRecords.slice(0, 50),
@@ -5942,8 +5931,20 @@ const server = http.createServer((req, res) => {
     const range = urlObj.searchParams.get('range') || 'today';
 
     if (pathname === '/api/usage') {
+      // 权限：若启用事件鉴权（http.requireEventAuth），/api/usage 同样要求 Bearer 校验（fail-closed）；
+      // 默认关闭，依赖 127.0.0.1 回环信任边界，旧客户端不受影响。绝不暴露日志文件为下载接口。
+      if (eventAuthRequired() && !usageReport.usageEndpointAllowed(req.headers, { requireAuth: true, token: ONEBOT_TOKEN })) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ status: 'unauthorized', error: 'usage endpoint requires authorization' }));
+      }
       try {
-        const data = buildUsageReport(range);
+        const opts = {
+          provider: urlObj.searchParams.get('provider') || '',
+          model: urlObj.searchParams.get('model') || '',
+          status: urlObj.searchParams.get('status') || '',
+          limit: urlObj.searchParams.get('limit') || '',
+        };
+        const data = buildUsageReport(range, opts);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(data));
       } catch (e) {

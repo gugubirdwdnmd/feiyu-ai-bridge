@@ -9,6 +9,9 @@ config.secret.json
 secrets.*.json
 !secrets.example.json
 feiyu_provider_secrets.json
+# 桌面端 Provider 注册表与人格模板库：用户数据（含 baseUrl/提示词），不入库
+feiyu_providers.json
+feiyu_personalities.json
 .env
 .env.*
 !.env.example
@@ -84,6 +87,8 @@ desktop.ini
 node_modules/
 npm-debug.log*
 package-lock.json
+# 桌面端 lockfile 例外：Electron 版本必须锁定，否则 `npm ci` 无法复现打包结果
+!feiyu-desktop/package-lock.json
 
 # ==========================================================
 #  推送前自检：

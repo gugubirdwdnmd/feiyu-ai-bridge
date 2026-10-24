@@ -33,7 +33,7 @@
       ],
       "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
     },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "deleteAppDataOnUninstall": false },
     "portable": { "artifactName": "${productName}-${version}-portable.${ext}" }
   }
 }

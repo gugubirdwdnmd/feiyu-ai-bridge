@@ -9,14 +9,25 @@ const path = require('path');
 const { CHANNELS, validate } = require('../services/ipcChannels');
 const configService = require('../services/configService');
 const personalityService = require('../services/personalityService');
+const personalityTemplateService = require('../services/personalityTemplateService');
 const secretService = require('../services/secretService');
 const usageService = require('../services/usageService');
 const logService = require('../services/logService');
 const importExportService = require('../services/importExportService');
 const providerService = require('../services/providerService');
+const providerApplyService = require('../services/providerApplyService');
 const priceService = require('../services/priceService');
+const credentialStore = require('../services/credentialStore');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
+
+/** 生成不可逆的展示用掩码：仅暴露首尾少量字符，绝不回传完整密钥。 */
+function maskSecret(v) {
+  const s = String(v || '');
+  if (!s) return '';
+  if (s.length <= 8) return '*'.repeat(s.length);
+  return s.slice(0, 3) + '*'.repeat(Math.max(4, s.length - 6)) + s.slice(-3);
+}
 
 function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
   const settingsFile = path.join(getUserDataDir(), 'feiyu-settings.json');
@@ -60,10 +71,64 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     return personalityService.write(d, args.content);
   });
 
+  // ---------- 人格模板库（与运行配置分离） ----------
+  // 模板存 feiyu_personalities.json；只有「应用」才写 ai_prompt.txt，且先备份、失败保留原文件。
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return { ok: true, ...personalityTemplateService.status(d) };
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_SAVE, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return personalityTemplateService.save(d, args.template);
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_DELETE, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return personalityTemplateService.remove(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_COPY, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_COPY, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return personalityTemplateService.copy(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_RENAME, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_RENAME, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return personalityTemplateService.rename(d, args.id, args.name);
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_SET_ACTIVE, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_SET_ACTIVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return personalityTemplateService.setActive(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_APPLY, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_APPLY, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    // 用户显式「应用」：备份 ai_prompt.txt → 原子写入 → 失败保留原文件（不重启服务，loadPrompt 每次请求重读即时生效）
+    const r = personalityTemplateService.apply(d, args.id);
+    if (r.ok) r.note = (r.note || '') + '（应用前已备份于 ' + (r.backupDir || '—') + '）';
+    return r;
+  });
+  ipcMain.handle(CHANNELS.PERSONALITY_TEMPLATE_DIFF, (e, args) => {
+    const v = validate(CHANNELS.PERSONALITY_TEMPLATE_DIFF, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return personalityTemplateService.diff(d, args.id, args.target != null ? { target: args.target } : {});
+  });
+
   ipcMain.handle(CHANNELS.SECRET_READ, () => {
     const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', data: null, exists: false };
     const r = secretService.read(d);
-    return { ok: !r.error, data: r.data, exists: r.exists, error: r.error };
+    // 安全加固：渲染进程不需要明文密钥，只回传「字段是否存在 + 掩码」。
+    // 实际写入用 SECRET_WRITE / PROVIDER_SAVE 完成。
+    const masked = {};
+    if (r.data && typeof r.data === 'object') {
+      for (const k of Object.keys(r.data)) {
+        const v = r.data[k];
+        masked[k] = (typeof v === 'string' && v.length > 0) ? maskSecret(v) : '';
+      }
+    }
+    return { ok: !r.error, data: masked, masked: true, exists: r.exists, error: r.error };
   });
   ipcMain.handle(CHANNELS.SECRET_HAS_KEY, () => {
     const d = needBotDir(); if (!d) return { hasKey: false };
@@ -75,13 +140,23 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     return secretService.write(d, args.data);
   });
 
+  // 用量接口鉴权头：仅在 live 端口可用时，把本机 OneBot Token 作为 Bearer 头透传（bot 端 http.requireEventAuth=true 时需要）
+  const usageAuthHeaders = (d) => {
+    const sec = (secretService.read(d).data) || {};
+    const tok = sec.onebotToken || sec.onebot_token;
+    return tok ? { Authorization: 'Bearer ' + tok } : {};
+  };
+
   ipcMain.handle(CHANNELS.USAGE_GET, async (e, args) => {
     const v = validate(CHANNELS.USAGE_GET, args); if (!v.ok) return { ok: false, error: v.error };
     const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
     const range = (args && args.range) || 'today';
     const status = await pm.getStatus();
     const livePort = status.bridge.running ? status.bridge.port : null;
-    const usage = await usageService.getUsage(d, range, { livePort });
+    const usage = await usageService.getUsage(d, range, {
+      livePort,
+      deps: livePort ? { headers: usageAuthHeaders(d), filters: (args && args.filters) || undefined } : undefined,
+    });
     // 费用估算（仅当存在价格表；估算值，非服务商实际账单）
     const price = getPrice();
     if (price && Array.isArray(usage.recentRequests)) {
@@ -191,16 +266,46 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     if (res.error) res.error = redactText(res.error);
     return { ok: true, result: res };
   });
+  ipcMain.handle(CHANNELS.PROVIDER_PREVIEW, (e, args) => {
+    const v = validate(CHANNELS.PROVIDER_PREVIEW, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return providerApplyService.previewSwitch(d, args.id);
+  });
   ipcMain.handle(CHANNELS.PROVIDER_APPLY, (e, args) => {
     const v = validate(CHANNELS.PROVIDER_APPLY, args); if (!v.ok) return { ok: false, error: v.error };
     const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
-    const patch = providerService.applyPatch(d, args.id);
-    if (!patch.ok) return { ok: false, error: patch.error };
-    const c = configService.applyConfig(d, patch.config);
-    if (!c.ok) return { ok: false, error: (c.errors || []).join('；') || '写入配置失败' };
-    const s = secretService.write(d, patch.secret);
-    if (!s.ok) return { ok: false, error: s.error || '写入密钥失败' };
-    return { ok: true, id: args.id, note: '已写入 ai_config.json + secrets.json，需重启 AI 桥后生效' };
+    // 切换 Provider = 覆盖机器人单 Provider 槽位，属破坏性写入：
+    // 先备份 ai_config.json + secrets.json，写后回读校验，失败自动回滚。
+    const r = providerApplyService.applySwitch(d, args.id, { backup: true });
+    if (!r.ok) return { ok: false, error: r.error, rolledBack: !!r.rolledBack, backupDir: r.backupDir || null };
+    return { ok: true, id: args.id, note: r.note, backupDir: r.backupDir || null };
+  });
+
+  // ---- 凭据安全：桌面侧多 Provider 密钥的加密状态与迁移 ----
+  ipcMain.handle(CHANNELS.CREDENTIAL_STATUS, async () => {
+    const d = needBotDir();
+    const sys = await credentialStore.availableAsync();
+    if (!d) return { ok: true, systemEncryption: sys, encrypted: false, hasFile: false, note: '未配置机器人目录' };
+    const sr = providerService.readSecrets(d);
+    return {
+      ok: true,
+      systemEncryption: sys,
+      encrypted: sr.encrypted,
+      hasFile: fs.existsSync(providerService.secretsPath(d)),
+      decryptable: sr.ok,
+      error: sr.ok ? null : sr.error,
+      note: sr.encrypted
+        ? (sr.ok ? '桌面 Provider 密钥已使用系统凭据加密存储' : '密钥已加密但当前无法解密：' + sr.error)
+        : (sys ? '当前为明文存储，可执行迁移到系统凭据存储' : '系统凭据不可用（当前环境无 safeStorage 支持），保持明文存储'),
+    };
+  });
+  ipcMain.handle(CHANNELS.CREDENTIAL_MIGRATE, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = providerService.migrateSecretsToEncrypted(d);
+    if (!r.migrated) {
+      return { ok: false, error: r.error || ('未迁移: ' + (r.reason || '未知原因')), reason: r.reason || null, backupDir: r.backupDir || null };
+    }
+    return { ok: true, migrated: true, verified: !!r.verified, backupDir: r.backupDir || null, reason: r.reason || null };
   });
 
   ipcMain.handle(CHANNELS.PRICE_GET, () => ({ ok: true, price: getPrice() }));

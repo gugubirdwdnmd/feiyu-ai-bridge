@@ -156,6 +156,7 @@ async function pageApi() {
   const cfg = await invoke(C.CONFIG_READ);
   const sec = await invoke(C.SECRET_HAS_KEY);
   const pl = await invoke(C.PROVIDER_LIST);
+  const cred = await invoke(C.CREDENTIAL_STATUS).catch(() => null);
   const api = (cfg.config && cfg.config.api) || {};
   const providers = pl.providers || [];
   const appliedId = pl.appliedId, def = pl.default;
@@ -183,6 +184,15 @@ async function pageApi() {
       <h3>当前应用的 API 配置（ai_config.json）</h3>
       <div class="hint">Base URL：<code>${esc(api.baseUrl || '—')}</code><br>主模型：<code>${esc(api.model || '—')}</code> ｜ 推理：<code>${esc(api.reasoningModel || '—')}</code></div>
       <div class="hint">密钥状态：${sec.hasKey ? '<span class="ok">已配置</span>' : '<span class="err">未配置</span>'}</div>
+    </div>
+    <div class="section">
+      <h3>凭据安全</h3>
+      <div class="hint">${cred ? esc(cred.note || '') : '凭据状态不可用'}</div>
+      <div class="hint">系统凭据（safeStorage / DPAPI）：${cred && cred.systemEncryption ? '<span class="ok">可用</span>' : '<span class="err">不可用</span>'}
+        ｜ 桌面 Provider 密钥：${cred && cred.encrypted ? '<span class="ok">已加密</span>' : '<span class="err">明文</span>'}</div>
+      <div class="row"><button class="btn sec" id="credMigrate">迁移到系统凭据存储</button></div>
+      <div class="hint">迁移会先把明文备份到 botDir/backups/（已 gitignore），加密写入后回读校验；校验失败自动回滚，不删除原备份。机器人自身的 secrets.json 保持明文（bot 进程需要明文调用 API），不在本次迁移范围。</div>
+      <div class="hint" id="credMsg"></div>
     </div>`;
 
   const listEl = $('#pList');
@@ -222,7 +232,7 @@ async function pageApi() {
     if (act === 'edit') fillForm(providers.find((x) => x.id === id));
     else if (act === 'del') { if (!confirm('删除该 Provider？其密钥一并删除。')) return; const r = await invoke(C.PROVIDER_DELETE, { id }); $('#pMsg').innerHTML = r.ok ? '<span class="ok">已删除</span>' : '<span class="err">' + esc(r.error) + '</span>'; pageApi(); }
     else if (act === 'default') { const r = await invoke(C.PROVIDER_SET_DEFAULT, { id }); $('#pMsg').innerHTML = r.ok ? '<span class="ok">已设为默认</span>' : '<span class="err">' + esc(r.error) + '</span>'; pageApi(); }
-    else if (act === 'apply') { if (!confirm('应用该 Provider 到 AI 桥配置？将覆盖 ai_config.json 的 api 段与 secrets.json 的 apiKey，需重启 AI 桥后生效。')) return; const r = await invoke(C.PROVIDER_APPLY, { id }); $('#pMsg').innerHTML = r.ok ? '<span class="ok">' + esc(r.note) + '</span>' : '<span class="err">' + esc(r.error) + '</span>'; pageApi(); }
+    else if (act === 'apply') { await previewAndApply(id); }
     else if (act === 'test') await testProvider(id);
   });
   $('#pCancel').onclick = () => { editPid = null; pageApi(); };
@@ -237,6 +247,42 @@ async function pageApi() {
     const r = await invoke(C.PROVIDER_SAVE, { provider });
     $('#pMsg').innerHTML = r.ok ? '<span class="ok">已保存' + (r.complete ? '' : '（配置不完整：请补全 baseUrl/model/密钥）') + '</span>' : '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>';
     if (r.ok) { editPid = null; pageApi(); }
+  };
+  const mig = $('#credMigrate');
+  if (mig) mig.onclick = async () => {
+    if (!confirm('把桌面 Provider 密钥迁移到系统凭据存储（safeStorage/DPAPI）？\n迁移前会自动备份明文到 botDir/backups/，校验失败自动回滚。')) return;
+    $('#credMsg').innerHTML = '<span class="hint">迁移中…</span>';
+    const r = await invoke(C.CREDENTIAL_MIGRATE);
+    if (r.ok) $('#credMsg').innerHTML = '<span class="ok">迁移完成并已回读校验。备份：' + esc(r.backupDir || '—') + '</span>';
+    else $('#credMsg').innerHTML = '<span class="err">' + esc(r.error || '迁移失败') + '</span>';
+  };
+}
+
+/* 应用 Provider 前先展示差异预览，再确认写入（写入自动备份 + 失败回滚） */
+async function previewAndApply(id) {
+  const pv = await invoke(C.PROVIDER_PREVIEW, { id });
+  if (!pv.ok) { $('#pMsg').innerHTML = '<span class="err">' + esc(pv.error) + '</span>'; return; }
+  const diff = pv.diff || {};
+  const rows = Object.keys(diff).map((k) => `<tr><td>${esc(k)}</td><td class="muted">${esc(diff[k].from === null ? '—' : String(diff[k].from))}</td><td>${esc(diff[k].to === null ? '—' : String(diff[k].to))}</td></tr>`).join('');
+  const html = `<div class="section"><h3>应用前差异预览</h3>
+    ${rows ? `<table><thead><tr><th>字段</th><th>当前</th><th>目标</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="hint">当前配置与该 Provider 一致（仅密钥可能不同）。</div>'}
+    <div class="hint">密钥：${pv.secretChanged ? '将更换（不回显明文）' : '保持不变'}</div>
+    <div class="hint">${esc(pv.note || '')}</div>
+    <div class="row"><button class="btn" id="pvOk">确认应用</button><button class="btn sec" id="pvCancel">取消</button></div></div>`;
+  const holder = document.createElement('div');
+  holder.innerHTML = html;
+  $('#pMsg').parentNode.insertBefore(holder, $('#pMsg'));
+  const done = () => { holder.remove(); };
+  $('#pvCancel').onclick = done;
+  $('#pvOk').onclick = async () => {
+    const r = await invoke(C.PROVIDER_APPLY, { id });
+    done();
+    if (r.ok) {
+      $('#pMsg').innerHTML = '<span class="ok">' + esc(r.note) + (r.backupDir ? '（备份：' + esc(r.backupDir) + '）' : '') + '</span>';
+    } else {
+      $('#pMsg').innerHTML = '<span class="err">' + esc(r.error) + (r.rolledBack ? '（已回滚到原配置）' : '') + '</span>';
+    }
+    pageApi();
   };
 }
 
@@ -402,23 +448,118 @@ function wirePriceEditor() {
   };
 }
 
-/* ---------- 人格设置 ---------- */
+/* ---------- 人格设置（含模板库，模板与运行配置分离） ---------- */
 async function pagePersonality() {
   content.innerHTML = '<h2>人格设置</h2><div id="ps"></div>';
   const box = $('#ps');
   box.innerHTML = '<div class="hint">加载中…</div>';
-  const r = await invoke(C.PERSONALITY_READ);
+  const [pr, tl] = await Promise.all([invoke(C.PERSONALITY_READ), invoke(C.PERSONALITY_TEMPLATE_LIST)]);
+  const templates = (tl.templates || []);
+  const consistency = tl.consistency;
+  const consistencyBadge = consistency === 'match'
+    ? '<span class="badge on">与当前模板一致</span>'
+    : consistency === 'diverged' ? '<span class="badge err">与当前模板不一致（已偏离）</span>'
+    : '<span class="badge off">尚未选定模板</span>';
+
   box.innerHTML = `
     <div class="section">
-      <label>系统提示词 / 人格（保存即时生效，不重启）</label>
-      <textarea id="prompt">${esc(r.content || '')}</textarea>
-      <div class="row"><button class="btn" id="saveP">保存人格</button><span class="hint">修改会真正写入 ai_prompt.txt，影响机器人实际行为。</span></div>
+      <h3>当前生效人格（ai_prompt.txt）</h3>
+      <div class="hint">机器人每次请求重新读取该文件，保存即时生效，无需重启。${consistencyBadge} 当前模板：${esc(tl.activeName || '—')}</div>
+      <label>系统提示词 / 人格</label>
+      <textarea id="prompt">${esc(pr.content || '')}</textarea>
+      <div class="row"><button class="btn" id="saveP">直接保存人格</button><span class="hint">直接写入 ai_prompt.txt，影响机器人实际行为。</span></div>
       <div class="hint" id="pMsg"></div>
-    </div>`;
+    </div>
+    <div class="section">
+      <h3>人格模板库（与运行配置分离）</h3>
+      <div class="hint">模板只存于 feiyu_personalities.json，编辑模板不会改动运行中的人格。「保存模板」仅入库；「应用」才会写入 ai_prompt.txt（先自动备份，失败保留原文件）。</div>
+      <table id="tList"><thead><tr><th>名称</th><th>当前</th><th>长度</th><th>操作</th></tr></thead><tbody>
+        ${templates.length ? templates.map((t) => `<tr>
+          <td>${esc(t.name)}</td>
+          <td>${t.isActive ? '★' : ''}</td>
+          <td class="muted">${fmt(t.contentLen)}</td>
+          <td class="row" style="gap:4px">
+            <button class="btn sec sm" data-act="edit" data-id="${t.id}">编辑</button>
+            <button class="btn sec sm" data-act="copy" data-id="${t.id}">复制</button>
+            <button class="btn sec sm" data-act="rename" data-id="${t.id}">重命名</button>
+            <button class="btn sec sm" data-act="active" data-id="${t.id}">设当前</button>
+            <button class="btn sec sm" data-act="diff" data-id="${t.id}">预览差异</button>
+            <button class="btn sec sm" data-act="apply" data-id="${t.id}">应用</button>
+            <button class="btn danger sm" data-act="del" data-id="${t.id}">删</button>
+          </td>
+        </tr>`).join('') : '<tr><td colspan="4" class="muted">暂无模板。可在下方保存当前人格为模板，或编辑新建。</td></tr>'}
+      </tbody></table>
+    </div>
+    <div class="section">
+      <h3 id="tFormTitle">保存为新模板</h3>
+      <div class="row"><label style="margin:0">名称</label><input id="tName" placeholder="如 毒舌肥鱼 / 温柔助手" style="max-width:260px" /></div>
+      <label>模板内容（默认填入当前生效人格）</label>
+      <textarea id="tContent">${esc(pr.content || '')}</textarea>
+      <div class="row">
+        <button class="btn" id="tSave">保存模板</button>
+        <button class="btn sec" id="tSaveCurrent">把当前人格存为模板</button>
+        <button class="btn sec" id="tCancel" style="display:none">取消编辑</button>
+      </div>
+      <div class="hint" id="tMsg"></div>
+    </div>
+    <div class="section" id="diffBox" style="display:none"><h3>差异预览（模板 vs 当前生效人格）</h3><div class="log" id="diffOut"></div></div>`;
+
+  let editTid = null;
   $('#saveP').onclick = async () => {
     const rr = await invoke(C.PERSONALITY_WRITE, { content: $('#prompt').value });
     $('#pMsg').innerHTML = rr.ok ? '<span class="ok">已保存（即时生效）</span>' : '<span class="err">' + esc(rr.error) + '</span>';
+    if (rr.ok) setTimeout(pagePersonality, 400);
   };
+  $('#tSaveCurrent').onclick = async () => {
+    const name = '模板 ' + new Date().toLocaleString('zh-CN');
+    const r = await invoke(C.PERSONALITY_TEMPLATE_SAVE, { template: { name, content: $('#prompt').value } });
+    $('#tMsg').innerHTML = r.ok ? '<span class="ok">已保存为模板：' + esc(name) + '</span>' : '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>';
+    if (r.ok) pagePersonality();
+  };
+  $('#tSave').onclick = async () => {
+    const name = $('#tName').value.trim();
+    if (!name) { $('#tMsg').innerHTML = '<span class="err">请填写模板名称</span>'; return; }
+    const tpl = { name, content: $('#tContent').value };
+    if (editTid) tpl.id = editTid;
+    const r = await invoke(C.PERSONALITY_TEMPLATE_SAVE, { template: tpl });
+    $('#tMsg').innerHTML = r.ok ? '<span class="ok">已' + (editTid ? '更新' : '保存') + '模板</span>' : '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>';
+    if (r.ok) { editTid = null; pagePersonality(); }
+  };
+  $('#tCancel').onclick = () => { editTid = null; pagePersonality(); };
+  $('#tList').querySelectorAll('button[data-act]').forEach((b) => b.onclick = async () => {
+    const act = b.dataset.act, id = b.dataset.id;
+    if (act === 'edit') {
+      const r = await invoke(C.PERSONALITY_TEMPLATE_LIST);
+      const t = (r.templates || []).find((x) => x.id === id);
+      if (!t) return;
+      editTid = id; $('#tFormTitle').textContent = '编辑模板：' + t.name;
+      $('#tName').value = t.name; $('#tContent').value = t.content; $('#tCancel').style.display = '';
+      $('#tMsg').innerHTML = '<span class="hint">编辑只改模板库，不影响运行中的人格；点「保存模板」入库。</span>';
+      return;
+    }
+    if (act === 'copy') { const r = await invoke(C.PERSONALITY_TEMPLATE_COPY, { id }); $('#tMsg').innerHTML = r.ok ? '<span class="ok">已复制</span>' : '<span class="err">' + esc(r.error) + '</span>'; if (r.ok) pagePersonality(); return; }
+    if (act === 'rename') { const n = prompt('新名称'); if (!n) return; const r = await invoke(C.PERSONALITY_TEMPLATE_RENAME, { id, name: n }); $('#tMsg').innerHTML = r.ok ? '<span class="ok">已重命名</span>' : '<span class="err">' + esc(r.error) + '</span>'; if (r.ok) pagePersonality(); return; }
+    if (act === 'active') { const r = await invoke(C.PERSONALITY_TEMPLATE_SET_ACTIVE, { id }); $('#tMsg').innerHTML = r.ok ? '<span class="ok">已设为当前模板</span>' : '<span class="err">' + esc(r.error) + '</span>'; if (r.ok) pagePersonality(); return; }
+    if (act === 'del') { if (!confirm('删除该模板？')) return; const r = await invoke(C.PERSONALITY_TEMPLATE_DELETE, { id }); $('#tMsg').innerHTML = r.ok ? '<span class="ok">已删除</span>' : '<span class="err">' + esc(r.error) + '</span>'; if (r.ok) pagePersonality(); return; }
+    if (act === 'apply') {
+      if (!confirm('应用该模板到机器人？将先备份 ai_prompt.txt 再写入（即时生效，无需重启）。')) return;
+      const r = await invoke(C.PERSONALITY_TEMPLATE_APPLY, { id });
+      $('#tMsg').innerHTML = r.ok ? '<span class="ok">' + esc(r.note || '已应用') + '</span>' : '<span class="err">' + esc(r.error || '应用失败') + '</span>';
+      if (r.ok) pagePersonality();
+      return;
+    }
+    if (act === 'diff') {
+      const r = await invoke(C.PERSONALITY_TEMPLATE_DIFF, { id });
+      const db = $('#diffBox'); db.style.display = '';
+      if (!r.ok) { $('#diffOut').textContent = r.error || '预览失败'; return; }
+      const html = (r.lines || []).map((l) => {
+        const cls = l.type === '-' ? 'err' : l.type === '+' ? 'ok' : 'muted';
+        return `<span class="${cls}">${l.type === ' ' ? '  ' : l.type} ${esc(l.text)}</span>`;
+      }).join('\n');
+      $('#diffOut').innerHTML = html || '（内容完全相同）';
+      return;
+    }
+  });
 }
 
 /* ---------- 日志与诊断 ---------- */

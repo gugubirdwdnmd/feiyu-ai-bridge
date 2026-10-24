@@ -18,6 +18,14 @@ const fs = require('fs');
 const path = require('path');
 const { redactText } = require('./redact');
 
+// 加解密 codec（可选）：由主进程在 Electron safeStorage 可用时注入。
+//  - null（默认）→ 明文存储（向后兼容旧 feiyu_provider_secrets.json，也用于无 safeStorage 的环境）。
+//  - { encrypt(plain)->string, decrypt(cipher)->string } → 密钥在磁盘上以密文存储，仅本机可解密。
+// 注意：bot 的 secrets.json 必须保持明文（bot 进程无 safeStorage），本 codec 只保护桌面侧的多 Provider 密钥。
+let _codec = null;
+function setCodec(c) { _codec = c || null; }
+function hasCodec() { return !!_codec; }
+
 function providersPath(botDir) { return path.join(botDir, 'feiyu_providers.json'); }
 function secretsPath(botDir) { return path.join(botDir, 'feiyu_provider_secrets.json'); }
 
@@ -29,11 +37,37 @@ function load(p) {
   return { default: null, providers: [] };
 }
 function loadSecrets(p) {
+  const r = readSecrets(p);
+  return r.data;
+}
+
+/**
+ * 读取密钥库并报告状态。
+ *  - ok:true  → data 可用（明文旧文件，或已成功解密）
+ *  - encrypted:true 且 ok:false → 磁盘上是密文但当前环境无法解密（无 codec / 解密失败）。
+ *    此时严禁任何写入路径，否则会把其它 Provider 的密钥整体丢失。
+ */
+function readSecrets(p) {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(secretsPath(p), 'utf-8')); }
+  catch (_) { return { ok: true, data: {}, encrypted: false, error: null }; }
+  if (!raw || typeof raw !== 'object') return { ok: true, data: {}, encrypted: false, error: null };
+  if (!raw.__encrypted) return { ok: true, data: raw, encrypted: false, error: null };
+  if (!_codec) return { ok: false, data: {}, encrypted: true, error: '密钥库已加密，但当前环境无法解密（系统凭据不可用）' };
+  const data = {};
   try {
-    const o = JSON.parse(fs.readFileSync(secretsPath(p), 'utf-8'));
-    if (o && typeof o === 'object') return o;
-  } catch (_) {}
-  return {};
+    for (const k of Object.keys(raw.data || {})) data[k] = _codec.decrypt(raw.data[k]);
+  } catch (e) {
+    return { ok: false, data: {}, encrypted: true, error: '密钥解密失败: ' + e.message };
+  }
+  return { ok: true, data, encrypted: true, error: null };
+}
+
+/** 写入前检查：加密库不可解密时拒绝写入（保护其它 Provider 密钥不被覆盖清空）。 */
+function assertWritable(p) {
+  const r = readSecrets(p);
+  if (!r.ok) return { ok: false, error: r.error || '密钥库不可写' };
+  return { ok: true };
 }
 function saveProviders(p, obj) {
   const fp = providersPath(p);
@@ -47,10 +81,62 @@ function saveSecrets(p, obj) {
   const fp = secretsPath(p);
   fs.mkdirSync(path.dirname(fp), { recursive: true });
   const tmp = fp + '.tmp.' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf-8');
+  let text;
+  if (_codec) {
+    const data = {};
+    for (const k of Object.keys(obj)) data[k] = _codec.encrypt(String(obj[k]));
+    text = JSON.stringify({ __encrypted: true, v: 1, data }, null, 2);
+  } else {
+    text = JSON.stringify(obj, null, 2);
+  }
+  fs.writeFileSync(tmp, text, 'utf-8');
   if (process.platform !== 'win32') { try { fs.chmodSync(fp, 0o600); } catch (_) {} }
   fs.renameSync(tmp, fp);
   return { ok: true };
+}
+
+/**
+ * 把明文 feiyu_provider_secrets.json 迁移为密文（safeStorage）。
+ * 兼容旧数据：先备份明文到 backups/（gitignore 已排除），再写密文，解密回读校验；
+ * 校验失败则回滚到备份，绝不静默留下损坏数据；不直接删原明文备份。幂等（已加密则跳过）。
+ */
+function migrateSecretsToEncrypted(p) {
+  const fp = secretsPath(p);
+  if (!_codec) return { migrated: false, reason: 'no_codec' };
+  if (!fs.existsSync(fp)) { saveSecrets(p, {}); return { migrated: true, reason: 'created_empty', verified: true }; }
+  let cur;
+  try { cur = JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch (_) { return { migrated: false, error: '读取失败' }; }
+  if (cur && cur.__encrypted) return { migrated: false, reason: 'already_encrypted' };
+  const plain = (cur && typeof cur === 'object') ? cur : {};
+  const bkDir = path.join(p, 'backups', 'feiyu-provider-secrets-' + Date.now());
+  try { fs.mkdirSync(bkDir, { recursive: true }); fs.copyFileSync(fp, path.join(bkDir, 'feiyu_provider_secrets.json')); }
+  catch (e) { return { migrated: false, error: '备份失败: ' + e.message }; }
+  saveSecrets(p, plain);
+  const reloaded = loadSecrets(p);
+  const ids = new Set([...Object.keys(plain), ...Object.keys(reloaded)]);
+  let ok = true;
+  for (const k of ids) {
+    const a = plain[k] == null ? '' : String(plain[k]);
+    const b = reloaded[k] == null ? '' : String(reloaded[k]);
+    if (a !== b) { ok = false; break; }
+  }
+  if (!ok) {
+    try { fs.copyFileSync(path.join(bkDir, 'feiyu_provider_secrets.json'), fp); } catch (_) {}
+    return { migrated: false, error: '校验失败，已回滚', backupDir: bkDir };
+  }
+  return { migrated: true, verified: true, backupDir: bkDir };
+}
+
+/** 判断 URL 是否指向内网/回环/链路本地（非阻断：仅提示，避免被用作内网访问入口）。 */
+function isPrivateUrl(u) {
+  try {
+    const x = new URL(u);
+    const h = x.hostname;
+    if (h === 'localhost' || h === '0.0.0.0' || h === '127.0.0.1' || h === '::1') return true;
+    if (h.startsWith('192.168.') || h.startsWith('10.') || h.startsWith('169.254.')) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+    return false;
+  } catch (_) { return false; }
 }
 
 function genId() { return 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -74,14 +160,18 @@ function validateProvider(p) {
 /** 列出 Provider（附 hasKey / complete / 当前是否已应用到配置）。 */
 function list(p, currentConfig) {
   const data = load(p);
-  const sec = loadSecrets(p);
+  const sr = readSecrets(p);
+  const sec = sr.data;
   const providers = data.providers.map((x) => {
     const hasKey = !!(sec[x.id] != null && String(sec[x.id]).length > 0);
     const v = validateProvider(x);
     return Object.assign({}, x, { hasKey, complete: v.valid && hasKey, secret: undefined });
   });
   const appliedId = currentConfig ? currentAppliedId(currentConfig, providers) : null;
-  return { default: data.default, providers, appliedId };
+  return {
+    default: data.default, providers, appliedId,
+    encrypted: sr.encrypted, decryptError: sr.ok ? null : (sr.error || null),
+  };
 }
 
 /** 根据现有 ai_config.json 推断当前应用的是哪个 Provider（按 baseUrl+model 匹配）。 */
@@ -97,6 +187,8 @@ function currentAppliedId(config, providers) {
 /** 保存（新建或更新）一个 Provider。providerInput 可含 key（仅在显式传入时写密钥）。
  *  更新时未传入的字段保留原值（如只改密钥不会清空 baseUrl/model）。 */
 function save(p, providerInput) {
+  const w = assertWritable(p);
+  if (!w.ok) return { ok: false, errors: [w.error] };
   const data = load(p);
   const sec = loadSecrets(p);
   const isNew = !providerInput.id || !data.providers.some((x) => x.id === providerInput.id);
@@ -136,6 +228,8 @@ function save(p, providerInput) {
 
 /** 删除 Provider（同时删其密钥）。若删的是默认，默认清空。 */
 function remove(p, id) {
+  const w = assertWritable(p);
+  if (!w.ok) return { ok: false, error: w.error };
   const data = load(p);
   const before = data.providers.length;
   data.providers = data.providers.filter((x) => x.id !== id);
@@ -157,10 +251,31 @@ function setDefault(p, id) {
 }
 
 /**
+ * 清理「无主密钥」：密钥库里存在、但注册表中已无对应 Provider 的条目。
+ * 正常删除 Provider 时密钥已同步删除；此函数用于修复历史残留（例如迁移前遗留）。
+ * 默认 dry-run，只报告；confirm=true 时才真正删除。
+ */
+function pruneOrphanSecrets(p, { confirm = false } = {}) {
+  const w = assertWritable(p);
+  if (!w.ok) return { ok: false, error: w.error, orphans: [] };
+  const data = load(p);
+  const ids = new Set(data.providers.map((x) => x.id));
+  const sec = loadSecrets(p);
+  const orphans = Object.keys(sec).filter((k) => !ids.has(k));
+  if (!orphans.length) return { ok: true, orphans: [], pruned: [] };
+  if (!confirm) return { ok: true, orphans, pruned: [], dryRun: true };
+  for (const k of orphans) delete sec[k];
+  saveSecrets(p, sec);
+  return { ok: true, orphans, pruned: orphans, dryRun: false };
+}
+
+/**
  * 把选中的 Provider 转换为现有机器人的配置补丁（复用单 Provider 槽，不建第二套系统）。
  * 返回 { config:{api:{...}}, secret:{apiKey} }，由调用方写入 ai_config.json / secrets.json。
  */
 function applyPatch(p, id) {
+  const w = assertWritable(p);
+  if (!w.ok) return { ok: false, error: w.error };
   const data = load(p);
   const prov = data.providers.find((x) => x.id === id);
   if (!prov) return { ok: false, error: '未找到该 Provider' };
@@ -186,6 +301,8 @@ function applyPatch(p, id) {
 function migrateFromConfig(p, config, secrets) {
   const fp = providersPath(p);
   if (fs.existsSync(fp)) return { ok: true, migrated: false, reason: '已存在注册表' };
+  const w = assertWritable(p);
+  if (!w.ok) return { ok: false, migrated: false, error: w.error };
   const api = (config && config.api) || {};
   const apiKey = (secrets && (secrets.apiKey != null ? secrets.apiKey : secrets.api_key)) || '';
   if (!api.baseUrl || !api.model) return { ok: false, migrated: false, error: '现有配置缺少 baseUrl/model，无法迁移' };
@@ -262,10 +379,11 @@ async function testConnection(provider, deps) {
     }
   } catch (e) { error = toErr(e); }
 
-  return { ok: protocolOk, reachable, protocolOk, modelList, error, costWarning: true };
+  return { ok: protocolOk, reachable, protocolOk, modelList, error, costWarning: true, localNetwork: isPrivateUrl(provider.baseUrl) };
 }
 
 module.exports = {
-  providersPath, secretsPath, load, loadSecrets, validateProvider, list, currentAppliedId,
-  save, remove, setDefault, applyPatch, migrateFromConfig, testConnection,
+  providersPath, secretsPath, load, loadSecrets, readSecrets, assertWritable, validateProvider, list, currentAppliedId,
+  save, remove, setDefault, applyPatch, migrateFromConfig, testConnection, pruneOrphanSecrets,
+  setCodec, hasCodec, migrateSecretsToEncrypted, isPrivateUrl,
 };
