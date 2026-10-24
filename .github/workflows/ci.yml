@@ -16,3 +16,31 @@ jobs:
           node-version: 22
       - name: 运行离线测试
         run: node tests/run-all.js --quick
+      - name: 仓库级语法检查
+        run: npm run check
+
+  desktop:
+    name: 桌面端单测与打包检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 桌面端单测与语法检查只依赖 Node 内置模块，可不装 Electron 直接跑；
+      # 但打包前检查会校验 electron / electron-builder 是否已安装，故统一先 npm ci
+      # （lockfile 已入库，版本可复现）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: feiyu-desktop/package-lock.json
+      - name: 安装依赖
+        working-directory: feiyu-desktop
+        run: npm ci --no-audit --no-fund
+      - name: 桌面端单元测试
+        working-directory: feiyu-desktop
+        run: node --test
+      - name: 桌面端语法检查
+        working-directory: feiyu-desktop
+        run: npm run check
+      - name: 桌面端打包前检查
+        working-directory: feiyu-desktop
+        run: node build/package-check.js

@@ -25,6 +25,22 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 
 **本仓库只包含自研的桥接层代码，不包含任何 QQ 客户端文件、NapCat 发行包或第三方二进制。**
 
+### 版本一览
+
+| 组件 | 当前版本 | 说明 |
+|---|---|---|
+| 桥接层（`ai_bridge.js`） | V15.5+ | 见下方「功能清单」 |
+| 桌面控制中心 | **v1.1.0** | 已发布安装包见 [Releases](https://github.com/gugubirdwdnmd/feiyu-ai-bridge/releases) |
+
+**文档导航**
+
+- 桥接层总览：[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)
+- 桌面端用户指南：[`feiyu-desktop/docs/USER_GUIDE.md`](feiyu-desktop/docs/USER_GUIDE.md)
+- 桌面端打包与数据位置：[`feiyu-desktop/README.md`](feiyu-desktop/README.md)
+- v1.1.0 主题工坊报告：[`feiyu-desktop/docs/THEME_STUDIO_REPORT.md`](feiyu-desktop/docs/THEME_STUDIO_REPORT.md)
+- v1.0.0 发布验收报告：[`feiyu-desktop/docs/FINAL_RELEASE_REPORT.md`](feiyu-desktop/docs/FINAL_RELEASE_REPORT.md)
+- 桌面端发布说明：[v0.1.0](feiyu-desktop/docs/RELEASE_NOTES_v0.1.0.md) / [v1.1.0](feiyu-desktop/docs/RELEASE_NOTES_v1.1.0.md)
+
 ---
 
 ## 功能清单
@@ -64,10 +80,28 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 ## 桌面控制中心（feiyu-desktop）
 
 图形化管理端（Electron）：多 Provider 配置、真实用量统计、费用估算、人格模板库、
-**技能扩展**、**ComfyUI 生图自动下载**，并提供 Windows x64 安装包。
+**技能扩展**、**ComfyUI 生图自动下载**、**主题工坊（v1.1.0）**，并提供 Windows x64 安装包。
 
-- 完整使用说明（含技能与 ComfyUI 接入步骤）：[`feiyu-desktop/docs/USER_GUIDE.md`](feiyu-desktop/docs/USER_GUIDE.md)
+| 页面 | 能力 |
+|---|---|
+| 总览 / 机器人运行 | 进程状态、启停 AI 桥与 NapCat、端口与日志 |
+| API 与模型 | 多 Provider 注册表、凭据加密（`safeStorage`）、测试连接、差异预览 + 备份回滚 |
+| 用量明细 | 时间范围 + Provider/模型/状态筛选、耗时、CSV 导出、费用估算 |
+| 人格设置 | 人格模板库（增删改查/复制/重命名/差异预览/回滚） |
+| 技能扩展 | 技能库 CRUD、提示词注入 + 工具挂载，**保存即生效** |
+| ComfyUI 生图 | 检测/连通性/工作流解析/**模型自动下载**/大模型前置条件校验 |
+| **主题工坊（v1.1.0）** | 6 套配色预设 + 自定义调色盘、4 种背景动画、圆角/毛玻璃、主题 JSON 导入导出 |
+| 日志 / 导入导出 | 日志尾读与关键字搜索（展示前脱敏）；配置打包与恢复 |
+
+- 完整使用说明（含主题工坊配置与导入导出）：[`feiyu-desktop/docs/USER_GUIDE.md`](feiyu-desktop/docs/USER_GUIDE.md)
+- v1.1.0 主题工坊开发与验收报告：[`feiyu-desktop/docs/THEME_STUDIO_REPORT.md`](feiyu-desktop/docs/THEME_STUDIO_REPORT.md)
+- 桌面端说明与打包：[`feiyu-desktop/README.md`](feiyu-desktop/README.md)
 - 安装包下载：[Releases](https://github.com/gugubirdwdnmd/feiyu-ai-bridge/releases)
+
+> **主题工坊**（v1.1.0 新增）：配色方案（背景色 + 双强调色）与背景动画（气泡/极光/条纹）可自定义，
+> 其余界面颜色按亮度自动推算，浅色主题下正文对比度保持可读。
+> 主题只写入 `%APPDATA%/feiyu-desktop-control-center/theme.json`，与机器人配置、密钥完全分离。
+> 详见 [用户指南第 9 章](feiyu-desktop/docs/USER_GUIDE.md#9-主题工坊v110)。
 
 ---
 
@@ -86,7 +120,7 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 
 ### 方式一：exe 直接运行（推荐，无需装 Node）
 
-到 [Releases](../../releases) 下载 `qq-ai-bot.exe`，把 `ai_config.json`、`secrets.json` 放到 exe 同目录，双击运行即可（AI 桥监听 3001 端口，等 NapCat 把消息推进来）。
+到 [Releases](https://github.com/gugubirdwdnmd/feiyu-ai-bridge/releases) 下载 `qq-ai-bot.exe`，把 `ai_config.json`、`secrets.json` 放到 exe 同目录，双击运行即可（AI 桥监听 3001 端口，等 NapCat 把消息推进来）。
 
 > 注：exe 只含 AI 桥本身。QQ 协议端（NapCat 框架）、本地表情包 `stickers/`、视频元数据能力（依赖 NapCat 自带 ffmpeg addon）不在 exe 内，完整玩法请用方式二源码运行，或把这些目录一并放到 exe 同目录。
 
@@ -167,12 +201,21 @@ Windows 上也可用 `npm run build:exe`。
 ## 测试
 
 ```bash
-npm test          # 跑全部（live 用例无 ComfyUI 时自动跳过）
-node tests/run-all.js
+npm test          # 桥接层全部离线用例（live 用例无 ComfyUI 时自动跳过）
+node tests/run-all.js --quick   # 只跑离线用例
+npm run check     # 仓库级语法检查（遍历全部 .js，只编译不执行）
+
+cd feiyu-desktop
+npm test          # 桌面端单测（384 条，纯 Node，不依赖 Electron）
+npm run check     # 桌面端语法检查
+npm run package-check   # 桌面端打包前静态检查
 ```
 
 离线用例（意图识别、记忆、安全、解析）**零网络依赖、不产生 API 费用**；
 live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行时会打印 SKIP 而不是失败。
+
+**CI**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与每个 PR 上自动运行
+桥接层离线测试、仓库级语法检查、桌面端单测与打包前检查。
 
 ---
 
@@ -197,6 +240,13 @@ live 用例（真实出图 / 图像工作流）需要本机 ComfyUI，未运行�
 ├─ stickers/               本地表情包目录（图片丢进去即可，需自备）
 ├─ tests/                  测试（*.test.js 离线 + _test_*.js live）
 ├─ build/build-exe.js      SEA 打包脚本
+├─ build/check-syntax.js  仓库级语法检查（遍历全部 .js）
+├─ feiyu-desktop/          桌面控制中心（Electron，独立子工程）
+│  ├─ src/                 主进程 / preload / IPC / 纯服务层
+│  ├─ renderer/            前端页面与主题运行时
+│  ├─ test/                node:test 单测（纯 Node，不依赖 Electron）
+│  ├─ build/               electron-builder 配置与打包/验收脚本
+│  └─ docs/                阶段报告、用户指南、主题工坊报告
 └─ docs/                   设计文档
 ```
 

@@ -3,7 +3,9 @@
 基于现有 NapCat + OneBot QQ AI 机器人核心（`ai_bridge.js`）的**图形化管理桌面端**。
 不重写机器人业务逻辑，只做「读/写它的真实配置文件 + 启停进程 + 展示真实用量」。
 
-> 📖 **完整使用说明（含技能扩展与 ComfyUI 生图接入步骤）**
+当前版本：**v1.1.0**（Windows x64，提供 NSIS 安装包与便携版）
+
+> 📖 **完整使用说明（含技能扩展、ComfyUI 生图接入与主题工坊）**
 > 见 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
 > 仓库：[gugubirdwdnmd/feiyu-ai-bridge](https://github.com/gugubirdwdnmd/feiyu-ai-bridge)
 
@@ -20,8 +22,23 @@
 | **技能扩展** | 技能库（CRUD/启停/内置模板/导入导出）：提示词注入 + 工具挂载，**保存即生效** |
 | **ComfyUI 生图** | ComfyUI 检测/连通性/工作流解析/模型自动下载/**大模型前置条件**校验 |
 | 用量明细 | 时间范围 + Provider/模型/状态筛选、耗时、CSV 导出、费用估算与价格表 |
+| **主题工坊（v1.1.0）** | 6 套配色预设 + 自定义调色盘、4 种背景动画、圆角/毛玻璃、主题 JSON 导入导出 |
 | 日志 | ai_bridge.log 尾部/搜索（展示前脱敏） |
 | 导入导出 | 配置导入导出（默认不含密钥）、差异预览、应用前备份 |
+
+### 1.1 主题工坊（v1.1.0 新增）
+
+| 能力 | 说明 |
+| --- | --- |
+| 配色预设 | 6 套内置方案（深海 / 珊瑚礁 / 极光 / 樱花 / 抹茶 / 墨夜） |
+| 自定义调色盘 | 可改背景色与两个强调色，其余界面颜色按亮度自动推算 |
+| 背景动画 | 无 / 气泡上浮 / 极光漂移 / 条纹滚动，速度 0.3~2.5 |
+| 外观参数 | 圆角 4~28px、毛玻璃模糊 0~30px |
+| 导入导出 | 主题 JSON 复制粘贴；导入先校验，非法 JSON 不改动当前主题 |
+| 无障碍 | 尊重系统「减少动态效果」偏好；窗口隐藏/失焦时暂停动画 |
+
+主题只写入 `%APPDATA%/feiyu-desktop-control-center/theme.json`，
+与机器人配置、密钥、botDir **完全分离**。详见用户指南第 9 章。
 
 ---
 
@@ -35,9 +52,11 @@ feiyu-desktop/
 │   ├── ipc/handlers.js      # 全部 IPC 处理器（先 validate 再调 Service）
 │   └── services/            # 无 Electron 依赖的纯服务（可单测）
 ├── renderer/                # 原生 JS 前端（无框架）
+│   ├── theme.js             # 主题运行时：CSS 变量 + 背景动画（reduced-motion 感知）
+│   └── styles.css           # 全部颜色走 CSS 变量，随主题切换
 ├── test/                    # node:test 单测（纯 Node，不依赖 Electron）
-├── build/                   # electron-builder 配置与打包前检查脚本
-└── docs/                    # 阶段报告与字段映射
+├── build/                   # electron-builder 配置、打包前检查与验收脚本
+└── docs/                    # 阶段报告、用户指南、主题工坊报告
 ```
 
 ### 2.1 开发模式
@@ -47,6 +66,7 @@ cd feiyu-desktop
 npm ci          # 首次或 lockfile 变更后；npm install 亦可
 npm start       # 启动 Electron
 npm test        # node --test
+npm run check   # 语法检查
 npm run package-check   # 打包前静态检查
 ```
 
@@ -63,6 +83,9 @@ npm run package-check   # 打包前静态检查
 若均未命中，界面左侧栏会显示明确提示（`BOTDIR_STATUS` 通道返回具体原因），
 不会静默失败；用户可在「机器人运行」或「关于」页手动选择目录。
 
+> **自动发现不自动落盘**：自动发现的结果只作提示，**不写入设置**，
+> 避免把「源码检出 / 发布副本」误锁定为默认工作目录。
+
 ---
 
 ## 3. 打包（Windows x64）
@@ -72,8 +95,8 @@ npm run package-check   # 打包前静态检查
 | 产物 | 形态 | 说明 |
 | --- | --- | --- |
 | `dist/win-unpacked/` | **免安装目录** | 直接运行 `肥鱼桌面控制中心.exe`。 |
-| `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe` | **NSIS 安装包** | 标准安装程序，可选安装目录、可卸载。 |
-| `dist/肥鱼桌面控制中心-0.1.0-portable.exe` | **便携版单文件** | 免安装单文件。 |
+| `dist/肥鱼桌面控制中心-1.1.0-win-x64.exe` | **NSIS 安装包** | 标准安装程序，可选安装目录、可卸载。 |
+| `dist/肥鱼桌面控制中心-1.1.0-portable.exe` | **便携版单文件** | 免安装单文件。 |
 
 > `win-unpacked` 与 NSIS 安装版是**两种不同产物**，不能互相替代：
 > 前者是解压即用的目录，后者是自解压安装程序（写注册表/开始菜单/卸载项）。
@@ -94,16 +117,27 @@ CSC_IDENTITY_AUTO_DISCOVERY=false \
 导致**构建退出码非 0**（但产物其实已生成，容易误判）。
 配置好正式证书后，应去掉这两个开关，恢复正常签名流程。
 
-### 3.3 产物实测（本次发布候选验收）
+> ⚠️ **图标注入的坑（v1.1.0 实测）**：`signAndEditExecutable=false` 会**同时**跳过
+> 「签名」与「rcedit 编辑（写入 exe 图标/版本信息）」，导致主程序 exe 仍是 Electron 默认图标。
+> 而 NSIS / 便携版是**基于 win-unpacked 打包**的，必须在 `afterPack` 阶段注入才能三处一致。
+> 本项目已用 `build/after-pack-icon.js`（electron-builder 的 `afterPack` 钩子）解决，
+> 并用 `build/verify-icons.js` 逐像素校验四处图标一致。
 
-| 项 | 实测结果 |
-| --- | --- |
-| NSIS 安装包 | `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe`，115,191,514 字节（≈110 MB），构建退出码 **0** |
-| 安装 | 静默安装退出码 **0**；安装目录含 exe / `resources/app.asar` / `Uninstall ….exe` / 桌面快捷方式 |
-| 安装后定位 | 自动识别到真实机器人目录（`botDir = D:\NapCat_publish`），无需手动选择 |
-| 卸载 | 退出码 **0**；程序文件全部删除（安装目录清空） |
-| **卸载保留用户数据** | ✅ `%APPDATA%\feiyu-desktop-control-center\` 下的设置与标记文件**均保留**（`deleteAppDataOnUninstall: false`） |
-| 代码签名 | ⚠️ 未签名（无证书）。Windows SmartScreen 可能提示「未知发布者」 |
+### 3.3 产物实测
+
+| 项 | v1.0.0 | v1.1.0 |
+| --- | --- | --- |
+| NSIS 安装包 | 115,191,514 字节 | `肥鱼桌面控制中心-1.1.0-win-x64.exe`，115,353,568 字节 |
+| 便携版 | — | `肥鱼桌面控制中心-1.1.0-portable.exe`，115,069,002 字节 |
+| 构建退出码 | 0 | 0 |
+| 静默安装 | 退出码 0 | 退出码 0（75 个程序文件） |
+| 卸载 | 退出码 0，程序文件清空 | 退出码 0，残留 0 文件 |
+| **卸载保留用户数据** | ✅ `%APPDATA%\feiyu-desktop-control-center\` 下的设置与标记文件**均保留**（`deleteAppDataOnUninstall: false`） | ✅ 同左 |
+| **v1.0.0 → v1.1.0 原地升级** | — | ✅ 版本升到 1.1.0、1.0.0 独有文件 0 残留、旧用户数据逐字节保留 |
+| 应用图标 | 默认 Electron 图标 | ✅ 安装包 / 便携版 / 主程序 exe / 窗口图标四处一致（逐像素差异 0.00%） |
+| 代码签名 | ⚠️ 未签名（无证书）。Windows SmartScreen 可能提示「未知发布者」 | ⚠️ 同左（v1.1.0 范围不含签名） |
+
+> 安装后能自动识别到真实机器人目录（`botDir`），无需手动选择。
 
 > **注意**：卸载后若安装目录残留为空目录，属 NSIS 卸载器自删除的正常现象；
 > 但**残留空目录会导致后续重新安装失败**（安装器返回 1），重装前需先删掉该空目录。
@@ -120,8 +154,9 @@ CSC_IDENTITY_AUTO_DISCOVERY=false \
 
 | 数据 | 位置 | 升级/卸载 |
 | --- | --- | --- |
-| 桌面设置（botDir 指向） | `%APPDATA%/肥鱼桌面控制中心/feiyu-settings.json` | 保留（`deleteAppDataOnUninstall: false`） |
-| 价格表 | `%APPDATA%/肥鱼桌面控制中心/price.json` | 保留 |
+| 桌面设置（botDir 指向） | `%APPDATA%/feiyu-desktop-control-center/feiyu-settings.json` | 保留（`deleteAppDataOnUninstall: false`） |
+| 价格表 | `%APPDATA%/feiyu-desktop-control-center/price.json` | 保留 |
+| **主题（v1.1.0）** | `%APPDATA%/feiyu-desktop-control-center/theme.json` | 保留 |
 | 桌面 Provider 注册表 | `<botDir>/feiyu_providers.json` | 保留（不含明文密钥） |
 | 桌面 Provider 密钥 | `<botDir>/feiyu_provider_secrets.json` | 可迁移为系统凭据加密 |
 | 机器人配置/人格/密钥 | `<botDir>/ai_config.json`、`ai_prompt.txt`、`secrets.json` | 保留 |

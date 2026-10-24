@@ -512,10 +512,15 @@ A：优先读本地 `memory/usage/*.jsonl`；换算范围试试「7d / month / a
 
 | 文档 | 内容 |
 |---|---|
-| [`README.md`](README.md) | 桌面端总览、打包、数据位置 |
-| [`docs/PHASE_A_REPORT.md`](docs/PHASE_A_REPORT.md) | 阶段 A（桌面 MVP）报告 |
-| [`docs/PHASE_B_REPORT.md`](docs/PHASE_B_REPORT.md) | 阶段 B（用量/多 Provider/费用）报告 |
-| [`docs/PHASE_C_REPORT.md`](docs/PHASE_C_REPORT.md) | 阶段 C（人格库/明细接口/凭据加固）报告 |
-| [`docs/RELEASE_ACCEPTANCE_REPORT.md`](docs/RELEASE_ACCEPTANCE_REPORT.md) | 发布候选验收报告 |
-| [`docs/USAGE_BASELINE.md`](docs/USAGE_BASELINE.md) | 用量字段基线与映射表 |
+| [`../README.md`](../README.md) | 桌面端总览、打包、数据位置 |
+| [`PHASE_A_REPORT.md`](PHASE_A_REPORT.md) | 阶段 A（桌面 MVP）报告 |
+| [`PHASE_B_REPORT.md`](PHASE_B_REPORT.md) | 阶段 B（用量/多 Provider/费用）报告 |
+| [`PHASE_C_REPORT.md`](PHASE_C_REPORT.md) | 阶段 C（人格库/明细接口/凭据加固）报告 |
+| [`PHASE_D_REPORT.md`](PHASE_D_REPORT.md) | 阶段 D（仓库改名/技能扩展/ComfyUI）报告 |
+| [`RELEASE_ACCEPTANCE_REPORT.md`](RELEASE_ACCEPTANCE_REPORT.md) | v0.1.0 发布候选验收报告 |
+| [`FINAL_RELEASE_REPORT.md`](FINAL_RELEASE_REPORT.md) | v1.0.0 发布前最终验收报告 |
+| [`THEME_STUDIO_REPORT.md`](THEME_STUDIO_REPORT.md) | **v1.1.0 主题工坊**开发与验收报告 |
+| [`RELEASE_NOTES_v0.1.0.md`](RELEASE_NOTES_v0.1.0.md) | v0.1.0 发布说明 |
+| [`RELEASE_NOTES_v1.1.0.md`](RELEASE_NOTES_v1.1.0.md) | **v1.1.0 发布说明** |
+| [`USAGE_BASELINE.md`](USAGE_BASELINE.md) | 用量字段基线与映射表 |
 | 仓库根 `workflows/README.md` | 工作流目录说明 |
