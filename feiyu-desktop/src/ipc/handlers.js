@@ -13,6 +13,8 @@ const secretService = require('../services/secretService');
 const usageService = require('../services/usageService');
 const logService = require('../services/logService');
 const importExportService = require('../services/importExportService');
+const providerService = require('../services/providerService');
+const priceService = require('../services/priceService');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
 
@@ -22,8 +24,8 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
 
   const getSettings = () => { try { return JSON.parse(fs.readFileSync(settingsFile, 'utf-8')); } catch (_) { return {}; } };
   const setSettings = (s) => { try { fs.mkdirSync(getUserDataDir(), { recursive: true }); fs.writeFileSync(settingsFile, JSON.stringify(s, null, 2)); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; } };
-  const getPrice = () => { try { return JSON.parse(fs.readFileSync(priceFile, 'utf-8')); } catch (_) { return null; } };
-  const setPrice = (t) => { try { fs.mkdirSync(getUserDataDir(), { recursive: true }); fs.writeFileSync(priceFile, JSON.stringify(t, null, 2)); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; } };
+  const getPrice = () => priceService.getPrice(getUserDataDir());
+  const setPrice = (t) => priceService.setPrice(getUserDataDir(), t);
   const botDir = () => getSettings().botDir || '';
   const needBotDir = () => { const d = botDir(); return d && fs.existsSync(d) ? d : null; };
 
@@ -80,18 +82,13 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     const status = await pm.getStatus();
     const livePort = status.bridge.running ? status.bridge.port : null;
     const usage = await usageService.getUsage(d, range, { livePort });
-    // 费用估算（仅当存在价格表）
+    // 费用估算（仅当存在价格表；估算值，非服务商实际账单）
     const price = getPrice();
     if (price && Array.isArray(usage.recentRequests)) {
-      let totalCost = 0, anyPriced = false;
-      for (const r of usage.recentRequests) {
-        const c = usageService.estimateCost(r, price);
-        r._cost = c;
-        if (c.priced) { totalCost += c.cost; anyPriced = true; }
-      }
-      usage.cost = { priced: anyPriced, totalCost: Math.round(totalCost * 1e6) / 1e6, priceVersion: price.version || null };
+      for (const r of usage.recentRequests) r._cost = usageService.estimateCost(r, price);
+      usage.cost = usageService.estimateCostForSet(usage.recentRequests, price);
     } else {
-      usage.cost = { priced: false, totalCost: null, priceVersion: null };
+      usage.cost = { priced: false, totalCost: null, currency: 'CNY', unit: 'M', priceVersion: null, reason: 'no_price_table' };
     }
     return { ok: true, usage };
   });
@@ -144,9 +141,73 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     return importExportService.applyImport(d, args.incoming, { backup, includeSecret });
   });
 
+  // ---------- 多 Provider 管理 ----------
+  // 复用现有单 Provider 请求系统：注册表只存配置，所谓「切换」= 把选中 Provider 写回
+  // ai_config.json(api) + secrets.json(apiKey)，由机器人下次请求时生效（需重启 AI 桥）。
+  ipcMain.handle(CHANNELS.PROVIDER_LIST, (e, args) => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    // 兼容迁移：尚不存在注册表时，用现有单 Provider 配置生成默认 Provider
+    const migrated = providerService.migrateFromConfig(d, configService.readRaw(d).data, secretService.read(d).data);
+    const cfg = configService.readRaw(d).data;
+    const list = providerService.list(d, cfg);
+    return { ok: true, providers: list.providers, default: list.default, appliedId: list.appliedId, migrated: migrated.migrated || false };
+  });
+  ipcMain.handle(CHANNELS.PROVIDER_SAVE, (e, args) => {
+    const v = validate(CHANNELS.PROVIDER_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return providerService.save(d, args.provider);
+  });
+  ipcMain.handle(CHANNELS.PROVIDER_DELETE, (e, args) => {
+    const v = validate(CHANNELS.PROVIDER_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return providerService.remove(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.PROVIDER_SET_DEFAULT, (e, args) => {
+    const v = validate(CHANNELS.PROVIDER_SET_DEFAULT, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return providerService.setDefault(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.PROVIDER_TEST, async (e, args) => {
+    const v = validate(CHANNELS.PROVIDER_TEST, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    // 取待测 Provider：已有则取其存储的密钥；否则用传入的草稿（不落盘）
+    let provider, apiKey = '';
+    if (args.id) {
+      const list = providerService.list(d);
+      provider = list.providers.find((x) => x.id === args.id);
+      if (!provider) return { ok: false, error: '未找到该 Provider' };
+      const sec = providerService.loadSecrets(d);
+      apiKey = sec[args.id] != null ? String(sec[args.id]) : '';
+    } else {
+      provider = args.provider;
+    }
+    if (!provider || !provider.baseUrl || !provider.model) return { ok: false, error: 'Provider 缺少 baseUrl/model' };
+    // 注意：此调用会向 Provider 真实发一条最小 chat completion（可能产生极少量费用），
+    // 仅由用户在前端显式点击触发；本函数不做任何自动/隐式请求。
+    const res = await providerService.testConnection(provider, {
+      fetch: globalThis.fetch, apiKey, timeoutMs: provider.timeoutMs, AbortSignal: globalThis.AbortSignal,
+    });
+    // 双重保险：返回前再脱敏（密钥只出现在请求头，不应进入响应，但防御性处理）
+    if (res.error) res.error = redactText(res.error);
+    return { ok: true, result: res };
+  });
+  ipcMain.handle(CHANNELS.PROVIDER_APPLY, (e, args) => {
+    const v = validate(CHANNELS.PROVIDER_APPLY, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const patch = providerService.applyPatch(d, args.id);
+    if (!patch.ok) return { ok: false, error: patch.error };
+    const c = configService.applyConfig(d, patch.config);
+    if (!c.ok) return { ok: false, error: (c.errors || []).join('；') || '写入配置失败' };
+    const s = secretService.write(d, patch.secret);
+    if (!s.ok) return { ok: false, error: s.error || '写入密钥失败' };
+    return { ok: true, id: args.id, note: '已写入 ai_config.json + secrets.json，需重启 AI 桥后生效' };
+  });
+
   ipcMain.handle(CHANNELS.PRICE_GET, () => ({ ok: true, price: getPrice() }));
   ipcMain.handle(CHANNELS.PRICE_SET, (e, args) => {
     const v = validate(CHANNELS.PRICE_SET, args); if (!v.ok) return { ok: false, error: v.error };
+    const pv = priceService.validatePrice(args.table);
+    if (!pv.valid) return { ok: false, error: pv.errors.join('；') };
     const r = setPrice(args.table);
     return { ok: r.ok, error: r.error, price: getPrice() };
   });

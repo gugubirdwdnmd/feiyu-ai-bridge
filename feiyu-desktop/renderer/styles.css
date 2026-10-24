@@ -46,5 +46,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .log { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .muted { color: var(--sub); }
 .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+.pill.ok { color: var(--green); border-color: var(--green); }
+.pill.err { color: var(--red); border-color: var(--red); }
+.btn.sm { padding: 4px 9px; font-size: 12px; }
+.scroll { overflow: auto; max-height: 440px; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; }
+code { background: var(--bg); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); font-size: 12px; word-break: break-all; }
 .split2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 900px) { .split2 { grid-template-columns: 1fr; } }

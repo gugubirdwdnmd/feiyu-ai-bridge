@@ -687,6 +687,37 @@ function appendChatLine(obj) {
 
 // 一条聊天（用户一条消息 → Judge+Answer+Tool 可能多个请求）的聚合
 const chatAccum = new Map();     // chatId -> { judge/answer/tool: {c,t} }
+
+// ================= Phase B：用量明细增强（provider / 耗时 / 状态 / 错误类别）=================
+// 单 Provider 架构下，Provider 标识由请求实际使用的 baseUrl 推导（稳定、可分组）。
+// 自定义 OpenAI 兼容接口 → 用 host 作标识；已知官方域做友好映射。
+function providerFromBaseUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = (u.host || '').toLowerCase();
+    if (host.includes('deepseek.com')) return 'deepseek';
+    if (host.includes('openai.com')) return 'openai';
+    if (host.includes('anthropic.com')) return 'anthropic';
+    if (host.includes('moonshot') || host.includes('kimi')) return 'moonshot';
+    if (host.includes('qwen') || host.includes('dashscope')) return 'qwen';
+    if (host.includes('zhipu') || host.includes('bigmodel')) return 'zhipu';
+    if (host.includes('bytedance') || host.includes('volcengine')) return 'doubao';
+    if (host) return host;          // 自定义域：直接用 host（不含端口/路径）
+    return 'unknown';
+  } catch (_) { return 'unknown'; }
+}
+
+// 把异常归类到稳定错误类别（不泄漏任何敏感信息 —— 调用方日志需再过 redact）。
+function classifyError(e) {
+  if (!e) return 'unknown';
+  if (e.name === 'AbortError' || /abort|timeout/i.test(e.message || '')) return 'timeout';
+  const st = e.status != null ? Number(e.status) : NaN;
+  if (!Number.isNaN(st)) return st >= 500 ? 'http_server' : 'http_client';
+  return 'network';
+}
+
+// 最近一次 callAPIOnce 的元信息（provider + 耗时），供成功/失败明细共用。
+let lastCallMeta = { provider: 'unknown', durationMs: null, ok: false };
 const recentChats = [];          // 最近 50 条聊天（供后台）
 
 // 一条「聊天」的稳定 ID（跨同一条消息的多次 API 请求聚合用）；同进程内唯一即可
@@ -778,24 +809,35 @@ function saveStats() {
 // kind='judge' 时计入 judge 分账，不混进回答请求
 // 一次真实 API 请求的真实用量（直接用 DeepSeek 返回的 usage，不做任何估算）
 // kind: judge | answer | tool；chatId 用于把同一条聊天的多次请求聚合成「一条聊天」
+// Phase B 增强：附加 provider / 耗时 / 状态 / 错误类别；缺失字段记 null（不补 0，不伪造）。
+//   extra.status: 'success'（默认）| 'error'（失败明细走 recordUsageFailure，不在此路径）
+//   extra.provider / extra.durationMs 由 callAPI 经 lastCallMeta 传入
 function recordUsage(usage, groupId, kind, chatId, model, extra) {
-  if (!CFG.stats.enable || !usage) return;
-  resetStatsIfNewDay();
-  const pt = Number(usage.prompt_tokens) || 0;
-  const ct = Number(usage.completion_tokens) || 0;
-  const tt = Number(usage.total_tokens) || (pt + ct);
-  const rt = Number(usage.completion_tokens_details?.reasoning_tokens) || 0;
-  const ch = Number(usage.prompt_cache_hit_tokens) || 0;
-  const cm = Number(usage.prompt_cache_miss_tokens) || 0;
+  if (!CFG.stats.enable) return;
+  const status = (extra && extra.status) || 'success';
+  const provider = (extra && extra.provider) || lastCallMeta.provider || 'unknown';
+  const durationMs = (extra && extra.durationMs != null) ? Number(extra.durationMs) : (lastCallMeta.durationMs != null ? Number(lastCallMeta.durationMs) : null);
+  const errorCategory = (extra && extra.errorCategory) || null;
+  const hasUsage = usage && typeof usage === 'object';
+  // 明细用「原始值」：字段缺失 → null（明确未知，不冒充 0）
+  const pt = hasUsage && usage.prompt_tokens != null ? Number(usage.prompt_tokens) : null;
+  const ct = hasUsage && usage.completion_tokens != null ? Number(usage.completion_tokens) : null;
+  const tt = hasUsage && usage.total_tokens != null ? Number(usage.total_tokens) : null;
+  const rt = hasUsage && usage.completion_tokens_details?.reasoning_tokens != null ? Number(usage.completion_tokens_details.reasoning_tokens) : 0;
+  const ch = hasUsage && usage.prompt_cache_hit_tokens != null ? Number(usage.prompt_cache_hit_tokens) : null;
+  const cm = hasUsage && usage.prompt_cache_miss_tokens != null ? Number(usage.prompt_cache_miss_tokens) : null;
+  // 统计聚合用「兜底 0」：未知量按 0 计入累加（聚合求和的正确数学值），不污染明细
+  const sPt = pt || 0, sCt = ct || 0, sTt = tt != null ? tt : (sPt + sCt);
 
+  resetStatsIfNewDay();
   // 总账（兼容旧字段：requests=总 API 次数，promptTokens/completionTokens=总 token）
   stats.requests++;
-  stats.promptTokens += pt;
-  stats.completionTokens += ct;
-  stats.totalTokens += tt;
+  stats.promptTokens += sPt;
+  stats.completionTokens += sCt;
+  stats.totalTokens += sTt;
   stats.reasoningTokens += rt;
-  stats.cacheHitTokens += ch;
-  stats.cacheMissTokens += cm;
+  stats.cacheHitTokens += (ch || 0);
+  stats.cacheMissTokens += (cm || 0);
   if (groupId) stats.groups[String(groupId)] = (stats.groups[String(groupId)] || 0) + 1;
 
   // 按 kind 分账（V13.5 新增 chatrecord；V14 新增 agent / vision / video）
@@ -809,15 +851,15 @@ function recordUsage(usage, groupId, kind, chatId, model, extra) {
     stats[bucket + 'ReasonTokens'] = 0;
   }
   stats[bucket + 'Requests']++;
-  stats[bucket + 'PromptTokens'] += pt;
-  stats[bucket + 'CompletionTokens'] += ct;
+  stats[bucket + 'PromptTokens'] += sPt;
+  stats[bucket + 'CompletionTokens'] += sCt;
   stats[bucket + 'ReasonTokens'] += rt;
-  if (bucket === 'chatrecord') stats.chatRecordTokens += tt;
+  if (bucket === 'chatrecord') stats.chatRecordTokens += sTt;
 
   // 按模型分账
   const m = model || (bucket === 'judge' ? CFG.judge.model : CFG.api.model) || 'unknown';
   if (!stats.modelUsage[m]) stats.modelUsage[m] = { calls: 0, tokens: 0 };
-  stats.modelUsage[m].calls++; stats.modelUsage[m].tokens += tt;
+  stats.modelUsage[m].calls++; stats.modelUsage[m].tokens += sTt;
 
   // 一条聊天的聚合
   if (chatId) {
@@ -828,12 +870,12 @@ function recordUsage(usage, groupId, kind, chatId, model, extra) {
     const a = chatAccum.get(chatId);
     if (!a[bucket]) a[bucket] = { c: 0, t: 0 };
     if (!a[bucket]) a[bucket] = { c: 0, t: 0 };
-    a[bucket].c++; a[bucket].t += tt;
+    a[bucket].c++; a[bucket].t += sTt;
   }
 
   // 明细 JSONL（不含完整聊天内容、不含 key）
   appendUsageLine({
-    time: new Date().toISOString(), kind: bucket, model: m,
+    time: new Date().toISOString(), kind: bucket, model: m, provider, durationMs, status, errorCategory,
     prompt_tokens: pt, completion_tokens: ct, reasoning_tokens: rt,
     cache_hit_tokens: ch, cache_miss_tokens: cm, total_tokens: tt, chatId: chatId || '',
     chatRecordId: (extra && extra.chatRecordId) || '',
@@ -841,6 +883,26 @@ function recordUsage(usage, groupId, kind, chatId, model, extra) {
 
   checkBudget();
   saveStats();
+}
+
+// 仅记录「失败 / 超时 / 重试耗尽」的请求明细（与成功路径分离，避免污染成功计数）。
+// 全程 try/catch：即使写盘失败也绝不影响机器人原本的请求流程（原错误仍向上抛）。
+// 不触碰 stats 聚合（stats.errors 由 callAPI 的现有逻辑按次累加，保持原语义）。
+function recordUsageFailure(groupId, kind, chatId, model, provider, durationMs, errorCategory) {
+  if (!CFG.stats.enable) return;
+  try {
+    const bucket = (kind && ['judge', 'tool', 'chatrecord', 'agent', 'vision', 'video'].indexOf(kind) >= 0) ? kind : 'answer';
+    const m = model || (bucket === 'judge' ? CFG.judge.model : CFG.api.model) || 'unknown';
+    appendUsageLine({
+      time: new Date().toISOString(), kind: bucket, model: m,
+      provider: provider || lastCallMeta.provider || 'unknown',
+      durationMs: durationMs != null ? Number(durationMs) : (lastCallMeta.durationMs != null ? Number(lastCallMeta.durationMs) : null),
+      status: 'error', errorCategory: errorCategory || 'unknown',
+      prompt_tokens: null, completion_tokens: null, reasoning_tokens: null,
+      cache_hit_tokens: null, cache_miss_tokens: null, total_tokens: null,
+      chatId: chatId || '', chatRecordId: '',
+    });
+  } catch (_) { /* 明细失败忽略，不影响主流程 */ }
 }
 
 function statsLine() {
@@ -3142,9 +3204,12 @@ async function callAPIOnce(messages, allowTools, model, opts) {
   const timeoutMs = useVision
     ? (Number(CFG.vision.timeoutMs) || Number(CFG.api.timeoutMs) || 30000)
     : (Number(CFG.api.timeoutMs) || 30000);
+  const reqUrl = useVision ? (CFG.vision.baseUrl || CFG.api.baseUrl || API_URL) : (CFG.api.baseUrl || API_URL);
+  const reqProvider = providerFromBaseUrl(reqUrl);
+  const t0 = Date.now();
   const t = withTimeout(timeoutMs);
   try {
-    const r = await fetch(useVision ? (CFG.vision.baseUrl || CFG.api.baseUrl || API_URL) : (CFG.api.baseUrl || API_URL), {
+    const r = await fetch(reqUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (useVision ? (visionApiKey() || API_KEY) : API_KEY) },
       body: JSON.stringify(body),
@@ -3155,12 +3220,15 @@ async function callAPIOnce(messages, allowTools, model, opts) {
       const err = new Error('HTTP ' + r.status + ' ' + txt);
       err.status = r.status;
       err.retryable = r.status >= 500;   // 只有 5xx 重试；4xx（含 401/余额不足）不重试
+      lastCallMeta = { provider: reqProvider, durationMs: Date.now() - t0, ok: false };
       throw err;
     }
+    lastCallMeta = { provider: reqProvider, durationMs: Date.now() - t0, ok: true };
     return await r.json();
   } catch (e) {
     // 网络层错误（超时/连不上）可重试；HTTP 错误看上一步的标记
     if (e.retryable === undefined) e.retryable = true;
+    lastCallMeta = { provider: reqProvider, durationMs: Date.now() - t0, ok: false };
     throw e;
   } finally {
     t.done();
@@ -3177,7 +3245,9 @@ async function callAPI(messages, allowTools, opts) {
   for (let attempt = 0; attempt <= maxRetry; attempt++) {
     try {
       const j = await callAPIOnce(messages, allowTools, model, opts);
-      recordUsage(j && j.usage, groupId, opts.kind, opts.chatId, opts.model || model, opts.extra);
+      // 成功明细：附加 provider + 耗时（来自最近一次 callAPIOnce 的 lastCallMeta）
+      recordUsage(j && j.usage, groupId, opts.kind, opts.chatId, opts.model || model,
+        Object.assign({}, opts.extra, { status: 'success', provider: lastCallMeta.provider, durationMs: lastCallMeta.durationMs }));
       return j;
     } catch (e) {
       lastErr = e;
@@ -3196,13 +3266,17 @@ async function callAPI(messages, allowTools, opts) {
     try {
       log(`[自动选模型] 主选 ${model} 失败，切换兜底模型 ${fb}`);
       const j = await callAPIOnce(messages, allowTools, fb, opts);
-      recordUsage(j && j.usage, groupId, opts.kind, opts.chatId, fb, opts.extra);
+      recordUsage(j && j.usage, groupId, opts.kind, opts.chatId, fb,
+        Object.assign({}, opts.extra, { status: 'success', provider: lastCallMeta.provider, durationMs: lastCallMeta.durationMs }));
       return j;
     } catch (e2) {
       lastErr = e2;
       stats.errors++;
     }
   }
+  // 全部失败：记录一条失败明细（超时/网络/HTTP 错误均含错误类别；不污染成功计数）
+  recordUsageFailure(groupId, opts.kind, opts.chatId, opts.model || model,
+    lastCallMeta.provider, lastCallMeta.durationMs, classifyError(lastErr));
   saveStats();
   throw lastErr;
 }

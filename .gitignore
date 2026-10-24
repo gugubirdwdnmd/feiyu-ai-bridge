@@ -8,6 +8,7 @@ config.secret.json
 *.secret.json
 secrets.*.json
 !secrets.example.json
+feiyu_provider_secrets.json
 .env
 .env.*
 !.env.example

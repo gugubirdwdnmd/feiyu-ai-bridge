@@ -26,6 +26,13 @@ const CHANNELS = {
   PRICE_GET: 'price:get',
   PRICE_SET: 'price:set',
   DIALOG_PICKDIR: 'dialog:pickDir',
+  // 多 Provider 管理（桌面侧注册表；复用现有单 Provider 请求系统）
+  PROVIDER_LIST: 'provider:list',
+  PROVIDER_SAVE: 'provider:save',
+  PROVIDER_DELETE: 'provider:delete',
+  PROVIDER_SET_DEFAULT: 'provider:setDefault',
+  PROVIDER_TEST: 'provider:test',
+  PROVIDER_APPLY: 'provider:apply',
 };
 
 const ALLOWED_RANGE = ['today', 'yesterday', '7d', 'month', 'all'];
@@ -88,6 +95,18 @@ function validate(channel, args) {
     case CHANNELS.PRICE_GET:
     case CHANNELS.PRICE_SET:
       if (channel === CHANNELS.PRICE_SET && (!isObject(args) || !isObject(args.table))) return { ok: false, error: '需要 {table: object}' };
+      return { ok: true };
+    case CHANNELS.PROVIDER_LIST:
+    case CHANNELS.PROVIDER_DELETE:
+    case CHANNELS.PROVIDER_SET_DEFAULT:
+    case CHANNELS.PROVIDER_APPLY:
+      if (args != null && (!isObject(args) || typeof args.id !== 'string')) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+    case CHANNELS.PROVIDER_SAVE:
+      if (!isObject(args) || !isObject(args.provider)) return { ok: false, error: '需要 {provider: object}' };
+      return { ok: true };
+    case CHANNELS.PROVIDER_TEST:
+      if (!isObject(args) || (typeof args.id !== 'string' && !isObject(args.provider))) return { ok: false, error: '需要 {id} 或 {provider}' };
       return { ok: true };
     default:
       return { ok: false, error: '未知通道: ' + channel };

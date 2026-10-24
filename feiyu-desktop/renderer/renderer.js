@@ -9,6 +9,21 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': 
 const fmt = (n) => (n == null ? 0 : n).toLocaleString('zh-CN');
 const invoke = (ch, args) => f.invoke(ch, args);
 
+let editPid = null;                              // 正在编辑的 Provider id
+let usageFilter = { provider: '', model: '', status: '' };
+let usageCurrent = null;                         // 当前用量数据（筛选用）
+let usagePrice = null;                           // 当前价格表
+
+function shortUrl(u) { if (!u) return '—'; try { const x = new URL(u); return x.host + x.pathname; } catch (_) { return u; } }
+function csvCell(v) { const s = v == null ? '' : String(v); if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'; return s; }
+function downloadCSV(reqs) {
+  const cols = ['time', 'status', 'kind', 'provider', 'model', 'prompt_tokens', 'completion_tokens', 'reasoning_tokens', 'cache_hit_tokens', 'cache_miss_tokens', 'total_tokens', 'durationMs', 'errorCategory'];
+  const lines = [cols.map(csvCell).join(',')];
+  for (const x of reqs) lines.push(cols.map((c) => csvCell(x[c])).join(','));
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'feiyu-usage.csv'; a.click();
+}
+
 /** 弹出系统目录选择框，写入设置（仅保存路径字符串，不读文件）。 */
 async function pickBotDir() {
   const r = await invoke(C.DIALOG_PICKDIR);
@@ -64,7 +79,7 @@ async function pageOverview() {
       <div class="card"><div class="k">人格</div><div class="v" style="font-size:15px">${esc(person.name || '未配置')}</div></div>
     </div>
     <div class="grid">
-      <div class="card"><div class="k">今日请求</div><div class="v">${fmt(u.requests ?? u.totalTokens != null ? (u.answerRequests || 0) + (u.judgeRequests || 0) : 0)}</div></div>
+      <div class="card"><div class="k">今日请求(成功/失败)</div><div class="v" style="font-size:15px">${fmt(u.successRequests || 0)} <span class="muted">/</span> <span class="err">${fmt(u.failRequests || 0)}</span></div></div>
       <div class="card"><div class="k">今日总 Token</div><div class="v">${fmt(u.totalTokens)}</div></div>
       <div class="card"><div class="k">输入 / 输出</div><div class="v" style="font-size:15px">${fmt(u.promptTokens)} / ${fmt(u.completionTokens)}</div></div>
       <div class="card"><div class="k">缓存命中率</div><div class="v" style="font-size:15px">${u.cacheHitTokens + u.cacheMissTokens > 0 ? Math.round(u.cacheHitTokens / (u.cacheHitTokens + u.cacheMissTokens) * 100) + '%' : '—'}</div></div>
@@ -133,73 +148,258 @@ async function pageRun() {
   $('#pickBtn').onclick = async () => { const d = await pickBotDir(); if (d) pageRun(); };
 }
 
-/* ---------- API 与模型 ---------- */
+/* ---------- API 与模型（含多 Provider 管理） ---------- */
 async function pageApi() {
   content.innerHTML = '<h2>API 与模型</h2><div id="ap"></div>';
   const box = $('#ap');
+  box.innerHTML = '<div class="hint">加载中…</div>';
   const cfg = await invoke(C.CONFIG_READ);
   const sec = await invoke(C.SECRET_HAS_KEY);
+  const pl = await invoke(C.PROVIDER_LIST);
   const api = (cfg.config && cfg.config.api) || {};
+  const providers = pl.providers || [];
+  const appliedId = pl.appliedId, def = pl.default;
+
   box.innerHTML = `
     <div class="section">
-      <h3>Provider 配置（OpenAI 兼容协议）</h3>
-      <label>Base URL</label><input id="baseUrl" value="${esc(api.baseUrl || 'https://api.deepseek.com/v1/chat/completions')}" />
-      <label>主模型</label><input id="model" value="${esc(api.model || '')}" placeholder="deepseek-chat" />
-      <label>推理模型</label><input id="rModel" value="${esc(api.reasoningModel || '')}" placeholder="deepseek-reasoner" />
-      <label>超时(ms)</label><input id="timeout" type="number" value="${esc(api.timeoutMs != null ? api.timeoutMs : 90000)}" />
-      <label>重试次数</label><input id="retries" type="number" value="${esc(api.maxRetries != null ? api.maxRetries : 2)}" />
-      <div class="row"><button class="btn" id="saveApi">保存 API 配置</button></div>
-      <div class="hint" id="apiMsg"></div>
+      <h3>Provider 列表（多 Provider 管理）</h3>
+      <div class="hint">桌面维护一个 Provider 注册表；「应用」把选中 Provider 写回现有 ai_config.json(api) + secrets.json(apiKey)，复用原单 Provider 请求系统（不建第二套）。切换后需重启 AI 桥生效。密钥不进注册表明文。</div>
+      <div id="pList"></div>
+      ${pl.migrated ? '<div class="ok">已从现有配置兼容迁移生成默认 Provider。</div>' : ''}
     </div>
     <div class="section">
-      <h3>密钥（secret，不进导出包/日志）</h3>
-      <div class="hint">当前状态：${sec.hasKey ? '<span class="ok">已配置 API Key</span>' : '<span class="err">未配置，AI 桥将无法启动</span>'}</div>
-      <label>API Key</label><input id="apiKey" type="password" placeholder="sk-..." />
-      <label>OneBot Token</label><input id="onebot" type="password" placeholder="NapCat token" />
-      <label>生图 API Key</label><input id="imgKey" type="password" placeholder="可选" />
-      <div class="row"><button class="btn sec" id="saveSec">保存密钥</button></div>
-      <div class="hint" id="secMsg"></div>
+      <h3 id="pFormTitle">新增 Provider</h3>
+      <label>名称</label><input id="pName" placeholder="如 DeepSeek / 我的中转" />
+      <label>Base URL（OpenAI 兼容 /chat/completions）</label><input id="pBase" placeholder="https://api.deepseek.com/v1/chat/completions" />
+      <label>主模型</label><input id="pModel" placeholder="deepseek-chat" />
+      <label>推理模型（可选）</label><input id="pRModel" placeholder="deepseek-reasoner" />
+      <label>超时(ms)</label><input id="pTimeout" type="number" value="30000" />
+      <label>重试次数</label><input id="pRetry" type="number" value="2" />
+      <label>API Key（仅存本机密钥文件，不进注册表明文）</label><input id="pKey" type="password" placeholder="sk-..." />
+      <div class="row"><button class="btn" id="pSave">保存 Provider</button><button class="btn sec" id="pCancel" style="display:none">取消编辑</button></div>
+      <div class="hint" id="pMsg"></div>
+    </div>
+    <div class="section">
+      <h3>当前应用的 API 配置（ai_config.json）</h3>
+      <div class="hint">Base URL：<code>${esc(api.baseUrl || '—')}</code><br>主模型：<code>${esc(api.model || '—')}</code> ｜ 推理：<code>${esc(api.reasoningModel || '—')}</code></div>
+      <div class="hint">密钥状态：${sec.hasKey ? '<span class="ok">已配置</span>' : '<span class="err">未配置</span>'}</div>
     </div>`;
-  $('#saveApi').onclick = async () => {
-    const partial = { api: { baseUrl: $('#baseUrl').value.trim(), model: $('#model').value.trim(), reasoningModel: $('#rModel').value.trim(), timeoutMs: Number($('#timeout').value), maxRetries: Number($('#retries').value) } };
-    const r = await invoke(C.CONFIG_APPLY, { partial });
-    $('#apiMsg').innerHTML = r.ok ? '<span class="ok">已保存（需重启 AI 桥生效）</span>' : '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>';
-  };
-  $('#saveSec').onclick = async () => {
-    const data = { apiKey: $('#apiKey').value, onebotToken: $('#onebot').value, imageApiKey: $('#imgKey').value };
-    const r = await invoke(C.SECRET_WRITE, { data });
-    $('#secMsg').innerHTML = r.ok ? '<span class="ok">密钥已保存（仅本机，已收紧权限）</span>' : '<span class="err">' + esc(r.error) + '</span>';
+
+  const listEl = $('#pList');
+  if (!providers.length) {
+    listEl.innerHTML = '<div class="hint">暂无 Provider。可用上方表单新增，或在「机器人运行」选好目录后由现有配置自动迁移。</div>';
+  } else {
+    listEl.innerHTML = '<table><thead><tr><th>名称</th><th>模型</th><th>Base URL</th><th>密钥</th><th>默认</th><th>当前</th><th>操作</th></tr></thead><tbody>' +
+      providers.map((p) => `<tr>
+        <td>${esc(p.name)}</td>
+        <td class="muted">${esc(p.model)}</td>
+        <td class="muted">${esc(shortUrl(p.baseUrl))}</td>
+        <td>${p.hasKey ? '<span class="ok">有</span>' : '<span class="err">无</span>'}</td>
+        <td>${p.id === def ? '★' : ''}</td>
+        <td>${p.id === appliedId ? '<span class="ok">已应用</span>' : ''}</td>
+        <td class="row" style="gap:4px">
+          <button class="btn sec sm" data-act="edit" data-id="${p.id}">编辑</button>
+          <button class="btn sec sm" data-act="test" data-id="${p.id}">测试</button>
+          <button class="btn sec sm" data-act="apply" data-id="${p.id}">应用</button>
+          <button class="btn sec sm" data-act="default" data-id="${p.id}">默认</button>
+          <button class="btn danger sm" data-act="del" data-id="${p.id}">删</button>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  }
+
+  function fillForm(p) {
+    if (!p) return;
+    editPid = p.id;
+    $('#pFormTitle').textContent = '编辑 Provider：' + p.name;
+    $('#pName').value = p.name; $('#pBase').value = p.baseUrl; $('#pModel').value = p.model;
+    $('#pRModel').value = p.reasoningModel || ''; $('#pTimeout').value = p.timeoutMs || 30000; $('#pRetry').value = p.maxRetries != null ? p.maxRetries : 2;
+    $('#pKey').value = '';
+    $('#pCancel').style.display = '';
+    $('#pMsg').innerHTML = '<span class="hint">密钥留空则保留原值。</span>';
+  }
+  listEl.querySelectorAll('button[data-act]').forEach((b) => b.onclick = async () => {
+    const act = b.dataset.act, id = b.dataset.id;
+    if (act === 'edit') fillForm(providers.find((x) => x.id === id));
+    else if (act === 'del') { if (!confirm('删除该 Provider？其密钥一并删除。')) return; const r = await invoke(C.PROVIDER_DELETE, { id }); $('#pMsg').innerHTML = r.ok ? '<span class="ok">已删除</span>' : '<span class="err">' + esc(r.error) + '</span>'; pageApi(); }
+    else if (act === 'default') { const r = await invoke(C.PROVIDER_SET_DEFAULT, { id }); $('#pMsg').innerHTML = r.ok ? '<span class="ok">已设为默认</span>' : '<span class="err">' + esc(r.error) + '</span>'; pageApi(); }
+    else if (act === 'apply') { if (!confirm('应用该 Provider 到 AI 桥配置？将覆盖 ai_config.json 的 api 段与 secrets.json 的 apiKey，需重启 AI 桥后生效。')) return; const r = await invoke(C.PROVIDER_APPLY, { id }); $('#pMsg').innerHTML = r.ok ? '<span class="ok">' + esc(r.note) + '</span>' : '<span class="err">' + esc(r.error) + '</span>'; pageApi(); }
+    else if (act === 'test') await testProvider(id);
+  });
+  $('#pCancel').onclick = () => { editPid = null; pageApi(); };
+  $('#pSave').onclick = async () => {
+    const provider = {
+      name: $('#pName').value.trim(), baseUrl: $('#pBase').value.trim(), model: $('#pModel').value.trim(),
+      reasoningModel: $('#pRModel').value.trim(), timeoutMs: Number($('#pTimeout').value), maxRetries: Number($('#pRetry').value),
+    };
+    const key = $('#pKey').value;
+    if (key) provider.key = key;
+    if (editPid) provider.id = editPid;
+    const r = await invoke(C.PROVIDER_SAVE, { provider });
+    $('#pMsg').innerHTML = r.ok ? '<span class="ok">已保存' + (r.complete ? '' : '（配置不完整：请补全 baseUrl/model/密钥）') + '</span>' : '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>';
+    if (r.ok) { editPid = null; pageApi(); }
   };
 }
 
-/* ---------- 用量明细 ---------- */
+async function testProvider(id) {
+  if (!confirm('测试会向该 Provider 真实发送一条最小 chat completion（max_tokens=1），可能产生极少量费用。继续？')) return;
+  $('#pMsg').innerHTML = '<span class="hint">测试中…</span>';
+  const r = await invoke(C.PROVIDER_TEST, { id });
+  if (!r.ok) { $('#pMsg').innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
+  const res = r.result || {};
+  let msg = '可达=' + (res.reachable ? '是' : '否') + ' ｜ 协议可用=' + (res.protocolOk ? '是' : '否');
+  if (res.modelList && res.modelList.length) msg += ' ｜ 模型数=' + res.modelList.length;
+  if (res.error) msg += ' ｜ 错误：' + esc(res.error);
+  $('#pMsg').innerHTML = (res.protocolOk ? '<span class="ok">' : '<span class="err">') + esc(msg) + '</span>' + (res.protocolOk ? '' : '<br>该接口未返回 OpenAI 兼容结构（choices[0].message.content），不能标记为可用。');
+}
+
+/* ---------- 用量明细（筛选 / 状态 / 耗时 / CSV / 价格 / 空与未知状态） ---------- */
+const rangeLabel = (r) => ({ today: '今日', yesterday: '昨日', '7d': '近7天', month: '本月', all: '全部' }[r] || r);
 async function pageUsage() {
   content.innerHTML = '<h2>用量明细</h2><div class="row" id="urange">' +
-    ['today', 'yesterday', '7d', 'month', 'all'].map((r) => `<button class="btn sec" data-r="${r}">${r === 'today' ? '今日' : r === 'yesterday' ? '昨日' : r === '7d' ? '近7天' : r === 'month' ? '本月' : '全部'}</button>`).join('') +
+    ['today', 'yesterday', '7d', 'month', 'all'].map((r) => `<button class="btn sec" data-r="${r}">${rangeLabel(r)}</button>`).join('') +
     '</div><div id="us"></div>';
   const load = async (range) => {
     const box = $('#us'); box.innerHTML = '<div class="hint">加载中…</div>';
-    const r = await invoke(C.USAGE_GET, { range });
-    const u = r.usage || {};
-    const cost = u.cost || {};
-    const reqs = u.recentRequests || [];
-    box.innerHTML = `
-      <div class="grid">
-        <div class="card"><div class="k">总 Token</div><div class="v">${fmt(u.totalTokens)}</div></div>
-        <div class="card"><div class="k">输入 / 输出</div><div class="v" style="font-size:15px">${fmt(u.promptTokens)} / ${fmt(u.completionTokens)}</div></div>
-        <div class="card"><div class="k">推理 Token</div><div class="v">${fmt(u.reasoningTokens)}</div></div>
-        <div class="card"><div class="k">缓存命中</div><div class="v">${fmt(u.cacheHitTokens)}</div></div>
-        <div class="card"><div class="k">估算费用</div><div class="v" style="font-size:15px">${cost.priced ? '¥' + (cost.totalCost ?? 0) + (cost.priceVersion ? ' <small>' + esc(cost.priceVersion) + '</small>' : '') : '未计价'}</div></div>
-        <div class="card"><div class="k">数据源</div><div class="v" style="font-size:14px">${esc(u.source || '—')}</div></div>
-      </div>
-      <div class="section"><h3>最近请求明细（最多 50）</h3>
-        <table><thead><tr><th>时间</th><th>类型</th><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">缓存命中</th><th class="num">合计</th><th class="num">费用</th></tr></thead>
-        <tbody>${reqs.length ? reqs.map((x) => `<tr><td class="muted">${esc((x.time || '').replace('T', ' ').slice(5, 16))}</td><td><span class="pill">${esc(x.kind)}</span></td><td class="muted">${esc(x.model)}</td><td class="num">${fmt(x.prompt_tokens)}</td><td class="num">${fmt(x.completion_tokens)}</td><td class="num">${fmt(x.reasoning_tokens)}</td><td class="num">${fmt(x.cache_hit_tokens)}</td><td class="num"><b>${fmt(x.total_tokens)}</b></td><td class="num">${x._cost && x._cost.priced ? '¥' + x._cost.cost : '—'}</td></tr>`).join('') : '<tr><td colspan="9" class="muted">该范围暂无数据</td></tr>'}</tbody></table>
-        <div class="hint">${u.source === 'files' ? '数据来自 memory/usage/*.jsonl（不含聊天内容与 Key）。' : '数据来自运行中的机器人 /api/usage。'}${cost.priced ? '' : ' 未配置价格表 → 费用显示「未计价」。'}</div>
-      </div>`;
+    const [ru, rp] = await Promise.all([invoke(C.USAGE_GET, { range }), invoke(C.PRICE_GET)]);
+    usageCurrent = ru.usage || {};
+    usagePrice = rp.price || null;
+    renderUsage(usageCurrent, usagePrice);
   };
   document.querySelectorAll('#urange button').forEach((b) => b.onclick = () => load(b.dataset.r));
-  load('today');
+  await load('today');
+}
+
+function renderUsage(u, price) {
+  const box = $('#us');
+  if (!box) return;
+  const reqs = u.recentRequests || [];
+  const cost = u.cost || {};
+  const providers = [...new Set(reqs.map((x) => x.provider || 'unknown'))];
+  const models = [...new Set(reqs.map((x) => x.model || 'unknown'))];
+  const filtered = reqs.filter((x) =>
+    (!usageFilter.provider || (x.provider || 'unknown') === usageFilter.provider) &&
+    (!usageFilter.model || (x.model || 'unknown') === usageFilter.model) &&
+    (!usageFilter.status || (x.status || 'success') === usageFilter.status));
+  const empty = reqs.length === 0;
+  const costLabel = cost.priced ? ('¥' + fmt(cost.totalCost) + (cost.priceVersion ? ' <small>' + esc(cost.priceVersion) + '</small>' : ''))
+    : (cost.reason === 'unknown_model' ? '未定价' : '未计价');
+
+  box.innerHTML = `
+    <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+      <label>Provider</label><select id="fProv"><option value="">全部</option>${providers.map((p) => `<option value="${esc(p)}" ${usageFilter.provider === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      <label>模型</label><select id="fModel"><option value="">全部</option>${models.map((m) => `<option value="${esc(m)}" ${usageFilter.model === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
+      <label>状态</label><select id="fStatus"><option value="">全部</option><option value="success" ${usageFilter.status === 'success' ? 'selected' : ''}>成功</option><option value="error" ${usageFilter.status === 'error' ? 'selected' : ''}>失败</option></select>
+      <button class="btn sec" id="csvBtn">导出 CSV</button>
+      <button class="btn sec" id="fReset">重置筛选</button>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="k">总 Token</div><div class="v">${fmt(u.totalTokens)}</div></div>
+      <div class="card"><div class="k">输入 / 输出</div><div class="v" style="font-size:15px">${fmt(u.promptTokens)} / ${fmt(u.completionTokens)}</div></div>
+      <div class="card"><div class="k">推理 Token</div><div class="v">${fmt(u.reasoningTokens)}</div></div>
+      <div class="card"><div class="k">缓存命中 / 未命中</div><div class="v" style="font-size:15px">${fmt(u.cacheHitTokens)} / ${fmt(u.cacheMissTokens)}</div></div>
+      <div class="card"><div class="k">成功 / 失败</div><div class="v" style="font-size:15px"><span class="ok">${fmt(u.successRequests)}</span> / <span class="err">${fmt(u.failRequests)}</span></div></div>
+      <div class="card"><div class="k">平均耗时(ms)</div><div class="v">${u.durationMs && u.durationMs.avg != null ? fmt(u.durationMs.avg) : '—'}</div></div>
+      <div class="card"><div class="k">估算费用（非账单）</div><div class="v" style="font-size:15px">${costLabel}</div></div>
+      <div class="card"><div class="k">数据源</div><div class="v" style="font-size:14px">${esc(u.source || '—')}</div></div>
+    </div>
+    ${empty ? '<div class="hint">该范围暂无数据（空状态）。用量来自机器人真实记录，缺失不伪造补齐。</div>' : ''}
+    ${!empty && !filtered.length ? '<div class="hint">当前筛选无匹配记录。</div>' : ''}
+    <div class="section"><h3>请求明细（共 ${fmt(reqs.length)} 条，筛选后 ${fmt(filtered.length)}）</h3>
+      <div class="scroll">
+      <table><thead><tr><th>时间</th><th>状态</th><th>类型</th><th>Provider</th><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">缓存命中</th><th class="num">合计</th><th class="num">耗时</th><th>错误类别</th><th class="num">费用</th></tr></thead>
+      <tbody>${filtered.length ? filtered.map(rowHtml).join('') : '<tr><td colspan="13" class="muted">无匹配记录</td></tr>'}</tbody></table>
+      </div>
+      <div class="hint">${u.source === 'files' ? '数据来自 memory/usage/*.jsonl（不含聊天内容与 Key）。' : '数据来自运行中的机器人 /api/usage。'}${cost.priced ? '' : ' 未配置价格表 → 费用显示「未计价/未定价」。'} 估算值非服务商实际账单；无账单接口时绝不声称显示实际账单。</div>
+    </div>
+    ${priceEditorHtml(price)}`;
+
+  $('#fProv').onchange = (e) => { usageFilter.provider = e.target.value; renderUsage(u, price); };
+  $('#fModel').onchange = (e) => { usageFilter.model = e.target.value; renderUsage(u, price); };
+  $('#fStatus').onchange = (e) => { usageFilter.status = e.target.value; renderUsage(u, price); };
+  $('#fReset').onclick = () => { usageFilter = { provider: '', model: '', status: '' }; renderUsage(u, price); };
+  $('#csvBtn').onclick = () => downloadCSV(filtered);
+  wirePriceEditor();
+}
+
+function rowHtml(x) {
+  const st = x.status || 'success';
+  const unk = (v) => (v == null ? '—' : fmt(v));
+  return `<tr>
+    <td class="muted">${esc((x.time || '').replace('T', ' ').slice(5, 16))}</td>
+    <td><span class="pill ${st === 'error' ? 'err' : 'ok'}">${st === 'error' ? '失败' : '成功'}</span></td>
+    <td><span class="pill">${esc(x.kind)}</span></td>
+    <td class="muted">${esc(x.provider || 'unknown')}</td>
+    <td class="muted">${esc(x.model)}</td>
+    <td class="num">${unk(x.prompt_tokens)}</td>
+    <td class="num">${unk(x.completion_tokens)}</td>
+    <td class="num">${unk(x.reasoning_tokens)}</td>
+    <td class="num">${unk(x.cache_hit_tokens)}</td>
+    <td class="num"><b>${unk(x.total_tokens)}</b></td>
+    <td class="num">${x.durationMs != null ? fmt(x.durationMs) : '—'}</td>
+    <td class="muted">${esc(x.errorCategory || '')}</td>
+    <td class="num">${x._cost && x._cost.priced ? '¥' + x._cost.cost : '—'}</td>
+  </tr>`;
+}
+
+/* ---------- 价格表编辑器 ---------- */
+function priceEditorHtml(price) {
+  price = price || {};
+  const models = price.models || {};
+  const keys = Object.keys(models);
+  return `<div class="section"><h3>费用估算价格表（估算值，非服务商实际账单）</h3>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <label>版本</label><input id="prVer" value="${esc(price.version || '')}" placeholder="如 2026-10-01" style="width:120px" />
+      <label>币种</label><select id="prCur"><option value="CNY" ${price.currency !== 'USD' ? 'selected' : ''}>CNY</option><option value="USD" ${price.currency === 'USD' ? 'selected' : ''}>USD</option></select>
+      <label>计价单位</label><select id="prUnit"><option value="M" ${(price.unit || 'M') === 'M' ? 'selected' : ''}>每百万</option><option value="K" ${price.unit === 'K' ? 'selected' : ''}>每千</option><option value="1" ${price.unit === '1' ? 'selected' : ''}>每个</option><option value="B" ${price.unit === 'B' ? 'selected' : ''}>每十亿</option></select>
+    </div>
+    <table id="prTbl"><thead><tr><th>模型</th><th>输入单价</th><th>输出单价</th><th>缓存命中单价</th><th></th></tr></thead><tbody>
+      ${keys.length ? keys.map((m) => prRow(m, models[m])).join('') : '<tr><td colspan="5" class="muted">暂无模型价格（点「加载示例」或「添加模型」）</td></tr>'}
+    </tbody></table>
+    <div class="row"><button class="btn sec" id="prAdd">添加模型</button><button class="btn sec" id="prExample">加载示例</button><button class="btn" id="prSave">保存价格表</button></div>
+    <div class="hint" id="prMsg"></div>
+    <div class="hint">单价按所选计价单位与币种。模型未知或缺失价格 → 显示「未定价」，不显示为免费。缓存命中按 cacheHit 单价（通常低于输入）。历史价格变化：在模型下追加 history（effectiveFrom + input/output），估算时按记录时间套用对应版本。</div>
+  </div>`;
+}
+function prRow(m, p) {
+  return `<tr data-m="${esc(m)}"><td>${esc(m)}</td>
+   <td><input class="prin" value="${p.input != null ? p.input : ''}" style="width:90px" /></td>
+   <td><input class="prout" value="${p.output != null ? p.output : ''}" style="width:90px" /></td>
+   <td><input class="prch" value="${p.cacheHit != null ? p.cacheHit : ''}" style="width:90px" /></td>
+   <td><button class="btn danger sm prdel">删</button></td></tr>`;
+}
+function wirePriceEditor() {
+  const tbl = () => $('#prTbl').querySelector('tbody');
+  $('#prAdd').onclick = () => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input class="prm" placeholder="模型名" style="width:150px" /></td><td><input class="prin" style="width:90px" /></td><td><input class="prout" style="width:90px" /></td><td><input class="prch" style="width:90px" /></td><td><button class="btn danger sm prdel">删</button></td>`;
+    tbl().appendChild(tr);
+    tr.querySelector('.prdel').onclick = () => tr.remove();
+  };
+  $('#prExample').onclick = () => {
+    const ex = { version: new Date().toISOString().slice(0, 10), currency: 'CNY', unit: 'M', models: { 'deepseek-chat': { input: 1.0, output: 2.0, cacheHit: 0.1 }, 'deepseek-reasoner': { input: 4.0, output: 16.0, cacheHit: 1.0 } } };
+    const body = tbl(); body.innerHTML = Object.keys(ex.models).map((m) => prRow(m, ex.models[m])).join('');
+    body.querySelectorAll('.prdel').forEach((b) => b.onclick = () => b.closest('tr').remove());
+    $('#prVer').value = ex.version; $('#prCur').value = ex.currency; $('#prUnit').value = ex.unit;
+  };
+  document.querySelectorAll('.prdel').forEach((b) => b.onclick = () => b.closest('tr').remove());
+  $('#prSave').onclick = async () => {
+    const rows = [...document.querySelectorAll('#prTbl tbody tr')];
+    const models = {};
+    for (const tr of rows) {
+      const m = (tr.dataset.m && tr.dataset.m !== 'undefined') ? tr.dataset.m : (tr.querySelector('.prm') ? tr.querySelector('.prm').value.trim() : '');
+      if (!m) continue;
+      const input = parseFloat(tr.querySelector('.prin').value);
+      const output = parseFloat(tr.querySelector('.prout').value);
+      const chv = tr.querySelector('.prch').value;
+      if (isNaN(input) || isNaN(output)) { $('#prMsg').innerHTML = '<span class="err">' + esc(m) + ' 的单价必须是数字</span>'; return; }
+      const o = { input, output };
+      if (chv !== '' && !isNaN(parseFloat(chv))) o.cacheHit = parseFloat(chv);
+      models[m] = o;
+    }
+    const table = { version: $('#prVer').value.trim(), currency: $('#prCur').value, unit: $('#prUnit').value, models };
+    const r = await invoke(C.PRICE_SET, { table });
+    $('#prMsg').innerHTML = r.ok ? '<span class="ok">价格表已保存</span>' : '<span class="err">' + esc(r.error) + '</span>';
+  };
 }
 
 /* ---------- 人格设置 ---------- */

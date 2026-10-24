@@ -31,3 +31,20 @@ test('validate import apply requires object', () => {
   assert.strictEqual(validate(CHANNELS.IMPORT_APPLY, { incoming: { schemaVersion: 1 } }).ok, true);
   assert.strictEqual(validate(CHANNELS.IMPORT_APPLY, { incoming: 'x' }).ok, false);
 });
+test('validate provider list/delete/setDefault/apply require id string', () => {
+  for (const ch of [CHANNELS.PROVIDER_LIST, CHANNELS.PROVIDER_DELETE, CHANNELS.PROVIDER_SET_DEFAULT, CHANNELS.PROVIDER_APPLY]) {
+    assert.strictEqual(validate(ch, { id: 'p1' }).ok, true);
+    assert.strictEqual(validate(ch, {}).ok, false);
+    assert.strictEqual(validate(ch, { id: 5 }).ok, false);
+  }
+});
+test('validate provider save requires provider object', () => {
+  assert.strictEqual(validate(CHANNELS.PROVIDER_SAVE, { provider: { name: 'x', baseUrl: 'https://a/v1/chat/completions', model: 'm' } }).ok, true);
+  assert.strictEqual(validate(CHANNELS.PROVIDER_SAVE, { id: 'p1' }).ok, false);
+  assert.strictEqual(validate(CHANNELS.PROVIDER_SAVE, {}).ok, false);
+});
+test('validate provider test requires id or provider', () => {
+  assert.strictEqual(validate(CHANNELS.PROVIDER_TEST, { id: 'p1' }).ok, true);
+  assert.strictEqual(validate(CHANNELS.PROVIDER_TEST, { provider: { baseUrl: 'https://a', model: 'm' } }).ok, true);
+  assert.strictEqual(validate(CHANNELS.PROVIDER_TEST, {}).ok, false);
+});
