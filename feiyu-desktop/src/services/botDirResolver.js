@@ -19,14 +19,53 @@
  * 约束：
  *  - 绝不硬编码盘符或开发机路径。
  *  - 不自动创建、覆盖或清理任何候选目录（只读探测）。
+ *
+ * 平台说明（重要）：
+ *  本模块描述的是 Windows 部署形态（exe 路径、盘符、用户主目录），
+ *  但**路径拼接必须跟随调用方给定的路径风格**：
+ *  候选路径一律用「目录 + 分隔符 + 文件名」拼出，而不是用平台 `path.join`。
+ *  原因：`path.join` 在 POSIX 下会产出 '/tmp/x/ai_bridge.js'，
+ *  与调用方给的 Windows 路径混用时会得到不一致的判定；
+ *  而本模块接收的路径来自 Electron（Windows）与测试夹具（可能是 POSIX），
+ *  必须对两者都成立。
+ *  目录自身的解析（dirname / 根目录判定）用 `path.win32`，
+ *  因为它描述的就是 Windows 布局（`C:\a\b.exe` → `C:\a`）。
  */
 const fs = require('fs');
-const path = require('path');
+const winPath = require('path').win32;
+
+/**
+ * 在给定目录后拼一个文件名，**跟随该目录自身使用的分隔符**。
+ * 目录已是绝对路径，无需再做规范化。
+ */
+function joinName(dir, name) {
+  const s = String(dir);
+  if (!s) return name;
+  // 先消解父目录里的 '.' / '..'，避免 existsSync 拿到未规范化的路径
+  const base = normalizePath(s);
+  const sep = base.includes('\\') ? '\\' : '/';
+  const last = base[base.length - 1];
+  if (last === '\\' || last === '/') return base + name;
+  return base + sep + name;
+}
+
+/**
+ * 规范化一个「本模块产出的」路径：保留其分隔符风格，
+ * 但把 '.' / '..' 消解掉（Windows 布局用 winPath 规范化）。
+ */
+function normalizePath(p) {
+  const s = String(p || '');
+  if (!s) return s;
+  try {
+    if (s.includes('\\') || /^[A-Za-z]:/.test(s)) return winPath.normalize(s);
+    return winPath.normalize(s).replace(/\\/g, '/');
+  } catch (_) { return s; }
+}
 
 /** 目录是否是机器人项目根（含 ai_bridge.js）。 */
 function isBotDir(p, fsImpl) {
   const f = fsImpl || fs;
-  try { return !!p && f.existsSync(path.join(p, 'ai_bridge.js')); } catch (_) { return false; }
+  try { return !!p && f.existsSync(joinName(p, 'ai_bridge.js')); } catch (_) { return false; }
 }
 
 /**
@@ -42,8 +81,8 @@ function isSourceCheckout(p, fsImpl) {
   const f = fsImpl || fs;
   if (!p) return false;
   try {
-    if (f.existsSync(path.join(p, '.git'))) return true;
-    if (f.existsSync(path.join(p, 'feiyu-desktop'))) return true;
+    if (f.existsSync(joinName(p, '.git'))) return true;
+    if (f.existsSync(joinName(p, 'feiyu-desktop'))) return true;
   } catch (_) {}
   return false;
 }
@@ -57,17 +96,17 @@ function candidateDirs(o) {
   const list = [];
   if (o.botDir) list.push(o.botDir);                    // 1) 用户设置
   if (o.appPath) {                                     // 2)(3) 打包内 / 开发期
-    list.push(path.join(o.appPath, 'bot'));
+    list.push(joinName(o.appPath, 'bot'));
     list.push(o.appPath);
-    list.push(path.join(o.appPath, '..'));
+    list.push(joinName(o.appPath, '..'));
   }
   if (o.execPath) {                                    // 4) exe 相对（便携/安装）
-    const exeDir = path.dirname(o.execPath);
-    list.push(path.join(exeDir, 'bot'));
-    list.push(path.join(exeDir, '..', 'bot'));
+    const exeDir = winPath.dirname(o.execPath);
+    list.push(joinName(exeDir, 'bot'));
+    list.push(joinName(joinName(exeDir, '..'), 'bot'));
   }
   if (o.home) {                                        // 5) 用户主目录
-    list.push(path.join(o.home, 'bot'));
+    list.push(joinName(o.home, 'bot'));
   }
   // 去重（按解析后的绝对路径），保持优先级顺序
   const seen = new Set();
@@ -75,12 +114,45 @@ function candidateDirs(o) {
   for (const c of list) {
     if (!c) continue;
     let k;
-    try { k = path.resolve(c); } catch (_) { continue; }
+    try { k = winPath.resolve(c); } catch (_) { continue; }
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(c);
   }
   return out;
+}
+
+/**
+ * 系统/临时目录名：这类目录下的东西**不是**用户的工作目录，
+ * 兄弟扫描必须跳过，否则会把临时文件夹误判成机器人工作目录。
+ *
+ * 典型事故：`%TEMP%\botdir-xxxx\`（测试或安装器留下的临时目录）
+ * 里若恰好有 ai_bridge.js，就会被当成「工作目录」而锁定。
+ *
+ * 注意：**不包含 'users'** —— 工作目录常放在 `C:\Users\<用户名>\...` 下，
+ * 把 Users 当系统目录会把正常的工作目录一起排除掉。
+ */
+const SYSTEM_DIR_NAMES = new Set([
+  'temp', 'tmp', 'appdata', 'local', 'roaming', 'local low',
+  'programdata', 'program files', 'program files (x86)',
+  'windows', 'system32', 'syswow64', 'public', 'default',
+  'all users', 'application data', 'downloads', 'cookies', 'history',
+]);
+
+/**
+ * 目录是否属于「系统/临时区域」，其下内容不应作为工作目录候选。
+ *
+ * 判定方式：**路径的任一段**命中系统目录名即算。
+ * 只看目录名、不看完整路径，因此不硬编码盘符或用户名。
+ */
+function isSystemArea(dir) {
+  const s = String(dir || '').toLowerCase();
+  if (!s) return true;
+  const parts = s.split(/[\\/]+/).filter(Boolean);
+  for (const p of parts) {
+    if (SYSTEM_DIR_NAMES.has(p)) return true;
+  }
+  return false;
 }
 
 /**
@@ -92,31 +164,36 @@ function candidateDirs(o) {
  *   D:\NapCat\ai_bridge.js                          ← 工作目录（同盘根，兄弟）
  *   D:\Tools\feiyu\app.exe  →  D:\Tools\NapCat\      ← 同级
  *
- * 只读探测，绝不创建/修改任何目录。
+ * 安全约束：
+ *  - 只读探测，绝不创建/修改任何目录。
+ *  - 跳过系统/临时区域（%TEMP%、%APPDATA%、Program Files 等），
+ *    避免把临时文件夹误判成用户的工作目录。
  */
 function siblingCandidates(execPath, fsImpl, maxDepth = 3) {
   const f = fsImpl || fs;
   if (!execPath) return [];
   let dir;
-  try { dir = path.dirname(path.resolve(execPath)); } catch (_) { return []; }
+  try { dir = winPath.dirname(winPath.resolve(execPath)); } catch (_) { return []; }
   const out = [];
   const seen = new Set();
   let depth = 0;
   while (dir && depth < maxDepth) {
+    // 该层整体属于系统/临时区域 → 不再往上，也不扫这一层
+    if (isSystemArea(dir)) break;
     let entries = [];
     try { entries = f.readdirSync(dir); } catch (_) { entries = []; }
     for (const name of entries) {
       let full;
-      try { full = path.join(dir, name); } catch (_) { continue; }
+      try { full = joinName(dir, name); } catch (_) { continue; }
       let st = null;
       try { st = f.statSync(full); } catch (_) { continue; }
       if (!st || !st.isDirectory()) continue;
-      const key = path.resolve(full);
+      const key = winPath.resolve(full);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(full);
     }
-    const parent = path.dirname(dir);
+    const parent = winPath.dirname(dir);
     if (!parent || parent === dir) break;
     dir = parent;
     depth++;
@@ -188,4 +265,4 @@ function resolveBotDir(o) {
   };
 }
 
-module.exports = { isBotDir, isSourceCheckout, candidateDirs, siblingCandidates, resolveBotDir };
+module.exports = { isBotDir, isSourceCheckout, candidateDirs, siblingCandidates, resolveBotDir, joinName, normalizePath, isSystemArea, SYSTEM_DIR_NAMES };

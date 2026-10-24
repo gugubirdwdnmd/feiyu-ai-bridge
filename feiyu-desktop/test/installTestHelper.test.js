@@ -163,3 +163,24 @@ test('F-4: preflightReinstall 对可安装状态给出清晰提示', () => {
   assert.strictEqual(missing.reason, 'not_found');
   assert.ok(missing.hint.includes('可直接安装'));
 });
+
+test('平台无关: Windows 盘符根在任何平台都判为 protected_path', () => {
+  // CI 在 ubuntu 上跑：POSIX 的 path.parse('C:\\').root 是 '/'，
+  // 会漏判盘符根。这里按字面形态再判一次，与平台无关。
+  for (const root of ['C:\\', 'C:/', 'D:\\', 'c:\\', '\\\\server\\share\\']) {
+    const r = helper.inspectResidualDir(root);
+    assert.strictEqual(r.ok, false, root + ' 不得被判定为可清理');
+    assert.strictEqual(r.reason, 'protected_path', root + ' 应为 protected_path，实际: ' + r.reason);
+  }
+});
+
+test('平台无关: 受保护目录名在任何平台都判为 protected_path', () => {
+  for (const name of ['NapCat', 'NapCat_publish', 'feiyu', 'feiyu-desktop-control-center']) {
+    // 正反斜杠两种写法都要覆盖
+    for (const p of [name + '\\', name + '/']) {
+      const r = helper.inspectResidualDir(p);
+      assert.strictEqual(r.ok, false, name + ' 不应被自动清理');
+      assert.strictEqual(r.reason, 'protected_path', name + ' 实际: ' + r.reason);
+    }
+  }
+});

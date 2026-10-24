@@ -16,7 +16,14 @@ const path = require('path');
 
 const resolver = require('../src/services/botDirResolver');
 
-function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'botdir-e-')); }
+// 夹具目录必须建在**非系统区**：产品规则会跳过 %TEMP% 等系统目录下的候选
+// （那里常有安装器/测试留下的临时目录，误判成工作目录的风险真实存在）。
+// 因此改用用户主目录下的中性目录名。
+function tmpDir() {
+  const base = path.join(os.homedir(), '.feiyu-test-tmp');
+  fs.mkdirSync(base, { recursive: true });
+  return fs.mkdtempSync(path.join(base, 'botdir-'));
+}
 
 // ————————————————————————————————————————
 // 正常场景

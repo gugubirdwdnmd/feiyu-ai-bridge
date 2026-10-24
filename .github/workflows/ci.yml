@@ -37,10 +37,17 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: 桌面端单元测试
         working-directory: feiyu-desktop
-        run: node --test
+        run: node --test --test-reporter=spec
       - name: 桌面端语法检查
         working-directory: feiyu-desktop
         run: npm run check
       - name: 桌面端打包前检查
         working-directory: feiyu-desktop
         run: node build/package-check.js
+      - name: 失败时上传测试详情
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-test-output
+          path: feiyu-desktop/test-output-*.txt
+          if-no-files-found: ignore

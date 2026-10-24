@@ -15,7 +15,12 @@ const path = require('path');
 const resolver = require('../src/services/botDirResolver');
 
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'botdir-'));
+  // 夹具目录必须建在**非系统区**：产品规则会跳过 %TEMP% 等系统目录下的候选
+  // （那里常有安装器/测试留下的临时目录，误判成工作目录的风险真实存在）。
+  // 因此改用用户主目录下的中性目录名。
+  const base = path.join(os.homedir(), '.feiyu-test-tmp');
+  fs.mkdirSync(base, { recursive: true });
+  return fs.mkdtempSync(path.join(base, 'botdir-'));
 }
 
 /** 造一个「真实工作目录」：含 ai_bridge.js，无 .git / feiyu-desktop。 */
@@ -244,3 +249,86 @@ test('P1-4: isBotDir 对不存在/空值返回 false 而不抛错', () => {
   assert.strictEqual(resolver.isBotDir(''), false);
   assert.strictEqual(resolver.isBotDir('C:\\no\\such\\dir'), false);
 });
+
+// ————————————————————————————————————————
+// 平台无关性 + 系统目录排除（CI 在 ubuntu 上跑，Windows 路径语义必须一致）
+// ————————————————————————————————————————
+
+test('平台无关: Windows 路径的 dirname/候选推导与平台无关', () => {
+  // 复刻验收8a：安装版通过 exe 相对路径找到工作目录
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  const fsMock = {
+    existsSync: (p) => norm(p).endsWith('/MyBotRoot/ai_bridge.js'),
+    readdirSync: (p) => (norm(p) === 'C:/Users/me' ? ['MyBotRoot'] : []),
+    statSync: () => ({ isDirectory: () => true }),
+  };
+  const r = resolver.resolveBotDir({
+    appPath: 'C:\\Program Files\\App\\resources\\app.asar',
+    execPath: 'C:\\Users\\me\\Desktop\\肥鱼桌面控制中心.exe',
+    home: 'C:\\Users\\me',
+    fsImpl: fsMock,
+  });
+  assert.strictEqual(r.ok, true, '应定位到工作目录');
+  assert.ok(r.botDir.includes('MyBotRoot'), '实际: ' + r.botDir);
+});
+
+test('平台无关: 便携版（bot 与 exe 同级）能定位', () => {
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  const fsMock = {
+    existsSync: (p) => norm(p).endsWith('/portable/bot/ai_bridge.js'),
+  };
+  const r = resolver.resolveBotDir({
+    appPath: 'C:\\Users\\me\\Desktop\\portable\\resources\\app.asar',
+    execPath: 'C:\\Users\\me\\Desktop\\portable\\肥鱼桌面控制中心.exe',
+    home: 'C:\\Users\\me',
+    fsImpl: fsMock,
+  });
+  assert.strictEqual(r.ok, true, '应能定位便携版 bot 目录');
+  assert.ok(norm(r.botDir).endsWith('/portable/bot'), '实际: ' + r.botDir);
+});
+
+test('系统目录排除: %TEMP% 等区域内的目录不得被当作工作目录', () => {
+  // 真实事故：安装器/测试在 %TEMP% 留下的临时目录若含 ai_bridge.js，
+  // 会被兄弟扫描误判成「工作目录」而长期锁定。
+  const systemAreas = [
+    'C:\\Users\\me\\AppData\\Local\\Temp',
+    'C:\\Users\\me\\AppData\\Local\\Temp\\botdir-xxx',
+    'C:\\Users\\me\\AppData\\Roaming',
+    'C:\\Program Files\\App',
+    '/tmp',
+    '/var/tmp',
+  ];
+  for (const area of systemAreas) {
+    assert.strictEqual(resolver.isSystemArea(area), true, area + ' 应判为系统区');
+  }
+  // 用户主目录下的正常工作目录**不能**被排除
+  const normalAreas = [
+    'C:\\Users\\me',
+    'C:\\Users\\me\\Documents',
+    'D:\\NapCat',
+    'D:\\feiyu\\app',
+  ];
+  for (const area of normalAreas) {
+    assert.strictEqual(resolver.isSystemArea(area), false, area + ' 不应判为系统区');
+  }
+});
+
+test('系统目录排除: 兄弟扫描遇到系统区即停止，不把临时目录当候选', () => {
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  // exe 位于 %TEMP%\botdir-xxx\app\ 下：其兄弟里有一个含 ai_bridge.js 的临时目录
+  const fake = {
+    existsSync: (p) => norm(p).endsWith('/botdir-yyy/ai_bridge.js'),
+    readdirSync: (p) => (norm(p).endsWith('/Temp') ? ['botdir-yyy'] : []),
+    statSync: () => ({ isDirectory: () => true }),
+  };
+  const r = resolver.siblingCandidates('C:\\Users\\me\\AppData\\Local\\Temp\\botdir-xxx\\app\\app.exe', fake);
+  assert.deepStrictEqual(r, [], '系统区内的目录不得出现在候选里');
+});
+
+test('joinName: 跟随给定目录的分隔符风格，不被运行平台改写', () => {
+  assert.strictEqual(resolver.joinName('C:\\a\\b', 'x'), 'C:\\a\\b\\x');
+  assert.strictEqual(resolver.joinName('C:\\a\\b\\', 'x'), 'C:\\a\\b\\x');
+  assert.strictEqual(resolver.joinName('/tmp/a', 'x'), '/tmp/a/x');
+  assert.strictEqual(resolver.joinName('/tmp/a/', 'x'), '/tmp/a/x');
+});
+

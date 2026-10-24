@@ -13,6 +13,12 @@
  *  - **绝不递归删除**含任何文件的目录（避免误删用户数据）。
  *  - **绝不**对机器人工作目录、发布副本做任何清理。
  *  - 目录不可读（权限不足）→ fail-closed，不做任何删除。
+ *
+ * 平台说明：本模块**会真实操作文件系统**（readdirSync / rmdirSync），
+ * 因此路径解析使用**运行平台的** `path`（在 Windows 上即 Windows 语义）。
+ * 「盘符根 / 目录根」的判定不依赖平台特有关键字：
+ * 用 `path.parse(resolved).root` 取得该平台的根，再与解析结果比对，
+ * 因此在 Windows（`C:\`）与 POSIX（`/`）下都能正确拒绝根目录。
  */
 const fs = require('fs');
 const path = require('path');
@@ -42,6 +48,13 @@ function inspectResidualDir(dir, opts = {}) {
   const parsed = path.parse(resolved);
   if (resolved === parsed.root || resolved === path.dirname(resolved)) {
     return { ok: false, reason: 'protected_path', detail: '拒绝处理文件系统根目录: ' + resolved, entries: [] };
+  }
+  // Windows 盘符根（如 C:\、D:/）与 UNC 根（如 \\server\share）：
+  // 在 Windows 上已被上面的 root 判定覆盖，但 POSIX 平台的 path.parse('C:\\').root
+  // 是 '/' 而非 'C:\'，会漏判。这里按**字面形态**再判一次，与平台无关。
+  const raw = String(dir).trim();
+  if (/^[A-Za-z]:[\\/]*$/.test(raw) || /^\\\\[^\\/]+[\\/][^\\/]+[\\/]*$/.test(raw)) {
+    return { ok: false, reason: 'protected_path', detail: '拒绝处理文件系统根目录: ' + raw, entries: [] };
   }
   const base = (parsed.base || '').toLowerCase();
   if (PROTECTED_NAMES.has(base)) {
