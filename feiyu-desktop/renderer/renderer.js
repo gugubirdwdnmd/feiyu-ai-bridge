@@ -74,7 +74,7 @@ async function refreshBotDirLabel() {
 
 function render(page) {
   refreshBotDirLabel();
-  const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, logs: pageLogs, importexport: pageImportExport, about: pageAbout };
+  const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, logs: pageLogs, importexport: pageImportExport, about: pageAbout };
   (map[page] || pageOverview)();
 }
 
@@ -577,6 +577,289 @@ async function pagePersonality() {
       return;
     }
   });
+}
+
+/* ---------- 技能扩展 ---------- */
+let skillEditId = null;
+async function pageSkills() {
+  content.innerHTML = '<h2>技能扩展</h2><div id="sk"></div>';
+  const box = $('#sk');
+  box.innerHTML = '<div class="hint">加载中…</div>';
+
+  const load = async () => {
+    const r = await invoke(C.SKILL_LIST);
+    if (!r || !r.ok) { box.innerHTML = '<div class="hint err">' + esc((r && r.error) || '未配置机器人目录') + '</div>'; return; }
+    const skills = r.skills || [];
+    const rows = skills.map((s) => `
+      <tr>
+        <td><b>${esc(s.name)}</b><div class="hint">${esc(s.description || '')}</div></td>
+        <td>${esc((s.trigger && s.trigger.mode) === 'keyword' ? '关键词：' + (s.trigger.keywords || []).join('、') : '始终生效')}</td>
+        <td>${(s.tools || []).length} 个工具</td>
+        <td>${s.valid ? (s.enabled ? '<span class="pill ok">已启用</span>' : '<span class="pill">已停用</span>') : '<span class="pill err">无效</span>'}</td>
+        <td class="row">
+          <button class="btn sm" data-act="edit" data-id="${esc(s.id)}">编辑</button>
+          <button class="btn sm" data-act="copy" data-id="${esc(s.id)}">复制</button>
+          <button class="btn sm" data-act="toggle" data-id="${esc(s.id)}" data-en="${s.enabled ? '0' : '1'}">${s.enabled ? '停用' : '启用'}</button>
+          <button class="btn sm" data-act="del" data-id="${esc(s.id)}">删除</button>
+        </td>
+      </tr>`).join('');
+    const invalid = skills.filter((s) => !s.valid);
+    box.innerHTML = `
+      <div class="section">
+        <div class="hint">技能 = 一段注入系统提示词的行为说明 + 可选挂载的工具。保存后机器人<b>下一轮对话立即生效</b>，无需重启 AI 桥。</div>
+        <div class="hint">技能文件：<code>${esc(r.path || '')}</code> ｜ 已启用 ${r.enabledCount} 个${r.invalidCount ? ' ｜ <span class="err">' + r.invalidCount + ' 个无效</span>' : ''}</div>
+      </div>
+      ${invalid.length ? '<div class="section"><h3>无效技能</h3>' + invalid.map((s) => '<div class="hint err">' + esc(s.name) + '：' + esc((s.errors || []).join('；')) + '</div>').join('') + '</div>' : ''}
+      <div class="section">
+        <h3>内置模板</h3>
+        <div class="row" id="tplRow"></div>
+        <div class="hint">导入后可自由修改；同名技能不会重复导入。</div>
+      </div>
+      <div class="section">
+        <h3>已安装技能</h3>
+        <table class="tbl"><thead><tr><th>名称</th><th>触发</th><th>工具</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="hint">还没有技能，点上面「内置模板」导入一个，或用下方表单新建。</td></tr>'}</tbody></table>
+      </div>
+      <div class="section">
+        <h3>${skillEditId ? '编辑技能' : '新建技能'}</h3>
+        <div id="skForm"></div>
+        <div class="hint" id="skMsg"></div>
+      </div>`;
+
+    // 内置模板
+    const t = await invoke(C.SKILL_TEMPLATES);
+    const tpls = (t && t.templates) || [];
+    $('#tplRow').innerHTML = tpls.map((x) => `<button class="btn sec" data-tpl="${esc(x.key)}">导入「${esc(x.name)}」</button>`).join('')
+      + '<button class="btn sec" id="skExport">导出全部技能</button>';
+
+    // 表单
+    const cur = skillEditId ? skills.find((s) => s.id === skillEditId) : null;
+    const handlers = (r.allowedHandlers || []);
+    $('#skForm').innerHTML = `
+      <label>名称</label><input id="skName" value="${esc(cur ? cur.name : '')}" placeholder="例：画图小助手" />
+      <label>说明</label><input id="skDesc" value="${esc(cur ? cur.description : '')}" placeholder="一句话说明这个技能做什么" />
+      <label>触发方式</label>
+      <select id="skMode">
+        <option value="always"${cur && cur.trigger && cur.trigger.mode !== 'keyword' ? ' selected' : ''}>始终生效</option>
+        <option value="keyword"${cur && cur.trigger && cur.trigger.mode === 'keyword' ? ' selected' : ''}>命中关键词时生效</option>
+      </select>
+      <label>关键词（逗号分隔，仅关键词模式需要）</label>
+      <input id="skKw" value="${esc(cur && cur.trigger ? (cur.trigger.keywords || []).join(',') : '')}" placeholder="例：画,画图,生图" />
+      <label>提示词（注入系统提示词）</label>
+      <textarea id="skPrompt" placeholder="告诉模型这个技能开启后应该怎么表现">${esc(cur ? cur.prompt : '')}</textarea>
+      <label>挂载工具（可选；只能选已有内置工具，技能不能执行自定义代码）</label>
+      <div class="hint" id="skToolWrap"></div>
+      <div class="row">
+        <button class="btn" id="skSave">${cur ? '保存修改' : '创建技能'}</button>
+        ${cur ? '<button class="btn sec" id="skCancel">取消编辑</button>' : ''}
+      </div>`;
+
+    const toolDefs = cur && cur.tools && cur.tools.length ? cur.tools : [];
+    const toolRow = (tdef, i) => `
+      <div class="row">
+        <input class="tool-name" placeholder="工具名（给模型看）" value="${esc(tdef.name || '')}" data-i="${i}" />
+        <select class="tool-handler" data-i="${i}">
+          ${handlers.map((h) => `<option value="${esc(h)}"${tdef.handler === h ? ' selected' : ''}>${esc(h)}</option>`).join('')}
+        </select>
+        <input class="tool-desc" placeholder="工具说明" value="${esc(tdef.description || '')}" data-i="${i}" />
+        <button class="btn sm" data-rmtool="${i}">移除</button>
+      </div>`;
+    const toolHtml = (toolDefs.length ? toolDefs : [{ name: '', handler: handlers[0] || 'generate_image', description: '' }]).map(toolRow).join('');
+    $('#skToolWrap').innerHTML = toolHtml
+      + '<div class="row"><button class="btn sec" id="skAddTool">添加工具</button></div>';
+    $('#skToolWrap').dataset.count = String(Math.max(1, toolDefs.length));
+
+    // 事件
+    $('#skSave').onclick = async () => {
+      const n = $('#skName').value.trim();
+      if (!n) { $('#skMsg').innerHTML = '<span class="err">名称必填</span>'; return; }
+      const mode = $('#skMode').value;
+      const kw = $('#skKw').value.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+      const toolEls = Array.from($('#skToolWrap').querySelectorAll('.tool-name'));
+      const tools = [];
+      for (const el of toolEls) {
+        const i = el.dataset.i;
+        const nm = el.value.trim();
+        if (!nm) continue;
+        const h = $('#skToolWrap').querySelector('.tool-handler[data-i="' + i + '"]').value;
+        const ds = $('#skToolWrap').querySelector('.tool-desc[data-i="' + i + '"]').value;
+        tools.push({ name: nm, handler: h, description: ds, parameters: { type: 'object', properties: {} } });
+      }
+      const payload = { name: n, description: $('#skDesc').value.trim(), trigger: { mode, keywords: mode === 'keyword' ? kw : [] }, prompt: $('#skPrompt').value, tools };
+      if (skillEditId) payload.id = skillEditId;
+      const r = await invoke(C.SKILL_SAVE, { skill: payload });
+      if (r && r.ok) {
+        $('#skMsg').innerHTML = '<span class="ok">' + esc(r.note || '已保存') + '</span>';
+        skillEditId = null;
+        await load();
+      } else {
+        $('#skMsg').innerHTML = '<span class="err">' + esc((r && r.error) || '保存失败') + '</span>';
+      }
+    };
+    if ($('#skCancel')) $('#skCancel').onclick = () => { skillEditId = null; load(); };
+    $('#skAddTool').onclick = () => {
+      const wrap = $('#skToolWrap');
+      const i = Number(wrap.dataset.count || '1');
+      wrap.insertAdjacentHTML('beforeend', toolRow({ name: '', handler: handlers[0] || 'generate_image', description: '' }, i));
+      wrap.dataset.count = String(i + 1);
+    };
+    wrapDel();
+    function wrapDel() {
+      $('#skToolWrap').querySelectorAll('[data-rmtool]').forEach((b) => {
+        b.onclick = () => { b.parentElement.remove(); };
+      });
+    }
+    $('#skExport').onclick = async () => {
+      const r = await invoke(C.SKILL_EXPORT);
+      if (!r || !r.ok) { alert('导出失败：' + ((r && r.error) || '')); return; }
+      const blob = new Blob([JSON.stringify({ version: r.version, skills: r.skills }, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'feiyu-skills.json'; a.click();
+    };
+
+    box.querySelectorAll('[data-act]').forEach((b) => {
+      b.onclick = async () => {
+        const id = b.dataset.id, act = b.dataset.act;
+        if (act === 'edit') { skillEditId = id; await load(); return; }
+        if (act === 'del') {
+          if (!confirm('删除该技能？删除后立即生效。')) return;
+          const r = await invoke(C.SKILL_DELETE, { id });
+          if (r && r.ok) await load(); else alert('删除失败：' + ((r && r.error) || ''));
+          return;
+        }
+        if (act === 'copy') {
+          const r = await invoke(C.SKILL_COPY, { id });
+          if (r && r.ok) await load(); else alert('复制失败：' + ((r && r.error) || ''));
+          return;
+        }
+        if (act === 'toggle') {
+          const r = await invoke(C.SKILL_SET_ENABLED, { id, enabled: b.dataset.en === '1' });
+          if (r && r.ok) await load(); else alert('操作失败：' + ((r && r.error) || ''));
+        }
+      };
+    });
+    box.querySelectorAll('[data-tpl]').forEach((b) => {
+      b.onclick = async () => {
+        const r = await invoke(C.SKILL_IMPORT_TEMPLATE, { key: b.dataset.tpl });
+        if (r && r.ok) await load(); else alert('导入失败：' + ((r && r.error) || ''));
+      };
+    });
+  };
+
+  await load();
+}
+
+/* ---------- ComfyUI 生图 ---------- */
+async function pageComfy() {
+  content.innerHTML = '<h2>ComfyUI 生图</h2><div id="cf"></div>';
+  const box = $('#cf');
+  box.innerHTML = '<div class="hint">加载中…</div>';
+
+  const load = async () => {
+    const st = await invoke(C.COMFY_STATUS);
+    const pr = await invoke(C.COMFY_PREREQ);
+    const wf = await invoke(C.COMFY_WORKFLOWS);
+    const det = (st && st.detect) || {};
+    const conn = (st && st.connection) || {};
+    const pre = (pr && pr.prereq) || {};
+    const models = (pre.models && pre.models.models) || [];
+    const workflows = (wf && wf.workflows) || [];
+
+    const prItems = (pre.items || []).map((i) => `
+      <tr><td>${esc(i.label)}${i.required ? ' <span class="hint">（必需）</span>' : ''}</td>
+      <td>${i.ok ? '<span class="pill ok">已就绪</span>' : '<span class="pill err">未满足</span>'}</td>
+      <td class="hint">${esc(i.detail || '')}</td></tr>`).join('');
+
+    const mRows = models.map((m) => `
+      <tr>
+        <td>${esc(m.label)}<div class="hint">${esc(m.note || '')}</div></td>
+        <td><code>models/${esc(m.dir)}/${esc(m.file)}</code></td>
+        <td>${m.present ? '<span class="pill ok">已下载</span>' : '<span class="pill err">缺失</span>'}</td>
+        <td>${m.present ? '—' : '<button class="btn sm" data-dl="' + esc(m.key) + '">下载（约 ' + Math.round(m.approxMB) + 'MB）</button>'}</td>
+      </tr>`).join('');
+
+    const wRows = workflows.map((w) => `
+      <tr>
+        <td><code>${esc(w.file)}</code></td>
+        <td>${w.nodes} 节点</td>
+        <td>${w.hasCLIP ? '✓' : '✗'} CLIP${w.hasSampler ? ' ✓采样' : ''}${w.hasUnet ? ' ✓模型' : ''}${w.hasSave ? ' ✓保存' : ''}</td>
+        <td>${w.parseError ? '<span class="err">解析失败</span>' : (w.hasCLIP && w.hasSampler ? '<span class="pill ok">可用</span>' : '<span class="pill">缺节点</span>')}</td>
+      </tr>`).join('');
+
+    box.innerHTML = `
+      <div class="section">
+        <h3>前置条件</h3>
+        <div class="hint">画图链路需要<b>先接入大模型</b>：机器人侧 LLM（提示词翻译/扩写）+ ComfyUI 侧文本编码器，缺一则画图会空转。</div>
+        <table class="tbl"><thead><tr><th>项目</th><th>状态</th><th>说明</th></tr></thead><tbody>${prItems}</tbody></table>
+        <div class="hint" id="cfMsg"></div>
+      </div>
+
+      <div class="section">
+        <h3>ComfyUI 环境</h3>
+        <table class="tbl"><tbody>
+          <tr><td>安装目录</td><td>${det.root ? '<code>' + esc(det.root) + '</code>' : '<span class="err">未检测到</span>'}</td></tr>
+          <tr><td>服务地址</td><td><code>${esc(det.endpoint || '')}</code></td></tr>
+          <tr><td>连接状态</td><td>${conn.running ? '<span class="pill ok">运行中' + (conn.version ? ' v' + esc(conn.version) : '') + (conn.device ? ' / ' + esc(conn.device) : '') + '</span>' : '<span class="pill err">未运行</span> ' + esc(conn.error || '')}</td></tr>
+          <tr><td>Python</td><td>${esc(conn.python || '—')}</td></tr>
+        </tbody></table>
+        <div class="row">
+          <button class="btn sec" id="cfDetect">重新检测</button>
+          <button class="btn sec" id="cfPick">指定安装目录</button>
+          <button class="btn sec" id="cfRelease">查询官方安装包</button>
+          <button class="btn sec" id="cfInstall">自动下载安装 ComfyUI</button>
+        </div>
+        <div class="hint">自动下载使用官方 Windows 便携版（GitHub Releases 的 .7z，约 1.4–1.9 GB），解压依赖系统自带 tar（Windows 10+ 自带 bsdtar，支持 7z）。</div>
+      </div>
+
+      <div class="section">
+        <h3>模型（自动下载）</h3>
+        <table class="tbl"><thead><tr><th>模型</th><th>目标位置</th><th>状态</th><th>操作</th></tr></thead><tbody>${mRows || '<tr><td colspan="4" class="hint">未检测到 ComfyUI 目录</td></tr>'}</tbody></table>
+        <div class="hint">下载源：HuggingFace（不可达时自动回落 hf-mirror 镜像）。大文件下载较慢，请保持网络畅通。</div>
+      </div>
+
+      <div class="section">
+        <h3>工作流（机器人目录 workflows/）</h3>
+        <table class="tbl"><thead><tr><th>文件</th><th>规模</th><th>节点</th><th>状态</th></tr></thead><tbody>${wRows || '<tr><td colspan="4" class="hint">没有工作流文件。文生图/图生图需自备 API 格式工作流并填入 ai_config.json 的 image.workflow。</td></tr>'}</tbody></table>
+      </div>`;
+
+    $('#cfDetect').onclick = load;
+    $('#cfPick').onclick = async () => {
+      const r = await invoke(C.COMFY_PICKDIR);
+      if (!r || !r.ok || !r.dir) return;
+      if (!r.valid) { alert('该目录下未找到 main.py，可能不是 ComfyUI 安装目录。'); return; }
+      $('#cfMsg').innerHTML = '<span class="ok">已选择：' + esc(r.dir) + '</span>';
+    };
+    $('#cfRelease').onclick = async () => {
+      const r = await invoke(C.COMFY_RELEASE, { variant: 'nvidia' });
+      if (!r || !r.ok) { $('#cfMsg').innerHTML = '<span class="err">' + esc((r && r.error) || '查询失败') + '</span>'; return; }
+      const rel = r.release;
+      $('#cfMsg').innerHTML = '<span class="ok">官方最新版 ' + esc(rel.tag) + '：' + esc(rel.name)
+        + '（' + (rel.size / 1048576).toFixed(0) + ' MB）</span>';
+    };
+    $('#cfInstall').onclick = async () => {
+      if (!confirm('将下载官方 Windows 便携版 ComfyUI（约 1.4–1.9 GB）并解压到你选择的目录。继续？')) return;
+      const dir = prompt('解压到哪个目录？', 'D:\\ComfyUI_windows_portable');
+      if (!dir) return;
+      $('#cfMsg').innerHTML = '<span class="hint">下载中…（约 1.4–1.9 GB，请勿关闭窗口）</span>';
+      const r = await invoke(C.COMFY_INSTALL, { dir: dir, variant: 'nvidia' });
+      if (!r || !r.ok) {
+        $('#cfMsg').innerHTML = '<span class="err">' + esc((r && r.error) || '安装失败') + '</span>';
+        return;
+      }
+      $('#cfMsg').innerHTML = '<span class="ok">' + esc(r.note) + '</span>';
+      await load();
+    };
+    box.querySelectorAll('[data-dl]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('开始下载该模型？文件较大，可能需要较长时间。')) return;
+        b.disabled = true; b.textContent = '下载中…';
+        const r = await invoke(C.COMFY_DOWNLOAD_MODEL, { key: b.dataset.dl, dir: det.root || undefined });
+        if (!r || !r.ok) { $('#cfMsg').innerHTML = '<span class="err">' + esc((r && r.error) || '下载失败') + '</span>'; }
+        else $('#cfMsg').innerHTML = '<span class="ok">' + esc(r.note) + '</span>';
+        await load();
+      };
+    });
+  };
+
+  await load();
 }
 
 /* ---------- 日志与诊断 ---------- */

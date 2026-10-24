@@ -37,6 +37,7 @@ const imageConfirm = require('./feiyu/image_confirm');
 const shortVideo = require('./feiyu/short_video');
 const deepThink = require('./agent/deep_think');
 const usageReport = require('./usage_report'); // 用量报告纯计算层（筛选/聚合/白名单/鉴权决策）
+const skills = require('./skills'); // 可插拔技能运行时（提示词注入 + 工具挂载；纯计算层）
 // V15.3：群友戳一戳（主动戳群友 + 对群友被戳的反应）；与既有 poke（自己被戳）互不重叠
 const pokeSocial = require('./feiyu/poke_social');
 
@@ -3319,8 +3320,15 @@ async function askDeepSeek(sessionId, contentParts, ev, o) {
   // v12：工具按需加载（chat 无 / economy 按需 / enhanced+normal 全量）；普通聊天不挂任何工具
   const toolSet = o.allowTools !== false ? toolsForMode(o.text) : [];
   const chatId = o.chatId;
+  // 技能运行时：读取注册表（每轮重读，改技能即时生效），命中技能注入提示词 + 挂载工具
+  const skillList = skills.loadSkills(BASE_DIR).skills;
+  const skillToolDefs = (AI_MODE === 'chat') ? [] : skills.skillToolDefs(skillList, o.text);
+  const skillHandlers = (AI_MODE === 'chat') ? {} : skills.skillHandlerMap(skillList, o.text);
+  const activeTools = skillToolDefs.length
+    ? toolSet.concat(skillToolDefs.filter((t) => !toolSet.some((x) => x.function && x.function.name === t.function.name)))
+    : toolSet;
   const messages = [
-    { role: 'system', content: buildSystemPrompt(sessionId) },
+    { role: 'system', content: buildSystemPrompt(sessionId) + skills.renderSkillPrompt(skillList, o.text) },
     ...hist,
     { role: 'user', content: contentParts },
   ];
@@ -3332,7 +3340,7 @@ async function askDeepSeek(sessionId, contentParts, ev, o) {
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     // 最后一轮不给工具，强制它把话说出来（否则思考会把 token 吃光，回复变空）
     const isLast = round >= MAX_TOOL_ROUNDS;
-    const obj = await callAPI(messages, !isLast && toolSet.length > 0, { groupId, model, chatId, tools: toolSet, kind: o.kind, extra: o.extra });
+    const obj = await callAPI(messages, !isLast && activeTools.length > 0, { groupId, model, chatId, tools: activeTools, kind: o.kind, extra: o.extra });
     const msg = obj.choices?.[0]?.message || {};
 
     const calls = msg.tool_calls || [];
@@ -3344,7 +3352,10 @@ async function askDeepSeek(sessionId, contentParts, ev, o) {
 
       // —— 生图前先把这句接应话发出去（用户要求：先回答，再生图）——
       // generate_image 会阻塞几十秒，不先发的话对方会以为没反应，图也变成「话在图后面」。
-      if (!ctx.imageSent && calls.some((c) => c.function?.name === 'generate_image')) {
+      if (!ctx.imageSent && calls.some((c) => {
+        const n = c.function?.name;
+        return n === 'generate_image' || (skillHandlers && skillHandlers[n] === 'generate_image');
+      })) {
         const pre = cleanReply(String(msg.content || ''))
           .replace(/\[\[表情[^\]]*\]\]/g, '').trim();
         if (pre) {
@@ -3372,7 +3383,9 @@ async function askDeepSeek(sessionId, contentParts, ev, o) {
         try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}
         const fn = tc.function?.name;
         log(`[联网 ${fn}] ${JSON.stringify(args).slice(0, 100)}`);
-        const result = await runTool(fn, args, sessionId, ctx);
+        // 技能挂载的工具：按注册表映射回内置实现（handler 白名单已在 skills.js 校验）
+        const target = (skillHandlers && skillHandlers[fn]) || fn;
+        const result = await runTool(target, args, sessionId, ctx);
         stats.toolCalls++; saveStats();
         log(`[联网结果] ${String(result).slice(0, 120)}`);
         messages.push({ role: 'tool', tool_call_id: tc.id, content: String(result) });

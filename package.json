@@ -1,8 +1,8 @@
 {
-  "name": "napcat-qq-ai-bridge",
+  "name": "feiyu-ai-bridge",
   "version": "1.0.0",
   "private": true,
-  "description": "零第三方依赖的 QQ 群聊/私聊 AI 自动回复桥接层：对接 NapCat OneBot11 + DeepSeek，含 V14 Agent 工具链（生图/识图/搜索/记忆/文件等）。仅含自研桥接代码，不含任何 QQ 客户端或第三方框架文件。",
+  "description": "肥鱼 AI 桥接层 — NapCat OneBot11 QQ 自动回复 + 桌面控制中心（多Provider/用量统计/费用估算/人格模板/Skill扩展/ComfyUI生图）",
   "main": "ai_bridge.js",
   "engines": {
     "node": ">=22.0.0"

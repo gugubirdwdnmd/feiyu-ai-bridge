@@ -1,6 +1,7 @@
-# QQ 群聊 AI 桥接层（qq-ai-bot）
+# 肥鱼 AI 桥接层（feiyu-ai-bridge）
 
-一个**零第三方依赖**的 QQ 群聊 / 私聊 AI 自动回复**桥接层**，可打包为**单文件 exe**。
+一个**零第三方依赖**的 QQ 群聊 / 私聊 AI 自动回复**桥接层**，可打包为**单文件 exe**；
+附带**桌面控制中心**（Electron），用于可视化配置、统计真实用量与费用。
 
 消息经由 [NapCat](https://github.com/NapNeko/NapCatQQ)（OneBot11）推送到本桥接层，桥接层决定"要不要回、用什么模型、带多少上下文、调不调工具"，再调用大模型生成回复，最后通过 NapCat 发回 QQ。
 
@@ -41,6 +42,7 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 | 链接与卡片解析 | B 站视频信息、QQ 分享卡片 |
 | 聊天记录分析 | 合并转发消息的解析与归纳 |
 | 多图工作流 | 连发两张图可触发本地 ComfyUI 图像工作流（合成 / 处理，见 `workflows/`） |
+| 技能扩展 | `skills.js` + `feiyu_skills.json`：可插拔的「行为增强包」（提示词注入 + 工具挂载 + 关键词触发）。**每轮重读 → 保存即生效，无需重启**；工具处理器有白名单，**技能不能执行任意代码** |
 | 工具调用 | 14 个内置工具：联网搜索、网页抓取、读时间、记笔记、发文件、建表格、生图等 |
 | Agent 多步 | 最多 5 步的多步任务执行 |
 | 用量看板与分账 | 单文件 HTML 看板；按 `answer` / `judge` / `vision` / `agent` 分类统计 token |
@@ -56,6 +58,16 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 | 深度思考优先（V15.5，默认开） | 需要长思考的任务（推理/规划/代码/对比/计算/长文）自动换用推理模型先想清楚再答，并按 complex 带更多上下文。判定是纯本地规则，**不新增模型调用**；有图时让位给多模态模型 |
 | 短视频识别（V15.5，识别默认开） | 认出抖音/快手/B站/小红书等平台链接并**如实**告知只看得到标题、看不到画面，不会编造内容。**不抓取第三方页面**；真正能看内容的是 QQ 原生视频段（走既有 video_analysis） |
 | 测试 | 16 个测试文件、上千条断言；离线用例零网络依赖，live 用例（本机 ComfyUI）在无后端时自动跳过 |
+
+---
+
+## 桌面控制中心（feiyu-desktop）
+
+图形化管理端（Electron）：多 Provider 配置、真实用量统计、费用估算、人格模板库、
+**技能扩展**、**ComfyUI 生图自动下载**，并提供 Windows x64 安装包。
+
+- 完整使用说明（含技能与 ComfyUI 接入步骤）：[`feiyu-desktop/docs/USER_GUIDE.md`](feiyu-desktop/docs/USER_GUIDE.md)
+- 安装包下载：[Releases](https://github.com/gugubirdwdnmd/feiyu-ai-bridge/releases)
 
 ---
 

@@ -9,9 +9,10 @@ config.secret.json
 secrets.*.json
 !secrets.example.json
 feiyu_provider_secrets.json
-# 桌面端 Provider 注册表与人格模板库：用户数据（含 baseUrl/提示词），不入库
+# 桌面端 Provider 注册表、人格模板库、技能注册表：用户数据（含 baseUrl/提示词），不入库
 feiyu_providers.json
 feiyu_personalities.json
+feiyu_skills.json
 .env
 .env.*
 !.env.example

@@ -48,6 +48,25 @@ const CHANNELS = {
   PROVIDER_TEST: 'provider:test',
   PROVIDER_APPLY: 'provider:apply',
   PROVIDER_PREVIEW: 'provider:preview',
+  // 技能扩展（与机器人侧 skills.js 共用 feiyu_skills.json；保存即生效，无需重启）
+  SKILL_LIST: 'skill:list',
+  SKILL_SAVE: 'skill:save',
+  SKILL_DELETE: 'skill:delete',
+  SKILL_COPY: 'skill:copy',
+  SKILL_SET_ENABLED: 'skill:setEnabled',
+  SKILL_TEMPLATES: 'skill:templates',
+  SKILL_IMPORT_TEMPLATE: 'skill:importTemplate',
+  SKILL_EXPORT: 'skill:export',
+  SKILL_IMPORT: 'skill:import',
+  // ComfyUI 生图扩展（检测/连通性/工作流/模型/自动下载/前置条件）
+  COMFY_DETECT: 'comfy:detect',
+  COMFY_STATUS: 'comfy:status',
+  COMFY_WORKFLOWS: 'comfy:workflows',
+  COMFY_PREREQ: 'comfy:prereq',
+  COMFY_DOWNLOAD_MODEL: 'comfy:downloadModel',
+  COMFY_RELEASE: 'comfy:release',
+  COMFY_INSTALL: 'comfy:install',
+  COMFY_PICKDIR: 'comfy:pickDir',
 };
 
 const ALLOWED_RANGE = ['today', 'yesterday', '7d', 'month', 'all'];
@@ -156,6 +175,55 @@ function validate(channel, args) {
       return { ok: true };
     case CHANNELS.PROVIDER_TEST:
       if (!isObject(args) || (typeof args.id !== 'string' && !isObject(args.provider))) return { ok: false, error: '需要 {id} 或 {provider}' };
+      return { ok: true };
+    // —— 技能扩展 ——
+    case CHANNELS.SKILL_LIST:
+    case CHANNELS.SKILL_TEMPLATES:
+    case CHANNELS.SKILL_EXPORT:
+      return { ok: true };
+    case CHANNELS.SKILL_SAVE:
+      if (!isObject(args) || !isObject(args.skill)) return { ok: false, error: '需要 {skill: object}' };
+      if (args.skill.id != null && typeof args.skill.id !== 'string') return { ok: false, error: 'skill.id 必须是 string' };
+      return { ok: true };
+    case CHANNELS.SKILL_DELETE:
+    case CHANNELS.SKILL_COPY:
+      if (!isObject(args) || typeof args.id !== 'string') return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+    case CHANNELS.SKILL_SET_ENABLED:
+      if (!isObject(args) || typeof args.id !== 'string' || typeof args.enabled !== 'boolean') {
+        return { ok: false, error: '需要 {id: string, enabled: boolean}' };
+      }
+      return { ok: true };
+    case CHANNELS.SKILL_IMPORT_TEMPLATE:
+      if (!isObject(args) || typeof args.key !== 'string') return { ok: false, error: '需要 {key: string}' };
+      return { ok: true };
+    case CHANNELS.SKILL_IMPORT:
+      if (!isObject(args) || !isObject(args.payload)) return { ok: false, error: '需要 {payload: object}' };
+      return { ok: true };
+    // —— ComfyUI 扩展 ——
+    case CHANNELS.COMFY_DETECT:
+    case CHANNELS.COMFY_STATUS:
+    case CHANNELS.COMFY_WORKFLOWS:
+    case CHANNELS.COMFY_PICKDIR:
+      return { ok: true };
+    case CHANNELS.COMFY_RELEASE:
+      if (args != null && args.variant != null && !['nvidia', 'amd', 'intel', 'nvidia_arm64', 'nvidia_cu126'].includes(args.variant)) {
+        return { ok: false, error: 'variant 必须是 nvidia/amd/intel/nvidia_arm64/nvidia_cu126' };
+      }
+      return { ok: true };
+    case CHANNELS.COMFY_PREREQ:
+      if (args != null && args.dir != null && typeof args.dir !== 'string') return { ok: false, error: 'dir 必须是 string' };
+      if (args != null && args.endpoint != null && typeof args.endpoint !== 'string') return { ok: false, error: 'endpoint 必须是 string' };
+      return { ok: true };
+    case CHANNELS.COMFY_DOWNLOAD_MODEL:
+      if (!isObject(args) || typeof args.key !== 'string') return { ok: false, error: '需要 {key: string}' };
+      if (args.dir != null && typeof args.dir !== 'string') return { ok: false, error: 'dir 必须是 string' };
+      return { ok: true };
+    case CHANNELS.COMFY_INSTALL:
+      if (!isObject(args) || typeof args.dir !== 'string' || !args.dir.trim()) return { ok: false, error: '需要 {dir: string}' };
+      if (args.variant != null && !['nvidia', 'amd', 'intel', 'nvidia_arm64', 'nvidia_cu126'].includes(args.variant)) {
+        return { ok: false, error: 'variant 必须是 nvidia/amd/intel/nvidia_arm64/nvidia_cu126' };
+      }
       return { ok: true };
     default:
       return { ok: false, error: '未知通道: ' + channel };

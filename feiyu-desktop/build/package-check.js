@@ -32,6 +32,7 @@ const REQUIRED = [
   'src/main.js', 'src/preload.js', 'src/ipc/handlers.js', 'src/services/ipcChannels.js',
   'src/services/credentialStore.js', 'src/services/providerService.js', 'src/services/providerApplyService.js',
   'src/services/personalityTemplateService.js', 'src/services/usageService.js', 'src/services/priceService.js',
+  'src/services/skillService.js', 'src/services/comfyService.js',
   'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css',
 ];
 for (const f of REQUIRED) {
@@ -39,8 +40,8 @@ for (const f of REQUIRED) {
 }
 
 // 3) 不应把真实机密打进包：仓库内不得有 secrets.json / ai_config.json
-for (const f of ['secrets.json', 'ai_config.json', 'feiyu_provider_secrets.json', 'feiyu_providers.json']) {
-  if (fs.existsSync(path.join(ROOT, f))) bad('仓库内含 ' + f + '（密钥/真实配置不得入库）'); else ok('未含 ' + f);
+for (const f of ['secrets.json', 'ai_config.json', 'feiyu_provider_secrets.json', 'feiyu_providers.json', 'feiyu_personalities.json', 'feiyu_skills.json']) {
+  if (fs.existsSync(path.join(ROOT, f))) bad('仓库内含 ' + f + '（密钥/真实配置/用户数据不得入库）'); else ok('未含 ' + f);
 }
 
 // 4) 依赖已安装 + Electron 版本与声明一致
@@ -103,7 +104,7 @@ if (fs.existsSync(asarPath)) {
   try {
     const asar = require(path.join(ROOT, 'node_modules', '@electron', 'asar'));
     const list = asar.listPackage(asarPath);
-    const dataRe = /(^|[\\/])(secrets\.json|ai_config\.json|feiyu_provider_secrets\.json|feiyu_providers\.json|feiyu_personalities\.json)$/i;
+    const dataRe = /(^|[\\/])(secrets\.json|ai_config\.json|feiyu_provider_secrets\.json|feiyu_providers\.json|feiyu_personalities\.json|feiyu_skills\.json)$/i;
     const dataFiles = list.filter((f) => dataRe.test(f));
     const logFiles = list.filter((f) => /\.log$/i.test(f));
     if (dataFiles.length) bad('打包产物含数据文件: ' + dataFiles.join(', '));
@@ -115,6 +116,21 @@ if (fs.existsSync(asarPath)) {
   }
 } else {
   console.log('  · 尚未构建（无 dist/win-unpacked/resources/app.asar），跳过产物内容检查');
+}
+
+// 12) 机器人侧技能模块存在，且两侧工具白名单一致
+// （不一致会导致「桌面能存、机器人拒收」的技能，界面看不出问题）
+try {
+  const botSkills = require(path.join(ROOT, '..', 'skills.js'));
+  const deskSkills = require(path.join(ROOT, 'src', 'services', 'skillService.js'));
+  const bot = Array.from(botSkills.ALLOWED_HANDLERS).sort();
+  const desk = deskSkills.ALLOWED_HANDLERS.slice().sort();
+  if (JSON.stringify(bot) === JSON.stringify(desk)) ok('技能工具白名单两侧一致（' + bot.length + ' 项）');
+  else bad('技能工具白名单两侧不一致：bot=' + bot.join(',') + ' / desktop=' + desk.join(','));
+  if (botSkills.ALLOWED_HANDLERS.has('remember')) bad('技能白名单含 remember（会写用户记忆，不应允许技能挂载）');
+  else ok('技能白名单不含 remember');
+} catch (e) {
+  bad('无法校验技能白名单一致性: ' + e.message);
 }
 
 if (warnings.length) console.log('\n提示：' + warnings.length + ' 项非阻断警告');

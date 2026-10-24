@@ -3,6 +3,10 @@
 基于现有 NapCat + OneBot QQ AI 机器人核心（`ai_bridge.js`）的**图形化管理桌面端**。
 不重写机器人业务逻辑，只做「读/写它的真实配置文件 + 启停进程 + 展示真实用量」。
 
+> 📖 **完整使用说明（含技能扩展与 ComfyUI 生图接入步骤）**
+> 见 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
+> 仓库：[gugubirdwdnmd/feiyu-ai-bridge](https://github.com/gugubirdwdnmd/feiyu-ai-bridge)
+
 ---
 
 ## 1. 功能概览
@@ -13,6 +17,8 @@
 | 机器人运行 | 启停 AI 桥 / NapCat、查看进程与端口 |
 | API 与模型 | 多 Provider 注册表（增删改查/默认/测试/应用）、凭据安全状态与加密迁移 |
 | 人格设置 | 人格模板库（CRUD/复制/重命名/差异预览/备份回滚）+ 应用到机器人 |
+| **技能扩展** | 技能库（CRUD/启停/内置模板/导入导出）：提示词注入 + 工具挂载，**保存即生效** |
+| **ComfyUI 生图** | ComfyUI 检测/连通性/工作流解析/模型自动下载/**大模型前置条件**校验 |
 | 用量明细 | 时间范围 + Provider/模型/状态筛选、耗时、CSV 导出、费用估算与价格表 |
 | 日志 | ai_bridge.log 尾部/搜索（展示前脱敏） |
 | 导入导出 | 配置导入导出（默认不含密钥）、差异预览、应用前备份 |

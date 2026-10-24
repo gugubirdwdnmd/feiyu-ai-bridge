@@ -18,6 +18,8 @@ const providerService = require('../services/providerService');
 const providerApplyService = require('../services/providerApplyService');
 const priceService = require('../services/priceService');
 const credentialStore = require('../services/credentialStore');
+const skillService = require('../services/skillService');
+const comfyService = require('../services/comfyService');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
 
@@ -347,6 +349,124 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
       // 轻量校验：目录里应有 ai_bridge.js，否则提示但仍允许（用户可自行调整）
       const ok = fs.existsSync(path.join(d, 'ai_bridge.js'));
       return { ok: true, dir: d, botCorePresent: ok };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // ================= 技能扩展 =================
+  // 技能存 botDir/feiyu_skills.json，机器人每轮重读 → 保存即生效，无需重启。
+  ipcMain.handle(CHANNELS.SKILL_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return Object.assign({ ok: true }, skillService.list(d));
+  });
+  ipcMain.handle(CHANNELS.SKILL_SAVE, (e, args) => {
+    const v = validate(CHANNELS.SKILL_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillService.save(d, args.skill);
+    if (!r.ok) return { ok: false, error: (r.errors || []).join('；') || '保存失败', errors: r.errors || [] };
+    return { ok: true, id: r.id, skill: r.skill, note: '已保存，机器人下一轮对话即生效（无需重启）' };
+  });
+  ipcMain.handle(CHANNELS.SKILL_DELETE, (e, args) => {
+    const v = validate(CHANNELS.SKILL_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillService.remove(d, args.id);
+    return r.ok ? { ok: true, note: '已删除，即时生效' } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.SKILL_COPY, (e, args) => {
+    const v = validate(CHANNELS.SKILL_COPY, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillService.copy(d, args.id);
+    return r.ok ? { ok: true, id: r.id, skill: r.skill } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.SKILL_SET_ENABLED, (e, args) => {
+    const v = validate(CHANNELS.SKILL_SET_ENABLED, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillService.setEnabled(d, args.id, args.enabled);
+    return r.ok ? { ok: true, id: r.id, enabled: r.enabled, note: '已更新，即时生效' } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.SKILL_TEMPLATES, () => ({ ok: true, templates: skillService.builtinTemplates() }));
+  ipcMain.handle(CHANNELS.SKILL_IMPORT_TEMPLATE, (e, args) => {
+    const v = validate(CHANNELS.SKILL_IMPORT_TEMPLATE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillService.importTemplate(d, args.key);
+    if (!r.ok) return { ok: false, error: r.error || (r.errors || []).join('；') };
+    return { ok: true, id: r.id, skill: r.skill };
+  });
+  ipcMain.handle(CHANNELS.SKILL_EXPORT, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return Object.assign({ ok: true }, skillService.exportAll(d));
+  });
+  ipcMain.handle(CHANNELS.SKILL_IMPORT, (e, args) => {
+    const v = validate(CHANNELS.SKILL_IMPORT, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillService.importAll(d, args.payload);
+    return r.ok ? { ok: true, added: r.added, skipped: r.skipped, note: '导入成功，即时生效' } : { ok: false, error: r.error };
+  });
+
+  // ================= ComfyUI 生图扩展 =================
+  ipcMain.handle(CHANNELS.COMFY_DETECT, (e, args) => {
+    const v = validate(CHANNELS.COMFY_DETECT, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = comfyService.detect({ dir: args && args.dir, endpoint: args && args.endpoint });
+    return { ok: true, detect: d };
+  });
+  ipcMain.handle(CHANNELS.COMFY_STATUS, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_STATUS, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = comfyService.detect({ dir: args && args.dir, endpoint: args && args.endpoint });
+    const conn = await comfyService.testConnection(d.endpoint);
+    return { ok: true, detect: d, connection: conn };
+  });
+  ipcMain.handle(CHANNELS.COMFY_WORKFLOWS, (e, args) => {
+    const v = validate(CHANNELS.COMFY_WORKFLOWS, args); if (!v.ok) return { ok: false, error: v.error };
+    const b = needBotDir(); if (!b) return { ok: false, error: '未配置机器人目录' };
+    return Object.assign({ ok: true }, comfyService.listWorkflows(b));
+  });
+  ipcMain.handle(CHANNELS.COMFY_PREREQ, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_PREREQ, args); if (!v.ok) return { ok: false, error: v.error };
+    const b = needBotDir(); if (!b) return { ok: false, error: '未配置机器人目录' };
+    const d = comfyService.detect({ dir: args && args.dir, endpoint: args && args.endpoint });
+    // 机器人侧 LLM 是否已接入（多 Provider 里有可用且已应用的那一个）
+    let llmOk = false, llmDetail = '未配置机器人目录';
+    try {
+      const pl = providerService.list(b, configService.readRaw(b).data);
+      const applied = (pl.providers || []).find((p) => p.id === pl.appliedId);
+      llmOk = !!(applied && applied.complete);
+      llmDetail = llmOk ? ('已应用：' + applied.name + ' / ' + (applied.model || '')) : '尚未接入可用的大模型';
+    } catch (e) { llmDetail = '读取 Provider 失败: ' + e.message; }
+    const conn = await comfyService.testConnection(d.endpoint);
+    const prereq = comfyService.checkPrerequisites(d.root, {
+      ok: llmOk, detail: llmDetail, comfyRunning: conn.ok, comfyEndpoint: d.endpoint,
+    });
+    return { ok: true, prereq, detect: d, connection: conn };
+  });
+  ipcMain.handle(CHANNELS.COMFY_DOWNLOAD_MODEL, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_DOWNLOAD_MODEL, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const det = comfyService.detect({ dir: args.dir });
+    const root = args.dir ? (comfyService.resolveComfyRoot(args.dir) || args.dir) : det.root;
+    if (!root) return { ok: false, error: '未找到 ComfyUI 安装目录，请先在「安装 ComfyUI」或指定目录' };
+    const r = await comfyService.downloadModel(root, args.key);
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, path: r.path, bytes: r.bytes || 0, skipped: !!r.skipped, note: r.skipped ? '文件已存在，跳过下载' : '下载完成' };
+  });
+  ipcMain.handle(CHANNELS.COMFY_RELEASE, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_RELEASE, args); if (!v.ok) return { ok: false, error: v.error };
+    const variant = (args && args.variant) || 'nvidia';
+    const r = await comfyService.resolveComfyRelease(variant);
+    return r.ok ? { ok: true, release: r } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.COMFY_INSTALL, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_INSTALL, args); if (!v.ok) return { ok: false, error: v.error };
+    const variant = args.variant || 'nvidia';
+    const r = await comfyService.installComfyUI(args.dir, variant);
+    if (!r.ok) return { ok: false, error: redactText(r.error || '安装失败'), hint: r.hint || null };
+    return { ok: true, install: r, note: '已安装到 ' + r.dir + '，请用其中的 run_nvidia_gpu.bat 启动' };
+  });
+  ipcMain.handle(CHANNELS.COMFY_PICKDIR, async () => {
+    try {
+      const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择 ComfyUI 安装目录' });
+      if (canceled || !filePaths || !filePaths.length) return { ok: true, dir: null };
+      const d = filePaths[0];
+      const root = comfyService.resolveComfyRoot(d);
+      return { ok: true, dir: d, root: root, valid: !!root };
     } catch (e) { return { ok: false, error: e.message }; }
   });
 }
