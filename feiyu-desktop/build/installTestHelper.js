@@ -56,7 +56,10 @@ function inspectResidualDir(dir, opts = {}) {
   if (/^[A-Za-z]:[\\/]*$/.test(raw) || /^\\\\[^\\/]+[\\/][^\\/]+[\\/]*$/.test(raw)) {
     return { ok: false, reason: 'protected_path', detail: '拒绝处理文件系统根目录: ' + raw, entries: [] };
   }
-  const base = (parsed.base || '').toLowerCase();
+  // 目录名（取最后一段，**去掉尾部分隔符**）。
+  // POSIX 平台的 path.parse('NapCat\\').base 会带上尾反斜杠（'NapCat\\'），
+  // 直接比对名单会漏判，因此这里统一剥掉分隔符再比。
+  const base = String(parsed.base || '').replace(/[\\/]+$/, '').toLowerCase();
   if (PROTECTED_NAMES.has(base)) {
     return { ok: false, reason: 'protected_path', detail: '拒绝处理受保护目录: ' + resolved, entries: [] };
   }

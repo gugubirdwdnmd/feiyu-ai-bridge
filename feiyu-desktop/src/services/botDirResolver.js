@@ -33,6 +33,7 @@
  */
 const fs = require('fs');
 const winPath = require('path').win32;
+const posixPath = require('path').posix;
 
 /**
  * 在给定目录后拼一个文件名，**跟随该目录自身使用的分隔符**。
@@ -51,14 +52,43 @@ function joinName(dir, name) {
 
 /**
  * 规范化一个「本模块产出的」路径：保留其分隔符风格，
- * 但把 '.' / '..' 消解掉（Windows 布局用 winPath 规范化）。
+ * 但把 '.' / '..' 消解掉。
+ * - 含反斜杠或带盘符 → 按 Windows 布局规范化
+ * - 纯 POSIX 形态 → 按 POSIX 布局规范化（不能套用 winPath，否则会被拼上 cwd）
  */
 function normalizePath(p) {
   const s = String(p || '');
   if (!s) return s;
   try {
     if (s.includes('\\') || /^[A-Za-z]:/.test(s)) return winPath.normalize(s);
-    return winPath.normalize(s).replace(/\\/g, '/');
+    return posixPath.normalize(s);
+  } catch (_) { return s; }
+}
+
+/**
+ * 取得目录的**父目录**，跟随给定路径的风格：
+ * Windows 形态用 winPath.dirname，POSIX 形态用 posixPath.dirname。
+ */
+function dirNameOf(p) {
+  const s = String(p || '');
+  if (!s) return s;
+  try {
+    if (s.includes('\\') || /^[A-Za-z]:/.test(s)) return winPath.dirname(s);
+    return posixPath.dirname(s);
+  } catch (_) { return s; }
+}
+
+/**
+ * 把路径解析为绝对路径，**跟随给定路径的风格**：
+ * Windows 形态按 win32 解析，POSIX 形态按 posix 解析。
+ * 绝不能混用 —— 例如用 win32 去解析 '/home/runner/x' 会被拼上 cwd 而失真。
+ */
+function resolveOf(p) {
+  const s = String(p || '');
+  if (!s) return s;
+  try {
+    if (s.includes('\\') || /^[A-Za-z]:/.test(s)) return winPath.resolve(s);
+    return posixPath.resolve(s);
   } catch (_) { return s; }
 }
 
@@ -101,7 +131,7 @@ function candidateDirs(o) {
     list.push(joinName(o.appPath, '..'));
   }
   if (o.execPath) {                                    // 4) exe 相对（便携/安装）
-    const exeDir = winPath.dirname(o.execPath);
+    const exeDir = dirNameOf(o.execPath);
     list.push(joinName(exeDir, 'bot'));
     list.push(joinName(joinName(exeDir, '..'), 'bot'));
   }
@@ -114,7 +144,7 @@ function candidateDirs(o) {
   for (const c of list) {
     if (!c) continue;
     let k;
-    try { k = winPath.resolve(c); } catch (_) { continue; }
+    try { k = resolveOf(c); } catch (_) { continue; }
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(c);
@@ -173,7 +203,7 @@ function siblingCandidates(execPath, fsImpl, maxDepth = 3) {
   const f = fsImpl || fs;
   if (!execPath) return [];
   let dir;
-  try { dir = winPath.dirname(winPath.resolve(execPath)); } catch (_) { return []; }
+  try { dir = dirNameOf(resolveOf(execPath)); } catch (_) { return []; }
   const out = [];
   const seen = new Set();
   let depth = 0;
@@ -188,12 +218,12 @@ function siblingCandidates(execPath, fsImpl, maxDepth = 3) {
       let st = null;
       try { st = f.statSync(full); } catch (_) { continue; }
       if (!st || !st.isDirectory()) continue;
-      const key = winPath.resolve(full);
+      const key = resolveOf(full);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(full);
     }
-    const parent = winPath.dirname(dir);
+    const parent = dirNameOf(dir);
     if (!parent || parent === dir) break;
     dir = parent;
     depth++;
@@ -265,4 +295,4 @@ function resolveBotDir(o) {
   };
 }
 
-module.exports = { isBotDir, isSourceCheckout, candidateDirs, siblingCandidates, resolveBotDir, joinName, normalizePath, isSystemArea, SYSTEM_DIR_NAMES };
+module.exports = { isBotDir, isSourceCheckout, candidateDirs, siblingCandidates, resolveBotDir, joinName, normalizePath, dirNameOf, resolveOf, isSystemArea, SYSTEM_DIR_NAMES };

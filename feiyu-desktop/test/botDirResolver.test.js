@@ -332,3 +332,64 @@ test('joinName: 跟随给定目录的分隔符风格，不被运行平台改写'
   assert.strictEqual(resolver.joinName('/tmp/a/', 'x'), '/tmp/a/x');
 });
 
+test('平台无关: POSIX 路径的目录推导（CI 的 ubuntu runner）', () => {
+  // Linux 上 os.homedir() = /home/runner，测试夹具是 POSIX 绝对路径。
+  // 这里用 mock fs 复刻 P1-2 的目录布局，确保路径推导不依赖运行平台。
+  const R = '/home/runner/.feiyu-test-tmp/botdir-x';
+  const DIRS = new Set([
+    R + '/feiyu-app', R + '/feiyu-app/resources',
+    R + '/publish-copy', R + '/publish-copy/.git', R + '/bot-work',
+  ]);
+  const FILES = new Set([R + '/publish-copy/ai_bridge.js', R + '/bot-work/ai_bridge.js']);
+  const mockFs = {
+    existsSync: (p) => DIRS.has(p) || FILES.has(p),
+    readdirSync: (p) => {
+      if (p === R) return ['feiyu-app', 'publish-copy', 'bot-work'];
+      if (p === R + '/feiyu-app') return ['resources', 'app.exe'];
+      if (p === R + '/feiyu-app/resources') return ['app.asar'];
+      if (p === R + '/publish-copy') return ['.git', 'ai_bridge.js'];
+      if (p === R + '/bot-work') return ['ai_bridge.js'];
+      return [];
+    },
+    statSync: (p) => ({ isDirectory: () => DIRS.has(p) }),
+  };
+  const r = resolver.resolveBotDir({
+    appPath: R + '/feiyu-app/resources/app.asar',
+    execPath: R + '/feiyu-app/app.exe',
+    home: R + '/home',
+    fsImpl: mockFs,
+  });
+  assert.strictEqual(r.ok, true, '应找到工作目录');
+  assert.strictEqual(r.botDir, R + '/bot-work', '实际: ' + r.botDir);
+  assert.strictEqual(r.source, 'discovered_sibling');
+  assert.strictEqual(r.isCheckout, false);
+});
+
+test('平台无关: POSIX 路径下的便携版定位（bot 与 exe 同级）', () => {
+  const R = '/home/runner/.feiyu-test-tmp/portable';
+  const mockFs = {
+    existsSync: (p) => p === R + '/bot/ai_bridge.js',
+    readdirSync: () => [],
+    statSync: () => ({ isDirectory: () => true }),
+  };
+  const r = resolver.resolveBotDir({
+    appPath: R + '/resources/app.asar',
+    execPath: R + '/app.exe',
+    home: '/home/runner',
+    fsImpl: mockFs,
+  });
+  assert.strictEqual(r.ok, true, '应能定位便携版 bot 目录');
+  assert.strictEqual(r.botDir, R + '/bot', '实际: ' + r.botDir);
+});
+
+test('平台无关: POSIX 路径下的显式指定工作目录', () => {
+  const R = '/home/runner/.feiyu-test-tmp/work';
+  const mockFs = {
+    existsSync: (p) => p === R || p === R + '/ai_bridge.js',
+    readdirSync: () => [],
+    statSync: () => ({ isDirectory: () => true }),
+  };
+  const r = resolver.resolveBotDir({ botDir: R, fsImpl: mockFs });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.botDir, R, '不得把路径改写成其它平台形态');
+});
