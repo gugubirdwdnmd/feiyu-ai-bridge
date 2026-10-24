@@ -81,17 +81,15 @@ test('applySwitch: 写入失败时回滚到原配置', () => {
   const id = addProvider(d);
   const beforeCfg = fs.readFileSync(path.join(d, 'ai_config.json'), 'utf-8');
   const beforeSec = fs.readFileSync(path.join(d, 'secrets.json'), 'utf-8');
-  // 让 secrets.json 变成只读目录 → 写入失败（Windows 下用目录占位模拟）
-  const secPath = path.join(d, 'secrets.json');
-  fs.unlinkSync(secPath);
-  fs.mkdirSync(secPath); // 占位为目录 → write 会失败
-  const r = providerApplyService.applySwitch(d, id, { backup: true });
+  // 注入密钥写入失败（比「目录占位」更贴近真实故障，且不影响回滚路径本身）
+  const r = providerApplyService.applySwitch(d, id, {
+    backup: true,
+    deps: { writeSecret: () => ({ ok: false, error: '磁盘写入失败（注入）' }) },
+  });
   assert.strictEqual(r.ok, false, JSON.stringify(r));
   assert.strictEqual(r.rolledBack, true, '应已回滚');
-  // 回滚后 ai_config.json 恢复原样
-  assert.strictEqual(fs.readFileSync(path.join(d, 'ai_config.json'), 'utf-8'), beforeCfg);
-  fs.rmdirSync(secPath);
-  fs.writeFileSync(secPath, beforeSec);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'ai_config.json'), 'utf-8'), beforeCfg, '配置应恢复');
+  assert.strictEqual(fs.readFileSync(path.join(d, 'secrets.json'), 'utf-8'), beforeSec, '凭据应恢复');
 });
 
 test('applySwitch: 幂等 —— 重复应用同一 Provider 结果一致', () => {

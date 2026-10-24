@@ -52,7 +52,24 @@ document.querySelectorAll('#nav button').forEach((b) => {
 async function refreshBotDirLabel() {
   const r = await invoke(C.SETTINGS_GET);
   const d = (r.settings && r.settings.botDir) || '';
-  $('#botDirLabel').textContent = d ? '机器人目录:\n' + d : '未配置机器人目录（设置里选择）';
+  const el = $('#botDirLabel');
+  if (!el) return;
+  if (d) {
+    el.textContent = '机器人目录:\n' + d;
+    el.classList.remove('err');
+  } else {
+    el.textContent = '未配置机器人目录（设置里选择）';
+    el.classList.add('err');
+  }
+  // 定位状态：目录缺失 / 缺 ai_bridge.js 时给出明确提示（验收项：不得静默失败）
+  try {
+    const st = await invoke(C.BOTDIR_STATUS);
+    const el2 = $('#botDirStatus');
+    if (el2 && st) {
+      el2.innerHTML = st.hasCore ? '<span class="ok">' + esc(st.message) + '</span>'
+        : '<span class="err">' + esc(st.message) + '</span>';
+    }
+  } catch (_) {}
 }
 
 function render(page) {

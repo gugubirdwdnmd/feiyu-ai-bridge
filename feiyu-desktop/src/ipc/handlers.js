@@ -42,6 +42,27 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
 
   ipcMain.handle(CHANNELS.APP_VERSION, () => ({ version: getAppVersion() }));
   ipcMain.handle(CHANNELS.SETTINGS_GET, () => ({ settings: getSettings() }));
+
+  // 机器人目录定位状态：打包版定位不到 botDir 时给出明确原因（而非静默空目录）
+  ipcMain.handle(CHANNELS.BOTDIR_STATUS, () => {
+    const s = getSettings();
+    const configured = s.botDir || '';
+    let exists = false, hasCore = false;
+    try {
+      exists = !!configured && fs.existsSync(configured);
+      hasCore = exists && fs.existsSync(path.join(configured, 'ai_bridge.js'));
+    } catch (_) {}
+    if (!configured) {
+      return { ok: true, configured: false, exists: false, hasCore: false, message: '未配置机器人目录，请点击「选择机器人目录」指定（含 ai_bridge.js 的目录）' };
+    }
+    if (!exists) {
+      return { ok: true, configured: true, exists: false, hasCore: false, message: '配置的机器人目录已不存在，请重新选择' };
+    }
+    if (!hasCore) {
+      return { ok: true, configured: true, exists: true, hasCore: false, message: '机器人目录中未找到 ai_bridge.js，机器人功能可能不可用' };
+    }
+    return { ok: true, configured: true, exists: true, hasCore: true, message: '机器人目录正常' };
+  });
   ipcMain.handle(CHANNELS.SETTINGS_SET, (e, args) => {
     const v = validate(CHANNELS.SETTINGS_SET, args); if (!v.ok) return { ok: false, error: v.error };
     const next = Object.assign({}, getSettings(), args);

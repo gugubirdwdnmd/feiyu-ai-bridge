@@ -54,7 +54,8 @@ npm run package-check   # 打包前静态检查
 4. **便携/安装版**：exe 同级及上溯两级的 `bot/`、`NapCat_publish/`（不硬编码盘符）
 5. 用户主目录下的 `NapCat_publish/`、`bot/`
 
-若均未命中，界面提示手动选择目录（不会自动写入任何真实路径）。
+若均未命中，界面左侧栏会显示明确提示（`BOTDIR_STATUS` 通道返回具体原因），
+不会静默失败；用户可在「机器人运行」或「关于」页手动选择目录。
 
 ---
 
@@ -64,37 +65,48 @@ npm run package-check   # 打包前静态检查
 
 | 产物 | 形态 | 说明 |
 | --- | --- | --- |
-| `dist/win-unpacked/` | **免安装目录** | 直接运行 `肥鱼桌面控制中心.exe`。本仓库已验证可生成。 |
-| `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe` | **NSIS 安装包** | 标准安装程序，可选安装目录。**沙箱环境因符号链接权限无法生成**，需在普通 Windows 开发机执行。 |
-| `dist/肥鱼桌面控制中心-0.1.0-portable.exe` | **便携版单文件** | 同 NSIS 限制。 |
+| `dist/win-unpacked/` | **免安装目录** | 直接运行 `肥鱼桌面控制中心.exe`。 |
+| `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe` | **NSIS 安装包** | 标准安装程序，可选安装目录、可卸载。 |
+| `dist/肥鱼桌面控制中心-0.1.0-portable.exe` | **便携版单文件** | 免安装单文件。 |
 
 > `win-unpacked` 与 NSIS 安装版是**两种不同产物**，不能互相替代：
 > 前者是解压即用的目录，后者是自解压安装程序（写注册表/开始菜单/卸载项）。
 
-### 3.2 在普通 Windows 开发机上生成 NSIS 安装包
-
-前置条件：Node ≥ 22、可访问 npm registry。
+### 3.2 构建命令（Windows x64）
 
 ```bash
 cd feiyu-desktop
-npm ci
-npm run package-check          # 静态合规检查（版本/lockfile/安全配置/无密钥）
-npx electron-builder --win nsis portable
+npm ci                                              # lockfile 已入库，可复现
+npm run package-check                               # 静态合规检查（版本/lockfile/安全配置/无密钥/产物内容）
+CSC_IDENTITY_AUTO_DISCOVERY=false \
+  npx electron-builder --win nsis portable -c.win.signAndEditExecutable=false
 ```
 
-产物位于 `dist/`：
+**关于 `-c.win.signAndEditExecutable=false` 与 `CSC_IDENTITY_AUTO_DISCOVERY=false`**：
+本项目**未配置代码签名证书**。若不关闭签名步骤，electron-builder 会在打包后的
+「签名」环节调用 `app-builder.exe`/`signtool.exe` 而失败（`ERR_ELECTRON_BUILDER_CANNOT_EXECUTE`），
+导致**构建退出码非 0**（但产物其实已生成，容易误判）。
+配置好正式证书后，应去掉这两个开关，恢复正常签名流程。
 
-- `肥鱼桌面控制中心-0.1.0-win-x64.exe`（NSIS 安装包）
-- `肥鱼桌面控制中心-0.1.0-portable.exe`（便携版）
+### 3.3 产物实测（本次发布候选验收）
 
-> 若只想验证「能打出来」，先执行 `npx electron-builder --win --dir`，
-> 只生成 `dist/win-unpacked/`，不触发 NSIS 打包链路。
+| 项 | 实测结果 |
+| --- | --- |
+| NSIS 安装包 | `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe`，115,191,514 字节（≈110 MB），构建退出码 **0** |
+| 安装 | 静默安装退出码 **0**；安装目录含 exe / `resources/app.asar` / `Uninstall ….exe` / 桌面快捷方式 |
+| 安装后定位 | 自动识别到真实机器人目录（`botDir = D:\NapCat_publish`），无需手动选择 |
+| 卸载 | 退出码 **0**；程序文件全部删除（安装目录清空） |
+| **卸载保留用户数据** | ✅ `%APPDATA%\feiyu-desktop-control-center\` 下的设置与标记文件**均保留**（`deleteAppDataOnUninstall: false`） |
+| 代码签名 | ⚠️ 未签名（无证书）。Windows SmartScreen 可能提示「未知发布者」 |
 
-### 3.3 沙箱环境的已知限制
+> **注意**：卸载后若安装目录残留为空目录，属 NSIS 卸载器自删除的正常现象；
+> 但**残留空目录会导致后续重新安装失败**（安装器返回 1），重装前需先删掉该空目录。
 
-当前开发沙箱缺少创建符号链接的权限，electron-builder 在生成 NSIS/portable 时
-需要解压 `winCodeSign`/`nsis` 资源（内部含符号链接），会失败。
-**不要重复执行同一失败命令**；请在普通 Windows 开发机按 3.2 执行。
+### 3.4 沙箱/受限环境的已知限制
+
+- 若 `app-builder.exe` 因安全策略（程序黑名单）无法执行，签名环节会失败。
+  按上文命令加 `-c.win.signAndEditExecutable=false` 即可跳过，不需要重复尝试其它参数组合。
+- 打包本身不依赖符号链接权限（已实测 `fs.symlinkSync` 可用）。
 
 ---
 

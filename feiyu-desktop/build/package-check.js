@@ -97,6 +97,26 @@ const nsis = (pkg.build && pkg.build.nsis) || {};
 if (nsis.deleteAppDataOnUninstall === false) ok('nsis.deleteAppDataOnUninstall=false（卸载保留用户数据）');
 else warn('未显式设置 nsis.deleteAppDataOnUninstall=false，默认行为随 electron-builder 版本变化');
 
+// 11) 打包产物内容检查（若已构建）：产物内不得含密钥/配置/日志数据文件
+const asarPath = path.join(ROOT, 'dist', 'win-unpacked', 'resources', 'app.asar');
+if (fs.existsSync(asarPath)) {
+  try {
+    const asar = require(path.join(ROOT, 'node_modules', '@electron', 'asar'));
+    const list = asar.listPackage(asarPath);
+    const dataRe = /(^|[\\/])(secrets\.json|ai_config\.json|feiyu_provider_secrets\.json|feiyu_providers\.json|feiyu_personalities\.json)$/i;
+    const dataFiles = list.filter((f) => dataRe.test(f));
+    const logFiles = list.filter((f) => /\.log$/i.test(f));
+    if (dataFiles.length) bad('打包产物含数据文件: ' + dataFiles.join(', '));
+    else ok('打包产物不含密钥/配置数据文件');
+    if (logFiles.length) bad('打包产物含日志文件: ' + logFiles.join(', '));
+    else ok('打包产物不含日志文件');
+  } catch (e) {
+    warn('无法检查打包产物内容: ' + e.message);
+  }
+} else {
+  console.log('  · 尚未构建（无 dist/win-unpacked/resources/app.asar），跳过产物内容检查');
+}
+
 if (warnings.length) console.log('\n提示：' + warnings.length + ' 项非阻断警告');
 if (errors.length) { console.error('\n打包前检查未通过：' + errors.length + ' 项'); process.exit(1); }
 console.log('\n✅ 打包前检查通过');

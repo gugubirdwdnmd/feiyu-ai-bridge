@@ -257,6 +257,16 @@ D:\NapCat_publish\feiyu-desktop\dist\win-unpacked\resources\app.asar    (165,030
 **NSIS 安装版 / 便携版**：受 sandbox 符号链接权限限制**无法在本环境生成**。
 按任务书要求**未重复执行同一失败操作**，改为在 README 中给出普通 Windows 开发机的可复现步骤。
 
+> ⚠️ **勘误（发布验收轮次修正）**：上述「符号链接权限」结论**不正确**。
+> 复测证明本环境**可以创建符号链接与目录联接**（`fs.symlinkSync` 均成功），
+> NSIS 安装包实际构建成功（EXIT=0）。此前失败的真正原因是
+> **签名步骤**（`app-builder.exe` 在签名环节无法执行），而非符号链接。
+> 正确的构建命令为：
+> ```
+> CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win nsis -c.win.signAndEditExecutable=false
+> ```
+> 详见 `docs/RELEASE_ACCEPTANCE_REPORT.md`。
+
 ---
 
 ## 七、集中测试结果（实际输出）
@@ -395,7 +405,7 @@ SMOKE_OK handlers=39
 
 | 项 | 原因 |
 | --- | --- |
-| NSIS 安装包 / 便携版产物 | 沙箱缺符号链接权限；README 已给出普通 Windows 开发机复现步骤 |
+| NSIS 安装包 / 便携版产物 | ~~沙箱缺符号链接权限~~ **（勘误）实为签名步骤失败；用 `-c.win.signAndEditExecutable=false` 已成功产出 NSIS 安装包** | 已解决，见发布验收报告 |
 | 真实 `safeStorage` 加密落盘 | 冒烟确认 safeStorage **可用**且 codec 注入成功，但未对真实密钥文件执行迁移（不触及真实凭据） |
 | 真实 Provider 的 `/api/usage` 联调 | 需机器人运行中且会访问真实服务；本轮未重启任何服务 |
 | Windows 真实安装/升级/卸载流程 | 无干净 Windows 环境；`deleteAppDataOnUninstall=false` 为配置层保证 |
@@ -421,7 +431,7 @@ npm run package-check  # 打包前静态检查
 
 | # | 问题 | 阻塞原因 | 影响 |
 | --- | --- | --- | --- |
-| 1 | NSIS 安装包 / 便携版未生成 | 沙箱无符号链接权限（app-builder 解压 winCodeSign/nsis 需符号链接） | 需在普通 Windows 开发机执行，步骤已写入 README §3.2 |
+| 1 | NSIS 安装包 / 便携版未生成 | ~~沙箱无符号链接权限~~ **（勘误）真实原因是签名步骤；已用 `-c.win.signAndEditExecutable=false` 成功生成 NSIS 安装包并完成安装/卸载实测** | 已解决 |
 | 2 | 机器人 `secrets.json` 仍为明文 | bot 进程无 safeStorage，需明文调用 API | 有意为之，界面与 README 已注明；缓解手段是文件权限 + 目录隔离 |
 | 3 | Provider 应用后需重启 AI 桥才生效 | 机器人核心按单 Provider 启动时读取配置，无热切换 | 已在界面与返回 note 注明；下阶段可做热切换 |
 | 4 | `renderer sandbox` 未启用 | `sandbox:false`（preload 需 require 本地模块） | 影响有限：preload 只暴露 `invoke`，已静态断言无高危能力 |

@@ -23,29 +23,55 @@ function backupDir(botDir, id) {
   return path.join(botDir, 'backups', 'feiyu-provider-switch-' + Date.now() + (id ? '-' + String(id).slice(0, 8) : ''));
 }
 
-/** 备份当前运行配置（ai_config.json + secrets.json）。返回 {dir, copied}。 */
+/**
+ * 备份当前运行配置（ai_config.json + secrets.json）。
+ *
+ * 返回 {dir, copied, manifest}：
+ *  - copied：本轮实际复制出的文件
+ *  - manifest：记录每个文件在备份时刻**是否存在**。
+ *    验收发现：全新 botDir（原本没有这两个文件）时 copied 为空 → 回滚无内容可还原，
+ *    会留下「配置已写入但密钥写入失败」的半应用状态。
+ *    manifest 记录「原本不存在」，回滚时据此删除本次新建的文件，恢复到应用前状态。
+ */
 function backupCurrent(botDir, id) {
   const dir = backupDir(botDir, id);
   try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
   const copied = [];
+  const manifest = {};
   for (const f of ['ai_config.json', 'secrets.json']) {
     const src = path.join(botDir, f);
-    if (fs.existsSync(src)) {
-      try { fs.copyFileSync(src, path.join(dir, f)); copied.push(f); } catch (_) {}
+    const existed = fs.existsSync(src) && fs.statSync(src).isFile();
+    manifest[f] = existed;
+    if (existed) {
+      try { fs.copyFileSync(src, path.join(dir, f)); copied.push(f); } catch (_) { manifest[f] = 'copy_failed'; }
     }
   }
-  return { dir, copied };
+  // 写出 manifest，供 restoreFrom 判定「原本不存在 → 回滚时删除」
+  try { fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8'); } catch (_) {}
+  return { dir, copied, manifest };
 }
 
-/** 用备份还原（回滚）。 */
+/**
+ * 用备份还原（回滚）。
+ * 依据 manifest：备份时存在 → 复制回来；备份时不存在 → 删除本次新建的文件。
+ */
 function restoreFrom(botDir, dir) {
   const restored = [];
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf-8')); } catch (_) {}
   for (const f of ['ai_config.json', 'secrets.json']) {
     const src = path.join(dir, f);
-    if (!fs.existsSync(src)) continue;
+    const dst = path.join(botDir, f);
+    const existedBefore = manifest ? manifest[f] === true : null;
+    if (!fs.existsSync(src)) {
+      // 备份时不存在该文件 → 回滚 = 删除本次新建的
+      if (existedBefore === false) {
+        try { if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true }); restored.push(f + '(removed)'); } catch (_) {}
+      }
+      continue;
+    }
     try {
       const data = fs.readFileSync(src);
-      const dst = path.join(botDir, f);
       const tmp = dst + '.tmp.' + process.pid;
       fs.writeFileSync(tmp, data);
       fs.renameSync(tmp, dst);
@@ -92,14 +118,17 @@ function previewSwitch(botDir, id) {
  * 执行切换：备份 → 写配置 → 写密钥 → 回读校验 → 失败回滚。
  * 不重启任何进程。
  */
-function applySwitch(botDir, id, { backup = true } = {}) {
+function applySwitch(botDir, id, { backup = true, deps = {} } = {}) {
   const patch = providerService.applyPatch(botDir, id);
   if (!patch.ok) return { ok: false, error: patch.error };
 
   let bk = null;
   if (backup) {
     bk = backupCurrent(botDir, id);
-    if (!bk.copied.length) bk = null; // 无可备份内容（例如首次配置），不阻断
+    // 注意：即使 copied 为空（全新 botDir，原本没有配置文件）也**必须保留 bk**——
+    // 其 manifest 记录了「原本不存在」，回滚时据此删除本次新建的文件，
+    // 否则会留下「配置已写入、密钥写入失败」的半应用状态。
+    if (!fs.existsSync(path.join(bk.dir, 'manifest.json'))) bk = null; // 备份本身失败，不做回滚
   }
 
   const c = configService.applyConfig(botDir, patch.config);
@@ -107,7 +136,7 @@ function applySwitch(botDir, id, { backup = true } = {}) {
     const rb = bk ? restoreFrom(botDir, bk.dir) : null;
     return { ok: false, error: (c.errors || []).join('；') || '写入配置失败', rolledBack: !!rb, backupDir: bk ? bk.dir : null };
   }
-  const s = secretService.write(botDir, patch.secret);
+  const s = (deps.writeSecret || secretService.write)(botDir, patch.secret);
   if (!s.ok) {
     const rb = bk ? restoreFrom(botDir, bk.dir) : null;
     return { ok: false, error: s.error || '写入密钥失败', rolledBack: !!rb, backupDir: bk ? bk.dir : null };

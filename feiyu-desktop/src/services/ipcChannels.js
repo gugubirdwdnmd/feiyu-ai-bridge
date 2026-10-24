@@ -7,6 +7,8 @@ const CHANNELS = {
   APP_VERSION: 'app:version',
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
+  // 机器人目录定位状态（打包后能否定位到 botDir / 未找到时的原因）
+  BOTDIR_STATUS: 'botdir:status',
   CONFIG_READ: 'config:read',
   CONFIG_APPLY: 'config:apply',
   PERSONALITY_READ: 'personality:read',
@@ -111,6 +113,7 @@ function validate(channel, args) {
     case CHANNELS.PROC_STATUS:
     case CHANNELS.SETTINGS_GET:
     case CHANNELS.APP_VERSION:
+    case CHANNELS.BOTDIR_STATUS:
     case CHANNELS.CREDENTIAL_STATUS:
     case CHANNELS.CREDENTIAL_MIGRATE:
     case CHANNELS.PERSONALITY_TEMPLATE_LIST:

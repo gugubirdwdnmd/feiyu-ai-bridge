@@ -111,7 +111,13 @@ function migrateSecretsToEncrypted(p) {
   const bkDir = path.join(p, 'backups', 'feiyu-provider-secrets-' + Date.now());
   try { fs.mkdirSync(bkDir, { recursive: true }); fs.copyFileSync(fp, path.join(bkDir, 'feiyu_provider_secrets.json')); }
   catch (e) { return { migrated: false, error: '备份失败: ' + e.message }; }
-  saveSecrets(p, plain);
+  // 备份已就位后才允许写入；写失败时用备份还原，保证原文件不丢
+  let wrote = false;
+  try { saveSecrets(p, plain); wrote = true; }
+  catch (e) {
+    try { fs.copyFileSync(path.join(bkDir, 'feiyu_provider_secrets.json'), fp); } catch (_) {}
+    return { migrated: false, error: '写入失败，已回滚: ' + e.message, backupDir: bkDir };
+  }
   const reloaded = loadSecrets(p);
   const ids = new Set([...Object.keys(plain), ...Object.keys(reloaded)]);
   let ok = true;
@@ -124,7 +130,7 @@ function migrateSecretsToEncrypted(p) {
     try { fs.copyFileSync(path.join(bkDir, 'feiyu_provider_secrets.json'), fp); } catch (_) {}
     return { migrated: false, error: '校验失败，已回滚', backupDir: bkDir };
   }
-  return { migrated: true, verified: true, backupDir: bkDir };
+  return { migrated: true, verified: true, backupDir: bkDir, wrote };
 }
 
 /** 判断 URL 是否指向内网/回环/链路本地（非阻断：仅提示，避免被用作内网访问入口）。 */
@@ -254,10 +260,34 @@ function setDefault(p, id) {
  * 清理「无主密钥」：密钥库里存在、但注册表中已无对应 Provider 的条目。
  * 正常删除 Provider 时密钥已同步删除；此函数用于修复历史残留（例如迁移前遗留）。
  * 默认 dry-run，只报告；confirm=true 时才真正删除。
+ *
+ * 安全约束（验收发现并修复）：
+ *  注册表文件缺失或损坏时，load() 会返回空 providers 列表 —— 若直接比对，
+ *  密钥库里的**全部**密钥都会被误判为孤儿并删除（凭据全丢）。
+ *  因此这里要求：注册表必须存在、可解析、且至少含一个 Provider，才允许清理。
  */
 function pruneOrphanSecrets(p, { confirm = false } = {}) {
   const w = assertWritable(p);
   if (!w.ok) return { ok: false, error: w.error, orphans: [] };
+  // 注册表缺失 → 无法判断谁是孤儿，绝不清理
+  if (!fs.existsSync(providersPath(p))) {
+    return { ok: false, error: 'Provider 注册表不存在，无法判断孤儿密钥（已跳过清理）', orphans: [], pruned: [] };
+  }
+  let parsed = null;
+  try { parsed = JSON.parse(fs.readFileSync(providersPath(p), 'utf-8')); } catch (e) {
+    return { ok: false, error: 'Provider 注册表无法解析（可能已损坏），已跳过清理：' + e.message, orphans: [], pruned: [] };
+  }
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.providers)) {
+    return { ok: false, error: 'Provider 注册表结构异常，已跳过清理', orphans: [], pruned: [] };
+  }
+  if (!parsed.providers.length) {
+    // 空注册表 + 有密钥 = 高危组合（可能注册表被误清空），拒绝清理
+    const sec0 = loadSecrets(p);
+    if (Object.keys(sec0).length) {
+      return { ok: false, error: 'Provider 注册表为空但密钥库非空，疑似注册表丢失，已跳过清理', orphans: [], pruned: [] };
+    }
+    return { ok: true, orphans: [], pruned: [], dryRun: !confirm };
+  }
   const data = load(p);
   const ids = new Set(data.providers.map((x) => x.id));
   const sec = loadSecrets(p);

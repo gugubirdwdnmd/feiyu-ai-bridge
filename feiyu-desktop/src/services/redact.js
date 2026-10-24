@@ -8,7 +8,14 @@ const PATTERNS = [
   // API Key：sk- 开头长串
   { name: 'apikey', re: /sk-[A-Za-z0-9_-]{12,}/g, mask: 'sk-<KEY>' },
   // Windows 绝对路径（盘符开头，前面不是字母/数字，避免误伤 https://）
-  { name: 'winpath', re: /(?<![A-Za-z0-9])([A-Za-z]:(?:\\[^\\s"'<>|]+)+)/g, mask: '<本地路径>' },
+  // 字符类必须是 [^\\\s"'<>|]：
+  //   - \\ 排除路径分隔符本身
+  //   - \s 排除空白（结束当前路径片段）
+  // 历史缺陷：曾写成 [^\\s"'<>|]，在字符类里 \s 被当作字面量 's'，
+  //   导致首段含 s 的路径（如 D:\some\path、D:\secret\x）完全不被脱敏，
+  //   且 C:\Users\me\x 只替换掉 "C:\U"、尾部 "sers\me\x" 泄漏。
+  //   与 ai_bridge.js 的 LEAK_RULES.winpath 口径保持一致（那边是 [^\s"'<>|]）。
+  { name: 'winpath', re: /(?<![A-Za-z0-9])([A-Za-z]:(?:\\[^\\\s"'<>|]+)+)/g, mask: '<本地路径>' },
   // 本地回环地址 + 端口
   { name: 'localport', re: /(?:127\.0\.0\.1|localhost|0\.0\.0\.0):\d{2,5}/g, mask: '<本地地址>' },
   // 内部组件名
