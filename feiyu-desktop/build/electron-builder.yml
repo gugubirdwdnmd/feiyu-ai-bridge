@@ -1,0 +1,21 @@
+appId: com.feiyu.desktop
+productName: 肥鱼桌面控制中心
+files:
+  - src/**/*
+  - renderer/**/*
+  - package.json
+directories:
+  output: dist
+  buildResources: build
+win:
+  target:
+    - nsis
+    - portable
+  arch:
+    - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+portable:
+  artifactName: 肥鱼桌面控制中心-${version}-portable.${ext}

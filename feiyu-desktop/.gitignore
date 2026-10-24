@@ -1,0 +1,6 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+# 桌面端自身不提交用户数据/构建产物；机器人密钥与真实配置由仓库根 .gitignore 排除
