@@ -67,6 +67,13 @@ const CHANNELS = {
   COMFY_RELEASE: 'comfy:release',
   COMFY_INSTALL: 'comfy:install',
   COMFY_PICKDIR: 'comfy:pickDir',
+  // 主题工坊（主题只存 userData/theme.json，与机器人目录完全分离）
+  THEME_GET: 'theme:get',
+  THEME_SAVE: 'theme:save',
+  THEME_RESET: 'theme:reset',
+  THEME_PRESETS: 'theme:presets',
+  THEME_EXPORT: 'theme:export',
+  THEME_IMPORT: 'theme:import',
 };
 
 const ALLOWED_RANGE = ['today', 'yesterday', '7d', 'month', 'all'];
@@ -223,6 +230,20 @@ function validate(channel, args) {
       if (!isObject(args) || typeof args.dir !== 'string' || !args.dir.trim()) return { ok: false, error: '需要 {dir: string}' };
       if (args.variant != null && !['nvidia', 'amd', 'intel', 'nvidia_arm64', 'nvidia_cu126'].includes(args.variant)) {
         return { ok: false, error: 'variant 必须是 nvidia/amd/intel/nvidia_arm64/nvidia_cu126' };
+      }
+      return { ok: true };
+    // —— 主题工坊 ——
+    case CHANNELS.THEME_GET:
+    case CHANNELS.THEME_RESET:
+    case CHANNELS.THEME_PRESETS:
+    case CHANNELS.THEME_EXPORT:
+      return { ok: true };
+    case CHANNELS.THEME_SAVE:
+      if (!isObject(args) || !isObject(args.theme)) return { ok: false, error: '需要 {theme: object}' };
+      return { ok: true };
+    case CHANNELS.THEME_IMPORT:
+      if (args == null || (typeof args.json !== 'string' && !isObject(args.json))) {
+        return { ok: false, error: '需要 {json: string}' };
       }
       return { ok: true };
     default:

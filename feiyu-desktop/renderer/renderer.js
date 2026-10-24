@@ -13,6 +13,7 @@ let editPid = null;                              // 正在编辑的 Provider id
 let usageFilter = { provider: '', model: '', status: '' };
 let usageCurrent = null;                         // 当前用量数据（筛选用）
 let usagePrice = null;                           // 当前价格表
+let themeState = null;                           // 当前主题（{theme, derived, presets}）
 
 function shortUrl(u) { if (!u) return '—'; try { const x = new URL(u); return x.host + x.pathname; } catch (_) { return u; } }
 function csvCell(v) { const s = v == null ? '' : String(v); if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'; return s; }
@@ -75,8 +76,213 @@ async function refreshBotDirLabel() {
 
 function render(page) {
   refreshBotDirLabel();
-  const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, logs: pageLogs, importexport: pageImportExport, about: pageAbout };
+  const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, theme: pageTheme, logs: pageLogs, importexport: pageImportExport, about: pageAbout };
   (map[page] || pageOverview)();
+}
+
+/* ---------- 主题工坊 ---------- */
+const FX_LABEL = { none: '无动画', bubbles: '气泡上浮', aurora: '极光漂移', waves: '波浪条纹' };
+const FX_ORDER = ['none', 'bubbles', 'aurora', 'waves'];
+
+function themeCssVarsCss(cssVars) {
+  return Object.keys(cssVars || {}).map((k) => k + ':' + cssVars[k]).join(';');
+}
+
+async function loadTheme() {
+  const r = await invoke(C.THEME_GET);
+  if (!r || !r.ok) return null;
+  themeState = { theme: r.theme, derived: r.derived, presets: r.presets || [] };
+  applyThemeToPage(r.theme, r.derived);
+  return themeState;
+}
+
+/** 把主题写进 CSS 变量并驱动背景动画。 */
+function applyThemeToPage(theme, derived) {
+  try {
+    if (window.FeiyuTheme) window.FeiyuTheme.apply(theme, derived);
+    else {
+      // 主题脚本不可用时退化为只写变量（保证界面仍可读）
+      const root = document.documentElement;
+      const vars = (derived && derived.cssVars) || {};
+      for (const k of Object.keys(vars)) root.style.setProperty(k, String(vars[k]));
+    }
+  } catch (_) {}
+}
+
+async function pageTheme() {
+  content.innerHTML = '<h2>主题工坊</h2><div id="th"></div>';
+  const box = $('#th');
+  box.innerHTML = '<div class="hint">加载中…</div>';
+
+  const st = await loadTheme();
+  if (!st) { box.innerHTML = '<div class="hint err">主题不可用</div>'; return; }
+  const t = st.theme;
+  const presets = st.presets || [];
+
+  const presetCards = presets.map((p) => `
+    <button class="preset" data-preset="${esc(p.key)}">
+      <div class="sw"><i style="background:${esc(p.bg)}"></i><i style="background:${esc(p.a)}"></i><i style="background:${esc(p.b)}"></i></div>
+      <div class="pn">${esc(p.name)}</div>
+      <div class="pc">${esc(p.bg)} / ${esc(p.a)} / ${esc(p.b)}</div>
+    </button>`).join('');
+
+  box.innerHTML = `
+    <div class="section">
+      <h3>配色方案预设</h3>
+      <div class="hint">点击任一预设即可应用该配色（背景 / 主强调色 / 辅助强调色），其余颜色自动推算。</div>
+      <div class="preset-grid" id="presetGrid">${presetCards}</div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="thApply">应用主题</button>
+        <button class="btn sec" id="thReset">恢复默认</button>
+      </div>
+      <div class="hint" id="thMsg"></div>
+    </div>
+
+    <div class="section">
+      <h3>自定义调色盘</h3>
+      <div class="hint">可修改背景色、主强调色、辅助强调色；面板色、正文色、次要文字色由背景亮度自动推算（深色背景用浅色文字，浅色背景用深色文字）。</div>
+      <div class="color-row">
+        <input type="color" id="cBg" value="${esc(t.bg)}" />
+        <div><div class="cn">背景色</div><div class="hint">${esc(t.bg)}</div></div>
+      </div>
+      <div class="color-row">
+        <input type="color" id="cA" value="${esc(t.a)}" />
+        <div><div class="cn">主强调色</div><div class="hint">${esc(t.a)}</div></div>
+      </div>
+      <div class="color-row">
+        <input type="color" id="cB" value="${esc(t.b)}" />
+        <div><div class="cn">辅助强调色</div><div class="hint">${esc(t.b)}</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>背景动画</h3>
+      <label>动画效果</label>
+      <select id="thFx">
+        ${FX_ORDER.map((k) => `<option value="${k}"${t.fx === k ? ' selected' : ''}>${esc(FX_LABEL[k])}</option>`).join('')}
+      </select>
+      <div class="range-row">
+        <span class="cn">动画速度</span>
+        <input type="range" id="thSpeed" min="0.3" max="2.5" step="0.1" value="${t.speed}" />
+        <span class="rv" id="thSpeedV">${t.speed}</span>
+      </div>
+      <div class="hint">命中系统「减少动态效果」偏好时动画自动停止；窗口最小化或隐藏时也会暂停绘制。</div>
+    </div>
+
+    <div class="section">
+      <h3>外观</h3>
+      <div class="range-row">
+        <span class="cn">圆角</span>
+        <input type="range" id="thRadius" min="4" max="28" step="1" value="${t.radius}" />
+        <span class="rv" id="thRadiusV">${t.radius}px</span>
+      </div>
+      <div class="range-row">
+        <span class="cn">毛玻璃模糊</span>
+        <input type="range" id="thBlur" min="0" max="30" step="1" value="${t.blur}" />
+        <span class="rv" id="thBlurV">${t.blur}px</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>预览</h3>
+      <div class="preview-box" id="thPreview">
+        <div class="pv-bar"></div>
+        <div class="pv-bar2"></div>
+        <div class="pv-text">正文示例：机器人运行正常</div>
+        <div class="pv-muted">次要文字示例：用量来自机器人真实记录</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>导出与导入</h3>
+      <div class="hint">导出为主题 JSON 文本，可复制到别处保存；导入会先校验，非法 JSON 不会改动当前主题。</div>
+      <div class="row">
+        <button class="btn sec" id="thExport">复制主题 JSON</button>
+        <button class="btn sec" id="thImport">粘贴并应用主题</button>
+      </div>
+      <label>主题 JSON</label>
+      <textarea id="thJson" style="min-height:160px" placeholder="在此粘贴主题 JSON，然后点「粘贴并应用主题」"></textarea>
+      <div class="hint" id="thJsonMsg"></div>
+    </div>`;
+
+  // 当前编辑中的草稿（未保存）
+  let draft = Object.assign({}, t);
+  let presetKey = null;
+
+  function syncDraftInputs() {
+    $('#cBg').value = draft.bg;
+    $('#cA').value = draft.a;
+    $('#cB').value = draft.b;
+    $('#thFx').value = draft.fx;
+    $('#thSpeed').value = draft.speed;
+    $('#thSpeedV').textContent = String(draft.speed);
+    $('#thRadius').value = draft.radius;
+    $('#thRadiusV').textContent = draft.radius + 'px';
+    $('#thBlur').value = draft.blur;
+    $('#thBlurV').textContent = draft.blur + 'px';
+  }
+
+  async function saveDraft(msg) {
+    const r = await invoke(C.THEME_SAVE, { theme: draft });
+    if (!r || !r.ok) {
+      $('#thMsg').innerHTML = '<span class="err">' + esc((r && r.error) || '保存失败') + '</span>';
+      return false;
+    }
+    draft = Object.assign({}, r.theme);
+    themeState = { theme: r.theme, derived: r.derived, presets: themeState ? themeState.presets : [] };
+    applyThemeToPage(r.theme, r.derived);
+    $('#thMsg').innerHTML = '<span class="ok">' + esc(msg || '主题已应用') + '</span>';
+    return true;
+  }
+
+  // 预设点击 → 立刻应用
+  box.querySelectorAll('[data-preset]').forEach((b) => b.onclick = async () => {
+    const key = b.dataset.preset;
+    const p = presets.find((x) => x.key === key);
+    if (!p) return;
+    presetKey = key;
+    draft = Object.assign({}, draft, { bg: p.bg, a: p.a, b: p.b });
+    syncDraftInputs();
+    const ok = await saveDraft('已应用配色方案：' + p.name);
+    if (ok) {
+      box.querySelectorAll('.preset').forEach((x) => x.classList.toggle('active', x.dataset.preset === key));
+      pageTheme();
+    }
+  });
+
+  $('#cBg').oninput = (e) => { draft.bg = e.target.value; };
+  $('#cA').oninput = (e) => { draft.a = e.target.value; };
+  $('#cB').oninput = (e) => { draft.b = e.target.value; };
+  $('#thFx').onchange = (e) => { draft.fx = e.target.value; };
+  $('#thSpeed').oninput = (e) => { draft.speed = Number(e.target.value); $('#thSpeedV').textContent = String(draft.speed); };
+  $('#thRadius').oninput = (e) => { draft.radius = Number(e.target.value); $('#thRadiusV').textContent = draft.radius + 'px'; };
+  $('#thBlur').oninput = (e) => { draft.blur = Number(e.target.value); $('#thBlurV').textContent = draft.blur + 'px'; };
+
+  $('#thApply').onclick = async () => { await saveDraft('主题已应用'); };
+  $('#thReset').onclick = async () => {
+    const r = await invoke(C.THEME_RESET);
+    if (!r || !r.ok) { $('#thMsg').innerHTML = '<span class="err">' + esc((r && r.error) || '恢复失败') + '</span>'; return; }
+    $('#thMsg').innerHTML = '<span class="ok">已恢复默认主题</span>';
+    pageTheme();
+  };
+  $('#thExport').onclick = async () => {
+    const r = await invoke(C.THEME_EXPORT);
+    if (!r || !r.ok) { $('#thJsonMsg').innerHTML = '<span class="err">导出失败</span>'; return; }
+    $('#thJson').value = r.json;
+    $('#thJsonMsg').innerHTML = '<span class="ok">已生成主题 JSON，可复制保存</span>';
+  };
+  $('#thImport').onclick = async () => {
+    const json = $('#thJson').value.trim();
+    if (!json) { $('#thJsonMsg').innerHTML = '<span class="err">请先粘贴主题 JSON</span>'; return; }
+    const r = await invoke(C.THEME_IMPORT, { json });
+    if (!r || !r.ok) {
+      // 非法 JSON → 当前主题保持不变
+      $('#thJsonMsg').innerHTML = '<span class="err">导入失败：' + esc((r && r.error) || '格式不合法') + '（当前主题未改动）</span>';
+      return;
+    }
+    $('#thJsonMsg').innerHTML = '<span class="ok">导入成功，主题已应用</span>';
+    pageTheme();
+  };
 }
 
 /* ---------- 总览 ---------- */
@@ -938,4 +1144,9 @@ async function pageAbout() {
   $('#pickBtn2').onclick = async () => { const d = await pickBotDir(); if (d) pageAbout(); };
 }
 
-render('overview');
+// 启动：先加载主题（写 CSS 变量 + 启动背景动画），再渲染首页。
+// 主题加载失败也不能阻塞启动 —— 回退默认主题即可。
+(async () => {
+  try { await loadTheme(); } catch (_) {}
+  render('overview');
+})();

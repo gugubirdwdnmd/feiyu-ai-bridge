@@ -20,6 +20,7 @@ const priceService = require('../services/priceService');
 const credentialStore = require('../services/credentialStore');
 const skillService = require('../services/skillService');
 const comfyService = require('../services/comfyService');
+const themeService = require('../services/themeService');
 const botDirResolver = require('../services/botDirResolver');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
@@ -486,6 +487,45 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
       const root = comfyService.resolveComfyRoot(d);
       return { ok: true, dir: d, root: root, valid: !!root };
     } catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // ================= 主题工坊 =================
+  // 主题只存 userData/theme.json：与 ai_config.json / secrets.json / 机器人目录完全分离。
+  // 读：缺失/损坏/校验失败一律回退默认主题；写：临时文件 + 原子重命名。
+  const themeDir = () => getUserDataDir();
+  ipcMain.handle(CHANNELS.THEME_GET, () => {
+    const r = themeService.readTheme(themeDir());
+    return {
+      ok: true,
+      theme: r.theme,
+      derived: r.derived,
+      fallback: r.fallback,
+      error: r.error,
+      presets: themeService.listPresets(),
+    };
+  });
+  ipcMain.handle(CHANNELS.THEME_SAVE, (e, args) => {
+    const v = validate(CHANNELS.THEME_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = themeService.saveTheme(themeDir(), args.theme);
+    if (!r.ok) return { ok: false, error: r.error, errors: r.errors || [] };
+    return { ok: true, theme: r.theme, derived: r.derived, warnings: r.warnings || [] };
+  });
+  ipcMain.handle(CHANNELS.THEME_RESET, () => {
+    const r = themeService.resetTheme(themeDir());
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, theme: r.theme, derived: r.derived };
+  });
+  ipcMain.handle(CHANNELS.THEME_PRESETS, () => ({ ok: true, presets: themeService.listPresets() }));
+  ipcMain.handle(CHANNELS.THEME_EXPORT, () => {
+    const r = themeService.exportTheme(themeDir());
+    return { ok: true, json: r.json, theme: r.theme, derived: r.derived };
+  });
+  ipcMain.handle(CHANNELS.THEME_IMPORT, (e, args) => {
+    const v = validate(CHANNELS.THEME_IMPORT, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = themeService.importTheme(themeDir(), args.json);
+    // 非法 JSON / 校验失败 → 不改动当前主题
+    if (!r.ok) return { ok: false, error: r.error, errors: r.errors || [], applied: false };
+    return { ok: true, applied: true, theme: r.theme, derived: r.derived, warnings: r.warnings || [] };
   });
 }
 

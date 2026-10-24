@@ -12,10 +12,16 @@
  */
 const { app, ipcMain, BrowserWindow } = require('electron');
 const path = require('path');
+const os = require('os');
+const fs = require('fs');
 
 const { CHANNELS } = require('./src/services/ipcChannels');
 
 let failed = 0;
+
+// 隔离 userData：冒烟不得读写真实用户数据目录（theme.json 等）
+const smokeUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'feiyu-smoke-'));
+try { app.setPath('userData', smokeUserData); } catch (_) {}
 
 app.whenReady().then(async () => {
   // 1) 注册全部处理器
@@ -84,6 +90,45 @@ app.whenReady().then(async () => {
   if (!ctxOk || !nodeOk) { console.error('❌ Electron 安全配置不符'); failed = 1; }
   else console.log('✅ Electron 安全配置正确');
 
+  // 5) 主题工坊：主题页可加载 + 主题 IPC 往返可用 + 主题只落在隔离 userData
+  try {
+    const themeService = require('./src/services/themeService');
+    const t = await win.webContents.executeJavaScript(
+      `(async () => {
+        const r = await window.feiyu.invoke(window.feiyu.channels.THEME_GET);
+        return { ok: !!r && r.ok, hasTheme: !!(r && r.theme && r.theme.bg), hasDerived: !!(r && r.derived && r.derived.cssVars), presets: (r && r.presets || []).length };
+      })()`);
+    if (t.ok && t.hasTheme && t.hasDerived) console.log('✅ 主题 IPC 可用（THEME_GET 返回主题与派生色）');
+    else { console.error('❌ 主题 IPC 异常: ' + JSON.stringify(t)); failed = 1; }
+    if (t.presets === 6) console.log('✅ 主题预设 6 套可用');
+    else { console.error('❌ 主题预设数量异常: ' + t.presets); failed = 1; }
+
+    // 切到主题页并确认渲染出内容
+    const page = await win.webContents.executeJavaScript(
+      `(async () => {
+        const btn = document.querySelector('#nav button[data-page="theme"]');
+        if (!btn) return { ok: false, reason: '导航缺少主题按钮' };
+        btn.click();
+        await new Promise(r => setTimeout(r, 600));
+        const h2 = document.querySelector('#content h2');
+        const vars = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+        return { ok: true, title: h2 ? h2.textContent : '', bgVar: vars, hasCanvas: !!document.getElementById('bgCanvas') };
+      })()`);
+    if (page.ok && page.title === '主题工坊') console.log('✅ 主题页可加载（标题：' + page.title + '）');
+    else { console.error('❌ 主题页加载异常: ' + JSON.stringify(page)); failed = 1; }
+    if (page.bgVar) console.log('✅ 主题 CSS 变量已生效（--bg = ' + page.bgVar + '）');
+    else { console.error('❌ --bg 变量未写入'); failed = 1; }
+
+    // 主题文件只落在隔离 userData
+    const themeFile = path.join(userData, themeService.THEME_FILE);
+    const exists = fs.existsSync(themeFile);
+    console.log(exists ? '✅ 主题文件落在隔离 userData: ' + themeFile : '· 尚未写入主题文件（未保存主题时不产生文件）');
+  } catch (e) {
+    console.error('❌ 主题工坊冒烟异常: ' + e.message);
+    failed = 1;
+  }
+
   console.log(failed ? 'SMOKE_FAIL' : 'SMOKE_OK handlers=' + Object.keys(CHANNELS).length);
+  try { fs.rmSync(smokeUserData, { recursive: true, force: true }); } catch (_) {}
   app.exit(failed);
 });

@@ -33,14 +33,16 @@ const REQUIRED = [
   'src/services/credentialStore.js', 'src/services/providerService.js', 'src/services/providerApplyService.js',
   'src/services/personalityTemplateService.js', 'src/services/usageService.js', 'src/services/priceService.js',
   'src/services/skillService.js', 'src/services/comfyService.js',
-  'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css',
+  // v1.1.0 主题工坊
+  'src/services/themeService.js',
+  'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css', 'renderer/theme.js',
 ];
 for (const f of REQUIRED) {
   if (fs.existsSync(path.join(ROOT, f))) ok('存在 ' + f); else bad('缺失 ' + f);
 }
 
 // 3) 不应把真实机密打进包：仓库内不得有 secrets.json / ai_config.json
-for (const f of ['secrets.json', 'ai_config.json', 'feiyu_provider_secrets.json', 'feiyu_providers.json', 'feiyu_personalities.json', 'feiyu_skills.json']) {
+for (const f of ['secrets.json', 'ai_config.json', 'feiyu_provider_secrets.json', 'feiyu_providers.json', 'feiyu_personalities.json', 'feiyu_skills.json', 'theme.json']) {
   if (fs.existsSync(path.join(ROOT, f))) bad('仓库内含 ' + f + '（密钥/真实配置/用户数据不得入库）'); else ok('未含 ' + f);
 }
 
@@ -78,7 +80,7 @@ const found = leaks.filter((k) => preload.includes(k));
 if (found.length) bad('preload.js 疑似泄漏高危能力: ' + found.join(', ')); else ok('preload.js 未暴露 fs/child_process/shell');
 
 // 8) 不硬编码开发机路径
-const scanFiles = ['src/main.js', 'src/preload.js', 'src/ipc/handlers.js', 'renderer/renderer.js', 'src/services/configService.js', 'src/services/providerService.js'];
+const scanFiles = ['src/main.js', 'src/preload.js', 'src/ipc/handlers.js', 'renderer/renderer.js', 'src/services/configService.js', 'src/services/providerService.js', 'src/services/themeService.js', 'renderer/theme.js'];
 let hardcoded = [];
 for (const f of scanFiles) {
   const txt = read(f);
@@ -104,7 +106,7 @@ if (fs.existsSync(asarPath)) {
   try {
     const asar = require(path.join(ROOT, 'node_modules', '@electron', 'asar'));
     const list = asar.listPackage(asarPath);
-    const dataRe = /(^|[\\/])(secrets\.json|ai_config\.json|feiyu_provider_secrets\.json|feiyu_providers\.json|feiyu_personalities\.json|feiyu_skills\.json)$/i;
+    const dataRe = /(^|[\\/])(secrets\.json|ai_config\.json|feiyu_provider_secrets\.json|feiyu_providers\.json|feiyu_personalities\.json|feiyu_skills\.json|theme\.json)$/i;
     const dataFiles = list.filter((f) => dataRe.test(f));
     const logFiles = list.filter((f) => /\.log$/i.test(f));
     if (dataFiles.length) bad('打包产物含数据文件: ' + dataFiles.join(', '));
@@ -131,6 +133,40 @@ try {
   else ok('技能白名单不含 remember');
 } catch (e) {
   bad('无法校验技能白名单一致性: ' + e.message);
+}
+
+// 13) 主题工坊（v1.1.0）：CSS 变量齐全 + 主题页已进导航 + 主题只存 userData
+try {
+  const css = read('renderer/styles.css');
+  const needVars = ['--bg', '--accent', '--accent2', '--surface', '--text', '--muted', '--radius', '--blur', '--speed'];
+  const missVars = needVars.filter((v) => !css.includes(v + ':'));
+  if (missVars.length) bad('styles.css 缺少 CSS 变量: ' + missVars.join(', '));
+  else ok('styles.css 定义了全部主题 CSS 变量（' + needVars.length + ' 项）');
+
+  const html = read('renderer/index.html');
+  if (html.includes('data-page="theme"')) ok('导航含「主题工坊」入口');
+  else bad('导航缺少主题页入口（data-page="theme"）');
+  if (html.includes('theme.js')) ok('index.html 引入 renderer/theme.js');
+  else bad('index.html 未引入 renderer/theme.js');
+
+  const themeSvc = require(path.join(ROOT, 'src', 'services', 'themeService.js'));
+  if (themeSvc.THEME_FILE === 'theme.json') ok('主题文件名固定为 theme.json');
+  else bad('主题文件名应为 theme.json');
+  if (themeSvc.FX_VALUES.join(',') === 'none,bubbles,aurora,waves') ok('背景动画枚举齐全（' + themeSvc.FX_VALUES.length + ' 项）');
+  else bad('背景动画枚举不符: ' + themeSvc.FX_VALUES.join(','));
+
+  // 主题服务不得引用 botDir 概念（必须与机器人目录分离）
+  // 注意：只看代码，注释里为了说明隔离关系会提到 ai_config.json / secrets.json，
+  // 因此先剥掉行注释与块注释再匹配。
+  const themeSrc = read('src/services/themeService.js')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  if (/\bbotDir\b/.test(themeSrc)) bad('themeService.js 代码中引用了 botDir（主题必须与机器人目录分离）');
+  else ok('themeService.js 代码不引用 botDir');
+  if (/ai_config\.json|secrets\.json|feiyu_skills\.json/.test(themeSrc)) bad('themeService.js 代码中引用了机器人配置/密钥文件名');
+  else ok('themeService.js 代码不引用 ai_config.json / secrets.json / feiyu_skills.json');
+} catch (e) {
+  bad('无法校验主题工坊: ' + e.message);
 }
 
 if (warnings.length) console.log('\n提示：' + warnings.length + ' 项非阻断警告');

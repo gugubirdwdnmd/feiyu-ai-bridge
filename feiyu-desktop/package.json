@@ -1,6 +1,6 @@
 {
   "name": "feiyu-desktop-control-center",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "肥鱼桌面控制中心 —— 基于 NapCat+OneBot QQ AI 机器人的图形化管理桌面软件（配置/启停/人格/用量/日志/导入导出）",
   "main": "src/main.js",
@@ -9,7 +9,7 @@
   "engines": { "node": ">=22.0.0" },
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/ipc/handlers.js && node --check src/services/redact.js && node --check src/services/configService.js && node --check src/services/personalityService.js && node --check src/services/secretService.js && node --check src/services/usageService.js && node --check src/services/logService.js && node --check src/services/processService.js && node --check src/services/importExportService.js && node --check src/services/ipcChannels.js && node --check renderer/renderer.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/ipc/handlers.js && node --check src/services/redact.js && node --check src/services/configService.js && node --check src/services/personalityService.js && node --check src/services/secretService.js && node --check src/services/usageService.js && node --check src/services/logService.js && node --check src/services/processService.js && node --check src/services/importExportService.js && node --check src/services/ipcChannels.js && node --check src/services/themeService.js && node --check renderer/renderer.js && node --check renderer/theme.js",
     "test": "node --test",
     "package-check": "node build/package-check.js",
     "dist": "electron-builder",
