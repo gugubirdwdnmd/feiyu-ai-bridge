@@ -37,6 +37,9 @@ const REQUIRED = [
   'src/services/themeService.js',
   'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css', 'renderer/theme.js',
   'build/icon.ico', 'build/icon.png', 'build/make-icon.js',
+  // v1.1.0 验收脚本
+  'build/install-chain-check.js', 'install-theme-check.js',
+  'build/upgrade-chain-check.js', 'build/upgrade-probe.js',
 ];
 for (const f of REQUIRED) {
   if (fs.existsSync(path.join(ROOT, f))) ok('存在 ' + f); else bad('缺失 ' + f);

@@ -31,7 +31,7 @@ feiyu-desktop-v1.0.0
 |---|---|---|
 | `node --test` | 326 / 326 通过 | **384 / 384 通过**（+58） |
 | `node --check` | 全通过 | 全通过 |
-| `build/package-check.js` | EXIT=0（38 项） | EXIT=0（**57 项**） |
+| `build/package-check.js` | EXIT=0（38 项） | EXIT=0（**61 项**） |
 | Electron smoke | `SMOKE_OK handlers=57` | **`SMOKE_OK handlers=63`**（+6 主题通道） |
 
 > handlers 数量如实从 57 变为 63 —— 新增 6 个主题 IPC 通道（`theme:get/save/reset/presets/export/import`），
@@ -69,6 +69,8 @@ feiyu-desktop-v1.0.0
 | `feiyu-desktop/build/after-pack-icon.js` | electron-builder afterPack 钩子：打包期注入图标 |
 | `feiyu-desktop/build/install-chain-check.js` | 安装版完整链路验收（安装→启动→改主题→重启→卸载） |
 | `feiyu-desktop/install-theme-check.js` | 安装版主题功能验收（以安装目录 asar 为代码来源） |
+| `feiyu-desktop/build/upgrade-chain-check.js` | v1.0.0 → v1.1.0 原地升级链验收（含真实用户数据目录哈希快照隔离断言） |
+| `feiyu-desktop/build/upgrade-probe.js` | 以已安装目录 asar 为代码来源的版本/用户数据探测器 |
 | `feiyu-desktop/build/icon.ico` | 应用图标（16/24/32/48/64/128/256） |
 | `feiyu-desktop/build/icon.png` | 256×256 PNG（窗口图标） |
 
@@ -570,12 +572,20 @@ $ git status --short
       导出/导入（含非法 JSON 不改动主题）→ 重启后主题保留 → 卸载（残留 0 文件）→
       用户数据 theme.json 保留
 - [x] 安装链路前后 `ai_config.json` / `secrets.json` 的 SHA-256 **完全不变**
+- [x] **v1.0.0 → v1.1.0 原地升级链**（隔离目录实测）：
+      静默安装 v1.0.0 → 首次启动（导航无「主题工坊」，符合预期）→ 生成旧版业务用户数据
+      `price.json` → **覆盖安装 v1.1.0 到同一目录** → 版本升到 1.1.0、asar 含主题文件
+      且 1.0.0 独有文件 0 个残留 → 旧 `price.json` **逐字节保留**（SHA-256 一致）
+      → 新版本能正确读出旧数据（顶层键 version/currency/unit/models）
+      → 新增「主题工坊」入口可用
+- [x] 升级链脚本内建**隔离性自动断言**：运行前后对真实用户数据目录的业务文件做
+      SHA-256 快照比对，一旦被改动即判失败（不再依赖人工核对）
 - [x] **应用图标四处一致**：安装包 / 便携版 / 主程序 exe / 窗口图标，
       均源自同一份 `build/icon.ico`，逐像素比对差异 0.00%
 - [x] 产物不含 Electron 默认图标（参考图标中心为奶白鱼身，非蓝紫默认标志）
 
 **回归**
-- [x] 节点测试 384/384、语法检查全通过、打包检查 EXIT=0（57 项）、smoke `handlers=63`
+- [x] 节点测试 384/384、语法检查全通过、打包检查 EXIT=0（61 项）、smoke `handlers=63`
 
 ### 8.2 未验证 / 受环境限制
 
@@ -586,10 +596,27 @@ $ git status --short
       但**人工逐页视觉走查、拖动滑块的原生手感、动画观感仍需在解锁环境下补做**。
 - [ ] **代码签名** —— 按你的指示不做，未写入 v1.1.0 范围。产物未签名，
       首次运行可能出现 SmartScreen 提示。
-- [ ] **升级链** —— 本轮只验了「全新安装 → 卸载」，**未做** v1.0.0 → v1.1.0 的原地升级实测
-      （v1.0.0 的升级链在 v1.0.0 验收中已验证过一次，但未用带图标的 v1.1.0 重跑）。
 - [ ] **真实机器人目录下的桌面端行为** —— 全程用模拟目录验证哈希不变，
       未在真实 `D:\NapCat` 上做任何写操作（按硬性限制）。
+
+### 8.3 一处需要你知晓的现象（已排查，非缺陷）
+
+排查升级链时发现真实用户数据目录 `%APPDATA%\feiyu-desktop-control-center` 出现了
+`theme.json`（内容为「极光预设 + 其余默认值」）与 `feiyu-settings.json`
+（内容为 `botDir = D:\NapCat_publish`）。逐一排查结论：
+
+- 逐个实测了全部 6 个会启动 Electron 的脚本
+  （`upgrade-probe` / `install-theme-check` / `theme-func-main` / `theme-portable-check` /
+  `smoke-main` / `upgrade-chain-check`），**没有任何一个写入真实目录**；
+- 用文件监视器（300ms 轮询 mtime）在脚本运行期间实时监测真实目录，**未触发任何写入**；
+- 那两个文件的内容组合（点了极光预设 + 在「关于」页选了机器人目录）与
+  **人工操作真实应用**的行为完全吻合 —— 更可能是有人在锁屏解锁后打开过真实应用。
+
+因此判定为**人工操作产生的正常用户数据**，不是测试脚本污染，也不是代码缺陷。
+为避免同类情况再次需要人工排查，升级链脚本已加入**运行前后真实目录哈希快照比对**，
+今后一旦测试脚本意外写真实目录，会立即判失败。
+
+（排查期间为做对照实验曾临时移走并已**原样还原** `theme.json`，内容与时间戳语义未变。）
 
 ---
 
@@ -598,8 +625,9 @@ $ git status --short
 1. **可读性保险的边界**：亮度阈值附近的窄带（自定义背景才可能出现）上，
    「同时对 `bg` 与 `surface2` 保持 4.5:1」在数学上不可达，此时取理论最优（实测下限 4.04:1）。
    若后续要更严格，可改为按底色分别设定文字色（会让 CSS 变量从一个变三个）。
-2. **升级链**建议在 v1.1.0 正式发布前补跑一轮（v1.0.0 → v1.1.0 原地升级 + 主题保留）。
-3. **代码签名**按你的指示不做；若将来要做，`build/no-sign.js` 需替换为真实证书流程，
+2. **代码签名**按你的指示不做；若将来要做，`build/no-sign.js` 需替换为真实证书流程，
    并注意 `win.sign` 与 `signAndEditExecutable=false` 的差别（后者会连带跳过图标注入）。
-4. **图标生成**依赖 Electron 运行时（`npx electron build/make-icon.js`），
+3. **图标生成**依赖 Electron 运行时（`npx electron build/make-icon.js`），
    改 SVG 后需重跑该命令并重新构建产物。
+4. **升级链已实测通过**（v1.0.0 → v1.1.0，见 8.1），不再需要补跑；
+   后续每个版本发布前建议沿用 `build/upgrade-chain-check.js` 跑一遍。
