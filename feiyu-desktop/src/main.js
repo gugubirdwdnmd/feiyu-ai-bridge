@@ -49,7 +49,8 @@ function isBotDir(p) {
  * 解析默认 bot 目录（机器人项目根，含 ai_bridge.js）。
  * 实现在 botDirResolver.js（纯逻辑、可单测）；此处只负责注入 Electron 路径。
  *
- * 优先级：用户设置 > 打包内 bot/ > 开发期仓库根 > exe 相对（便携/安装）> 用户主目录。
+ * 优先级：用户设置 > 打包内 bot/ > 开发期仓库根 > exe 相对（便携/安装）
+ *          > exe 祖先目录的兄弟目录扫描 > 用户主目录。
  * 绝不硬编码任何盘符或开发机路径。找不到时返回空串（界面会提示手动选择）。
  */
 function resolveDefaultBotDir() {
@@ -68,16 +69,23 @@ function resolveDefaultBotDir() {
   return r.ok ? r.botDir : '';
 }
 
+/**
+ * 首次启动时把自动发现的 botDir 记进设置。
+ *
+ * 安全约束（V1.0 验收修复）：
+ *  - **自动发现的结果不自动落盘**。原因：自动发现可能命中「源码检出 / 发布副本」
+ *    （含 ai_bridge.js 但不是用户真正的工作目录），一旦写入设置就会长期锁定错误目录，
+ *    且用户不易察觉。改为只在「用户显式选择」时才写 settings。
+ *  - 用户显式选择走 SETTINGS_SET（渲染层点「选择机器人目录」触发），不在此自动写。
+ *  - 因此本函数保留为「记录已发现的目录到内存态日志」用途，不再写盘。
+ */
 function ensureBotDirDefault() {
   const d = resolveDefaultBotDir();
   if (!d) return;
-  const sf = path.join(getUserDataDir(), 'feiyu-settings.json');
-  let s = {};
-  try { s = JSON.parse(fs.readFileSync(sf, 'utf-8')); } catch (_) {}
-  if (!s.botDir) {
-    s.botDir = d;
-    try { fs.mkdirSync(getUserDataDir(), { recursive: true }); fs.writeFileSync(sf, JSON.stringify(s, null, 2)); } catch (_) {}
-  }
+  // 仅记录，不落盘：避免把自动发现（可能是发布副本）的结果锁定为默认工作目录。
+  try {
+    console.log('[botdir] 自动发现候选目录：' + d + '（未写入设置，需用户确认后生效）');
+  } catch (_) {}
 }
 
 let win = null;

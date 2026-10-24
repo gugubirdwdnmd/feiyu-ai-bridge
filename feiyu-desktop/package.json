@@ -1,6 +1,6 @@
 {
   "name": "feiyu-desktop-control-center",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "肥鱼桌面控制中心 —— 基于 NapCat+OneBot QQ AI 机器人的图形化管理桌面软件（配置/启停/人格/用量/日志/导入导出）",
   "main": "src/main.js",

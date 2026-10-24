@@ -20,6 +20,7 @@ const priceService = require('../services/priceService');
 const credentialStore = require('../services/credentialStore');
 const skillService = require('../services/skillService');
 const comfyService = require('../services/comfyService');
+const botDirResolver = require('../services/botDirResolver');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
 
@@ -49,21 +50,38 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
   ipcMain.handle(CHANNELS.BOTDIR_STATUS, () => {
     const s = getSettings();
     const configured = s.botDir || '';
-    let exists = false, hasCore = false;
+    let exists = false, hasCore = false, isCheckout = false;
     try {
       exists = !!configured && fs.existsSync(configured);
       hasCore = exists && fs.existsSync(path.join(configured, 'ai_bridge.js'));
+      isCheckout = exists && botDirResolver.isSourceCheckout(configured);
     } catch (_) {}
     if (!configured) {
-      return { ok: true, configured: false, exists: false, hasCore: false, message: '未配置机器人目录，请点击「选择机器人目录」指定（含 ai_bridge.js 的目录）' };
+      return {
+        ok: true, configured: false, exists: false, hasCore: false, isCheckout: false,
+        message: '未配置机器人目录，请点击「选择机器人目录」指定（含 ai_bridge.js 的目录）',
+      };
     }
     if (!exists) {
-      return { ok: true, configured: true, exists: false, hasCore: false, message: '配置的机器人目录已不存在，请重新选择' };
+      return {
+        ok: true, configured: true, exists: false, hasCore: false, isCheckout: false,
+        message: '配置的机器人目录已不存在，请重新选择',
+      };
     }
     if (!hasCore) {
-      return { ok: true, configured: true, exists: true, hasCore: false, message: '机器人目录中未找到 ai_bridge.js，机器人功能可能不可用' };
+      return {
+        ok: true, configured: true, exists: true, hasCore: false, isCheckout,
+        message: '机器人目录中未找到 ai_bridge.js，机器人功能可能不可用',
+      };
     }
-    return { ok: true, configured: true, exists: true, hasCore: true, message: '机器人目录正常' };
+    if (isCheckout) {
+      // 发布副本：机器人会读写其配置与数据，需明确提示用户确认
+      return {
+        ok: true, configured: true, exists: true, hasCore: true, isCheckout: true,
+        message: '当前机器人目录是源码检出（发布副本）。机器人会读写其中的配置、记忆与日志，请确认这是你要的工作目录。',
+      };
+    }
+    return { ok: true, configured: true, exists: true, hasCore: true, isCheckout: false, message: '机器人目录正常' };
   });
   ipcMain.handle(CHANNELS.SETTINGS_SET, (e, args) => {
     const v = validate(CHANNELS.SETTINGS_SET, args); if (!v.ok) return { ok: false, error: v.error };

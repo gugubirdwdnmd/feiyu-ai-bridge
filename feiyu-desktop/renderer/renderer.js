@@ -61,13 +61,14 @@ async function refreshBotDirLabel() {
     el.textContent = '未配置机器人目录（设置里选择）';
     el.classList.add('err');
   }
-  // 定位状态：目录缺失 / 缺 ai_bridge.js 时给出明确提示（验收项：不得静默失败）
+  // 定位状态：目录缺失 / 缺 ai_bridge.js / 指向发布副本时给出明确提示（验收项：不得静默失败）
   try {
     const st = await invoke(C.BOTDIR_STATUS);
     const el2 = $('#botDirStatus');
     if (el2 && st) {
-      el2.innerHTML = st.hasCore ? '<span class="ok">' + esc(st.message) + '</span>'
-        : '<span class="err">' + esc(st.message) + '</span>';
+      // 指向源码检出（发布副本）时用黄色警告色，而不是简单的 ok/err 二分
+      const cls = st.isCheckout ? 'warn' : (st.hasCore ? 'ok' : 'err');
+      el2.innerHTML = '<span class="' + cls + '">' + esc(st.message) + '</span>';
     }
   } catch (_) {}
 }

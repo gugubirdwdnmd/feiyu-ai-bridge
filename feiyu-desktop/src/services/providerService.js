@@ -106,8 +106,23 @@ function migrateSecretsToEncrypted(p) {
   if (!fs.existsSync(fp)) { saveSecrets(p, {}); return { migrated: true, reason: 'created_empty', verified: true }; }
   let cur;
   try { cur = JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch (_) { return { migrated: false, error: '读取失败' }; }
-  if (cur && cur.__encrypted) return { migrated: false, reason: 'already_encrypted' };
+  if (cur && cur.__encrypted) {
+    // 已是密文：区分「正常已加密」与「密文无法解密」，后者要给可执行的提示
+    // （常见于换了 Windows 用户/机器，DPAPI 密钥不同）——此时**绝不重写**，只能从备份恢复。
+    const r = readSecrets(p);
+    if (!r.ok) {
+      return {
+        migrated: false,
+        reason: 'not_decryptable',
+        error: '密钥库已加密但当前无法解密：' + (r.error || '未知原因') + '（通常是换了 Windows 账户或机器，DPAPI 密钥不同）。请从 backups/ 恢复明文备份后重试。',
+      };
+    }
+    return { migrated: false, reason: 'already_encrypted' };
+  }
   const plain = (cur && typeof cur === 'object') ? cur : {};
+  // 写入前再确认一次「当前可写」（明文路径应始终可写；不可写则 fail-closed）
+  const w = assertWritable(p);
+  if (!w.ok) return { migrated: false, reason: 'not_writable', error: w.error };
   const bkDir = path.join(p, 'backups', 'feiyu-provider-secrets-' + Date.now());
   try { fs.mkdirSync(bkDir, { recursive: true }); fs.copyFileSync(fp, path.join(bkDir, 'feiyu_provider_secrets.json')); }
   catch (e) { return { migrated: false, error: '备份失败: ' + e.message }; }

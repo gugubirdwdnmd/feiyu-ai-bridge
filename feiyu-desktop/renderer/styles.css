@@ -39,6 +39,8 @@ textarea { min-height: 280px; resize: vertical; line-height: 1.5; }
 .hint { color: var(--sub); font-size: 12px; margin-top: 6px; }
 .err { color: var(--red); }
 .ok { color: var(--green); }
+/* 警告态：例如机器人目录指向源码检出（发布副本）——既不是正常也不是错误 */
+.warn { color: var(--amber); }
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
 th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); }
 th { color: var(--sub); font-weight: 600; }

@@ -447,7 +447,16 @@ test('验收7g: 缺失 status 的历史行按 success 处理，筛选语义正�
 /* ================= 8. 打包后定位机器人目录 ================= */
 
 test('验收8a: 安装版（appPath 在 app.asar 内）能通过 exe 相对路径找到 bot', () => {
-  const fsMock = { existsSync: (p) => String(p).endsWith('ai_bridge.js') && String(p).includes('NapCat_publish') };
+  // V1.0 验收修正：原断言依赖硬编码的 'NapCat_publish' 候选路径（那正是 P1 缺陷本身）。
+  // 现改为验证**通用**规则：工作目录在 exe 的祖先目录下（同级兄弟）时能被定位，
+  // 且定位结果不含任何硬编码目录名。专门的回归用例见 test/botDirResolver.test.js。
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  const fsMock = {
+    existsSync: (p) => norm(p).endsWith('/MyBotRoot/ai_bridge.js'),
+    // 兄弟目录扫描：只有 C:/Users/me 下有一个名为 MyBotRoot 的目录
+    readdirSync: (p) => (norm(p) === 'C:/Users/me' ? ['MyBotRoot'] : []),
+    statSync: () => ({ isDirectory: () => true }),
+  };
   const r = botDirResolver.resolveBotDir({
     appPath: 'C:\\Program Files\\App\\resources\\app.asar',
     execPath: 'C:\\Users\\me\\Desktop\\肥鱼桌面控制中心.exe',
@@ -455,7 +464,8 @@ test('验收8a: 安装版（appPath 在 app.asar 内）能通过 exe 相对路�
     fsImpl: fsMock,
   });
   assert.strictEqual(r.ok, true);
-  assert.ok(r.botDir.includes('NapCat_publish'), '应定位到 NapCat_publish: ' + r.botDir);
+  assert.ok(r.botDir.includes('MyBotRoot'), '应定位到实际工作目录: ' + r.botDir);
+  assert.ok(!/napcat/i.test(r.botDir), '不得依赖硬编码的目录名: ' + r.botDir);
 });
 
 test('验收8b: 便携版（bot 目录在 exe 同级）能定位', () => {

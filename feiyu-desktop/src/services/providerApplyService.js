@@ -64,9 +64,19 @@ function restoreFrom(botDir, dir) {
     const dst = path.join(botDir, f);
     const existedBefore = manifest ? manifest[f] === true : null;
     if (!fs.existsSync(src)) {
-      // 备份时不存在该文件 → 回滚 = 删除本次新建的
+      // 备份时不存在该文件（且备份本身成功）→ 回滚 = 删除本次新建的
       if (existedBefore === false) {
-        try { if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true }); restored.push(f + '(removed)'); } catch (_) {}
+        // 安全：只删「本次新建的普通文件」；若是目录/其它类型则跳过并如实报告，
+        // 绝不用递归删除把用户数据卷进去。
+        try {
+          const st = fs.lstatSync(dst);
+          if (st.isFile()) {
+            fs.unlinkSync(dst);
+            restored.push(f + '(removed)');
+          } else {
+            restored.push(f + '(skipped-not-a-regular-file)');
+          }
+        } catch (_) { /* 已被移除或读不到 */ }
       }
       continue;
     }

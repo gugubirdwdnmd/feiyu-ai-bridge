@@ -27,3 +27,39 @@ test('redactObject recurses', () => {
   assert.ok(o.a.includes('<KEY>')); assert.ok(o.b[0].includes('<本地路径>')); assert.strictEqual(o.n, 5);
 });
 test('looksSecret true for key', () => { assert.strictEqual(looksSecret('apiKey: sk-abc'), true); assert.strictEqual(looksSecret('普通文本'), false); });
+
+// ————————————————————————————————————————
+// V1.0 验收新增：路径脱敏对各种 Windows 路径形态的正确性
+// ————————————————————————————————————————
+
+test('redact windows path with forward slashes', () => {
+  assert.ok(redactText('see D:/NapCat/secrets.json').includes('<本地路径>'));
+});
+test('redact windows path with mixed separators', () => {
+  assert.ok(redactText('D:\\NapCat/memory/usage/x.jsonl').includes('<本地路径>'));
+});
+test('redact windows path with space in segment', () => {
+  // 空格会终止路径片段，尾部允许残留（与 bot 核心同口径）
+  assert.ok(redactText('D:\\a b\\c.txt').includes('<本地路径>'));
+});
+test('redact does not touch https urls', () => {
+  const s = 'https://api.deepseek.com/v1/chat/completions';
+  assert.strictEqual(redactText(s), s);
+});
+test('redact does not touch plain external url', () => {
+  const s = 'http://example.com/api';
+  assert.strictEqual(redactText(s), s);
+});
+test('redact masks localhost port (localport rule)', () => {
+  assert.ok(redactText('http://localhost:3000/api').includes('<本地地址>'));
+});
+test('redact masks apiKey / onebotToken / auth header fields', () => {
+  assert.ok(redactText('{"apiKey":"sk-xyz"}').includes('<KEY>'));
+  assert.ok(redactText('{"onebotToken":"tok-abc"}').includes('<TOKEN>'));
+  assert.ok(redactText('Authorization: Bearer abcdef').includes('<TOKEN>'));
+});
+test('redact masks internal component names', () => {
+  const o = redactText('napcat ai_bridge secrets.json');
+  assert.ok(!o.includes('napcat'));
+  assert.ok(!o.includes('ai_bridge'));
+});
