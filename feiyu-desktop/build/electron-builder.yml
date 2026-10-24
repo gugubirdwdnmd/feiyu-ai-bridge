@@ -3,11 +3,13 @@ productName: 肥鱼桌面控制中心
 files:
   - src/**/*
   - renderer/**/*
+  - build/icon.png
   - package.json
 directories:
   output: dist
   buildResources: build
 win:
+  icon: build/icon.ico
   target:
     - nsis
     - portable
@@ -17,8 +19,12 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   perMachine: false
-  # 卸载时不删除用户数据（%APPDATA%/肥鱼桌面控制中心：设置、价格表等），
+  # 卸载时不删除用户数据（%APPDATA%/肥鱼桌面控制中心：设置、价格表、主题等），
   # 升级/卸载保留配置；机器人侧的 memory/日志/密钥本就不在安装目录内。
   deleteAppDataOnUninstall: false
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  shortcutName: 肥鱼桌面控制中心
 portable:
   artifactName: 肥鱼桌面控制中心-${version}-portable.${ext}

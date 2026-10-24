@@ -36,6 +36,7 @@ const REQUIRED = [
   // v1.1.0 主题工坊
   'src/services/themeService.js',
   'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css', 'renderer/theme.js',
+  'build/icon.ico', 'build/icon.png', 'build/make-icon.js',
 ];
 for (const f of REQUIRED) {
   if (fs.existsSync(path.join(ROOT, f))) ok('存在 ' + f); else bad('缺失 ' + f);
@@ -167,6 +168,59 @@ try {
   else ok('themeService.js 代码不引用 ai_config.json / secrets.json / feiyu_skills.json');
 } catch (e) {
   bad('无法校验主题工坊: ' + e.message);
+}
+
+// 14) 应用图标：四处一致（安装包 / 便携版 / 窗口 / 快捷方式）
+try {
+  const icoPath = path.join(ROOT, 'build', 'icon.ico');
+  const pngPath = path.join(ROOT, 'build', 'icon.png');
+  const ico = fs.readFileSync(icoPath);
+  // ICO 头：reserved(0) type(1) count
+  if (ico.readUInt16LE(0) === 0 && ico.readUInt16LE(2) === 1) {
+    const count = ico.readUInt16LE(4);
+    const sizes = [];
+    for (let i = 0; i < count; i++) {
+      const o = 6 + i * 16;
+      const w = ico[o] === 0 ? 256 : ico[o];
+      const h = ico[o + 1] === 0 ? 256 : ico[o + 1];
+      if (w !== h) bad('ICO 尺寸非正方形: ' + w + 'x' + h);
+      sizes.push(w);
+    }
+    if (sizes.indexOf(256) >= 0 && sizes.indexOf(32) >= 0 && sizes.indexOf(16) >= 0) {
+      ok('build/icon.ico 含多尺寸（' + sizes.join('/') + '）');
+    } else {
+      bad('build/icon.ico 缺少常用尺寸（需含 16/32/256），实际: ' + sizes.join('/'));
+    }
+  } else {
+    bad('build/icon.ico 头部非法（不是有效的 ICO 容器）');
+  }
+
+  const png = fs.readFileSync(pngPath);
+  const isPng = png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4E && png[3] === 0x47;
+  if (isPng) {
+    const w = png.readUInt32BE(16), h = png.readUInt32BE(20);
+    if (w === 256 && h === 256) ok('build/icon.png 为 256×256 PNG');
+    else bad('build/icon.png 尺寸异常: ' + w + '×' + h);
+  } else {
+    bad('build/icon.png 不是合法 PNG');
+  }
+
+  const win = (pkg.build && pkg.build.win) || {};
+  if (win.icon === 'build/icon.ico') ok('electron-builder win.icon 指向 build/icon.ico');
+  else bad('electron-builder win.icon 未指向 build/icon.ico: ' + win.icon);
+  const nsis = (pkg.build && pkg.build.nsis) || {};
+  const iconKeys = ['installerIcon', 'uninstallerIcon', 'installerHeaderIcon'];
+  const missIcon = iconKeys.filter((k) => nsis[k] !== 'build/icon.ico');
+  if (!missIcon.length) ok('NSIS 安装器/卸载器/标题栏图标均已配置');
+  else bad('NSIS 图标未配置完整: ' + missIcon.join(', '));
+  if (nsis.shortcutName) ok('开始菜单快捷方式名: ' + nsis.shortcutName);
+  else warn('未设置 nsis.shortcutName');
+
+  const mainSrc = read('src/main.js');
+  if (/icon:\s*icon/.test(mainSrc)) ok('main.js 已为窗口设置图标');
+  else bad('main.js 未给窗口设置图标');
+} catch (e) {
+  bad('无法校验应用图标: ' + e.message);
 }
 
 if (warnings.length) console.log('\n提示：' + warnings.length + ' 项非阻断警告');

@@ -89,10 +89,29 @@ function ensureBotDirDefault() {
 }
 
 let win = null;
+
+/**
+ * 窗口图标。
+ * 打包版由 exe 内嵌图标自动带出；开发期从 build/icon.png 载入，
+ * 保证「窗口图标 / 安装包图标 / 便携版图标 / 快捷方式图标」四处一致。
+ */
+function resolveWindowIcon() {
+  const cands = [
+    path.join(__dirname, '..', 'build', 'icon.png'),
+    path.join(__dirname, '..', 'build', 'icon.ico'),
+  ];
+  for (const p of cands) {
+    try { if (fs.existsSync(p)) return p; } catch (_) {}
+  }
+  return undefined;
+}
+
 function createWindow() {
+  const icon = resolveWindowIcon();
   win = new BrowserWindow({
     width: 1120, height: 740, minWidth: 920, minHeight: 600,
     title: '肥鱼桌面控制中心',
+    icon: icon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

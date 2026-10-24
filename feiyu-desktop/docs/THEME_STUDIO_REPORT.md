@@ -29,9 +29,9 @@ feiyu-desktop-v1.0.0
 
 | 项 | 基线（513d64b） | 本轮结束 |
 |---|---|---|
-| `node --test` | 326 / 326 通过 | **380 / 380 通过**（+54） |
+| `node --test` | 326 / 326 通过 | **384 / 384 通过**（+58） |
 | `node --check` | 全通过 | 全通过 |
-| `build/package-check.js` | EXIT=0（38 项） | EXIT=0（**48 项**） |
+| `build/package-check.js` | EXIT=0（38 项） | EXIT=0（**57 项**） |
 | Electron smoke | `SMOKE_OK handlers=57` | **`SMOKE_OK handlers=63`**（+6 主题通道） |
 
 > handlers 数量如实从 57 变为 63 —— 新增 6 个主题 IPC 通道（`theme:get/save/reset/presets/export/import`），
@@ -63,6 +63,14 @@ feiyu-desktop-v1.0.0
 | `feiyu-desktop/test/themeReadability.test.js` | 文字可读性 / 对比度测试（6 项） |
 | `feiyu-desktop/theme-func-main.js` | 主题功能端到端验收脚本（Electron 运行时） |
 | `feiyu-desktop/theme-portable-check.js` | 便携版产物的主题验收脚本（Electron 运行时） |
+| `feiyu-desktop/build/make-icon.js` | 图标生成（SVG → Electron 渲染 → 多尺寸 ICO/PNG） |
+| `feiyu-desktop/build/verify-icons.js` | 产物图标一致性校验（PE 资源解析 + 逐像素比对） |
+| `feiyu-desktop/build/apply-icon.js` | 手动给主程序 exe 注入图标（备用路径） |
+| `feiyu-desktop/build/after-pack-icon.js` | electron-builder afterPack 钩子：打包期注入图标 |
+| `feiyu-desktop/build/install-chain-check.js` | 安装版完整链路验收（安装→启动→改主题→重启→卸载） |
+| `feiyu-desktop/install-theme-check.js` | 安装版主题功能验收（以安装目录 asar 为代码来源） |
+| `feiyu-desktop/build/icon.ico` | 应用图标（16/24/32/48/64/128/256） |
+| `feiyu-desktop/build/icon.png` | 256×256 PNG（窗口图标） |
 
 ## 3. 改动文件
 
@@ -70,12 +78,15 @@ feiyu-desktop-v1.0.0
 |---|---|
 | `src/services/ipcChannels.js` | 新增 6 个主题通道 + 参数校验（未知通道仍被拒） |
 | `src/ipc/handlers.js` | 注册 6 个主题处理器（只读 `getUserDataDir()`，不碰 botDir） |
+| `src/services/themeService.js` | 主题校验 / 派生 / 持久化；对比度兜底语义重写（见 4.2） |
+| `src/main.js` | 窗口图标（`resolveWindowIcon()` + `BrowserWindow.icon`） |
 | `renderer/index.html` | 导航加「主题工坊」入口；引入 `theme.js` |
 | `renderer/styles.css` | **全量改用 CSS 变量**，新增主题工坊样式；新增 `#bgCanvas` 动画画布层 |
 | `renderer/renderer.js` | 新增「主题工坊」页；启动时先加载主题再渲染首页 |
-| `build/package-check.js` | 新增文件纳入打包检查；新增 7 项主题专项检查 |
+| `build/package-check.js` | 新增文件纳入打包检查；新增主题与图标专项检查 |
+| `build/electron-builder.yml` | 同步 `win.icon` / NSIS 图标 / 快捷方式名 |
 | `smoke-main.js` | 隔离 userData；新增主题 IPC / 主题页 / CSS 变量冒烟断言 |
-| `package.json` | 版本 1.0.0 → **1.1.0**；`check` 脚本纳入两个新文件 |
+| `package.json` | 版本 1.0.0 → **1.1.0**；`win.icon`；NSIS 图标；`afterPack` 钩子；`check` 脚本 |
 | `docs/USER_GUIDE.md` | 新增第 9 章「主题工坊」 |
 
 ---
@@ -114,12 +125,40 @@ feiyu-desktop-v1.0.0
 处理方式**不改动需求的基准色规则**，而是加一层保险：
 
 1. 基准色在 `bg` / `surface` / `surface2` 三种底色上的最差对比度达标 → **原样保留**；
-2. 不达标 → 在「朝纯白混合」与「朝纯黑混合」的候选里，挑**最差对比度最大**的那一个。
+2. 不达标 → 找**改动最小**且能达标的颜色（而不是对比度最大的那个）。
 
-已验证该保险的结果**不劣于暴力搜索得到的理论最优值**（抽样 286 个不达标背景，偏差 > 0.05 的：**0** 个）。
-六个内置预设**全部保留需求指定的原色**（有独立断言：`textAdjusted === false`）。
+> 「改动最小」是关键：若一律取对比度最大，次要文字会被一路推到与正文同色，层级信息丢失。
 
-全色域抽样（256³ 中每 5 取 1）实测，正文对三种底色的最差对比度 **≥ 3:1**（WCAG AA 大字号底线）。
+三个兜底各自的目标与手段不同：
+
+| 场景 | 目标 | 手段 | 保层级 |
+|---|---|---|---|
+| `text`（正文） | ≥ 4.5:1 | 向纯白/纯黑混合，取最小改动 | —— |
+| `muted`（次要文字） | ≥ 3:1 | **朝正文色靠拢**，取最小改动 | ✅ 不与正文同色 |
+| `--accent-text`（强调色作文字） | ≥ 4.5:1（对 `surface`） | **等比缩放**，保持色相 | ✅ 色相不变 |
+
+**`--accent` 与 `--accent-text` 的分工**：`--accent` 是用户选定的品牌色，
+用作按钮底色/描边/进度条，**永不被改写**；只有「把强调色当文字写」（侧栏品牌名）
+才用 `--accent-text`。实测樱花/抹茶的品牌名对比度从 3.06/3.38 提升到 4.69/4.62。
+
+已验证：
+- 兜底结果在数学可达时**必然达标**（正文 ≥ 4.5、muted ≥ 3）；
+- 数学不可达时（亮度阈值附近窄带）取**可达最优**（抽样 286 个不达标背景，偏差 > 0.05 的：**0** 个）；
+- 全色域抽样（256³ 中每 5 取 1）实测，正文对三种底色的最差对比度 **≥ 3:1**（WCAG AA 大字号底线）；
+- 六个内置预设**全部保留需求指定的原色**（断言 `textAdjusted === false`）。
+
+### 4.2.1 六个预设的实际对比度
+
+| 预设 | text | cr(text,bg) | cr(text,surface) | muted | cr(muted,bg) | cr(muted,surface) | accent | cr(accent,surface) | accent-text | cr(accent-text,surface) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 深海 | `#e8f1f5` | 14.98 | 12.35 | `#8aa4b3` | 6.57 | 5.42 | `#ff8a5c` | 6.09 | `#ff8a5c` | 6.09 |
+| 珊瑚礁 | `#e8f1f5` | 15.90 | 13.27 | `#8aa4b3` | 6.97 | 5.82 | `#ff6f91` | 5.75 | `#ff6f91` | 5.75 |
+| 极光 | `#e8f1f5` | 16.06 | 13.56 | `#8aa4b3` | 7.05 | 5.95 | `#7cf7c4` | 11.80 | `#7cf7c4` | 11.80 |
+| 樱花 | `#1c2a33` | 13.30 | 12.15 | `#5d7280` | 4.54 | 4.15 | `#e0527c` | 3.06 | `#ae4060` | 4.69 |
+| 抹茶 | `#1c2a33` | 13.02 | 11.90 | `#5d7280` | 4.45 | 4.06 | `#4f8a3c` | 3.38 | `#417232` | 4.62 |
+| 墨夜 | `#e8f1f5` | 16.61 | 14.06 | `#8aa4b3` | 7.29 | 6.17 | `#f2c14e` | 9.59 | `#f2c14e` | 9.59 |
+
+正文与次要文字在六个预设下**全部达标**。
 
 ### 4.3 背景动画
 
@@ -168,22 +207,22 @@ feiyu-desktop-v1.0.0
 
 ```
 $ node --test
-1..380
-# tests 380
-# pass 380
+1..384
+# tests 384
+# pass 384
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
 ```
 
-新增 **54 项**（基线 326 → 380）：
+新增 **58 项**（基线 326 → 384）：
 
 | 文件 | 项数 | 覆盖 |
 |---|---|---|
 | `themeService.test.js` | 37 | 校验（合法/非法颜色、非法枚举、越界数值、未知字段、原型污染）、颜色推算（深浅判断、对比度下限）、预设完整性、写后读回一致、损坏/缺失回退、写入中途失败不留半写文件、rename 失败、隔离 SHA-256 |
 | `themeIpc.test.js` | 10 | IPC 白名单、参数校验、未知通道仍被拒、applyVars、reduced-motion 不启动循环、隐藏/失焦暂停、fx=none 不启动 |
-| `themeReadability.test.js` | 6 | 六预设保留需求指定色、深浅判定、各元素组合对比度、可读性保险不劣于理论最优、全色域下限 ≥3:1、强调色前景自动取色 |
+| `themeReadability.test.js` | 10 | 六预设保留需求指定色、深浅判定、各元素组合对比度、可读性保险达标且不劣于理论最优、全色域下限 ≥3:1、强调色前景自动取色、**muted 兜底与其层级保持**、**--accent-text 达标 + --accent 不被改写**、**强调色作文字全色域达标** |
 
 ```
 $ npm run check
@@ -300,28 +339,130 @@ PORTABLE_THEME_OK
 
 ## 6. 构建产物
 
-构建命令（输出到**独立目录**，未覆盖 v1.0.0 的 `D:\feiyu-rv\build\dist3`）：
+构建命令（输出到**独立目录** `D:\feiyu-v11-build\dist5`，未覆盖 v1.0.0 的 `D:\feiyu-rv\build\dist3`）：
 
 ```bash
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win nsis portable \
-  --config.directories.output="D:\feiyu-v11-build\dist" \
+  --config.directories.output="D:\feiyu-v11-build\dist5" \
   -c.win.signAndEditExecutable=false
 # BUILD_EXIT=0
+#   • afterPack: 已注入应用图标 → 肥鱼桌面控制中心.exe
 ```
 
 | 文件 | 字节数 | SHA-256 |
 |---|---|---|
-| `肥鱼桌面控制中心-1.1.0-win-x64.exe` | 115,216,161 | `78f36c2d9c57d7b3eef5046b3591e7ff058439799211287f617c96a43339de8a` |
-| `肥鱼桌面控制中心-1.1.0-portable.exe` | 114,988,292 | `cbc4620e0b97c65120c0016dbb2485e0c73316cc545a701a3f9d4d63ad8e4a44` |
+| `肥鱼桌面控制中心-1.1.0-win-x64.exe` | 115,353,568 | `471c21834a19f46fa911f1eed082e0a35e45c495d72a448b7362bff03e82dab3` |
+| `肥鱼桌面控制中心-1.1.0-portable.exe` | 115,069,002 | `57c4385c449fc1638a3165d8e58e94a6f7d2d02a5d3cb897888dab028c577b29` |
 
-产物 asar 内容核查（30 个条目）：
+产物 asar 内容核查（31 个条目）：
 
 - ✓ `renderer/theme.js`、`renderer/styles.css`、`renderer/index.html`、`renderer/renderer.js`
 - ✓ `src/services/themeService.js`、`src/services/ipcChannels.js`、`src/ipc/handlers.js`
+- ✓ `build/icon.png`（窗口图标随包分发）
 - ✓ 产物内**不含** `secrets.json` / `ai_config.json` / `theme.json` / `feiyu_*.json` / `*.log`
 
-便携版解包（`7za` 解 NSIS，73 个文件）→ `resources/app.asar` 内含全部主题文件，
-`肥鱼桌面控制中心.exe` 可启动，功能验收全部通过（第 5.3 节）。
+### 6.1 应用图标（四处一致）
+
+图标由 `build/make-icon.js` 生成：SVG 描述 → **Electron（Chromium）渲染** → 多尺寸 ICO。
+纯矢量、可复现、抗锯齿由浏览器保证，不依赖任何第三方图形库。
+
+- `build/icon.ico`：16/24/32/48/64/128/256 七尺寸
+- `build/icon.png`：256×256（窗口图标）
+- 图形：深海蓝渐变圆角底 + 奶白肥鱼剪影 + 珊瑚橙尾鳍 + 青色气泡
+
+**注入路径（关键坑）**：`-c.win.signAndEditExecutable=false` 会**同时**跳过「签名」与
+「rcedit 编辑（写入 exe 图标/版本信息）」，导致主程序仍是 Electron 默认图标
+（实测：NSIS 安装包与便携版有图标，唯独 win-unpacked 主程序是默认 Electron 标志）。
+而 NSIS/便携版是**基于 win-unpacked 打包**的，必须在 afterPack 阶段注入，三处才一致。
+
+解决方案：`build/after-pack-icon.js` 作为 electron-builder 的 `afterPack` 钩子，
+用缓存里的 `rcedit-x64.exe` 执行 `--set-icon build/icon.ico`。
+rcedit 只改 PE 资源、不涉及签名，因此不影响「不做代码签名」的决定。
+
+> 补充：`build/apply-icon.js` 提供手动注入路径（对已构建产物补注入），
+> 便于产物被外部复制后仍能修复图标。
+
+**校验**（`build/verify-icons.js`，纯 Node 实现：解析 PE 资源目录 + 解码 DIB/PNG 逐像素比对）：
+
+```
+[图标一致性校验] 产物目录: D:/feiyu-v11-build/dist5
+
+  ✓ build/icon.ico 合法且含多尺寸：16/24/32/48/64/128/256
+  · 参考图标中心区域平均色 RGB: 237,244,248
+  ✓ 参考图标中心为奶白鱼身（非 Electron 默认标志）
+  ✓ 安装版主程序 内嵌图标组，含尺寸: 16/24/32/48/64/128/256
+  ✓ 安装版主程序 含 256 与 16 常用尺寸
+  ✓ 安装版主程序 内嵌 256×256 图标与 build/icon.png 逐像素一致（差异 0.00%）
+  ✓ NSIS 安装包 内嵌图标组，含尺寸: 16/24/32/48/64/128/256
+  ✓ NSIS 安装包 含 256 与 16 常用尺寸
+  ✓ NSIS 安装包 内嵌 256×256 图标与 build/icon.png 逐像素一致（差异 0.00%）
+  ✓ 便携版 内嵌图标组，含尺寸: 16/24/32/48/64/128/256
+  ✓ 便携版 含 256 与 16 常用尺寸
+  ✓ 便携版 内嵌 256×256 图标与 build/icon.png 逐像素一致（差异 0.00%）
+
+ICON_CHECK_OK
+```
+
+四处一致：**安装包图标 / 便携版图标 / 主程序 exe 图标 / 窗口图标**，全部源自同一份 `build/icon.ico`。
+开始菜单快捷方式图标由 NSIS 的 `installerIcon` / `shortcutName` 一并指定。
+
+### 6.2 便携版
+
+解包（`7za` 解 NSIS，73 个文件）→ `resources/app.asar` 内含全部主题文件，
+功能验收全部通过（第 5.3 节）。
+
+### 6.3 安装版完整链路
+
+隔离目录实测（`build/install-chain-check.js`，安装包 → 安装 → 启动 → 改主题 → 重启 → 卸载）：
+
+```
+[1] 静默安装
+  · 安装进程退出码: 0
+  ✓ 主程序已安装: 肥鱼桌面控制中心.exe
+  ✓ 安装目录文件数: 75
+  ✓ app.asar 存在
+  ✓ 安装包内含主题相关文件
+
+[2] 首次启动 + 切换预设与动画
+  ✓ 安装版主题页加载成功
+  ✓ 安装版渲染出 6 套配色预设
+  ✓ 背景动画 canvas 已注入
+  ✓ 默认主题 CSS 变量生效（--bg=#0b1d2a）
+  ✓ 预设切换生效（极光 #0c1424）
+  ✓ 背景动画切换为 aurora
+  ✓ 动画速度已应用（1.8）
+  ✓ 导出 JSON 合法
+  ✓ 非法 JSON 导入未改动当前主题
+  ✓ 合法 JSON 导入生效（樱花 #fbf1f4）
+  ✓ 浅色主题正文色推算正确（#1c2a33）
+  ✓ 主题文件落在隔离 userData
+  ✓ 安装目录内无 theme.json
+  ✓ 重启后主题保留（--bg=#fbf1f4）
+  ✓ 重启后动画设置保留（bubbles）
+  ✓ 重启后速度保留（0.9）
+  ✓ 安装版主题链路通过（切换预设/动画/导入导出 + 重启保留）
+  · 隔离 userData 主题: bg=#fbf1f4 a=#e0527c fx=bubbles speed=0.9
+  ✓ theme.json 不含路径与密钥
+  ✓ 安装目录内无 theme.json（主题只存 userData）
+
+[3] 卸载
+  · 卸载程序: Uninstall 肥鱼桌面控制中心.exe
+  · 卸载进程退出码: 0
+  ✓ 主程序已移除
+  · 卸载后安装目录残留文件数: 0
+
+[4] 卸载后用户数据
+  ✓ 隔离 userData 的 theme.json 保留（卸载不删用户数据）
+
+[5] 机器人目录哈希复核
+  ✓ ai_config.json SHA-256 未变
+  ✓ secrets.json  SHA-256 未变
+
+INSTALL_CHAIN_OK
+```
+
+隔离根目录：`D:\feiyu-v11-build\install\`（`app/` 安装目标、`userdata/` 隔离用户数据、
+`bot/` 模拟机器人目录，全程只读）。
 
 ---
 
@@ -369,9 +510,24 @@ $ git status --short
 ### 7.4 未做的操作（按硬性限制）
 
 - 未推送 `main`，未新建/移动任何 tag，**未创建 GitHub Release**；
+- **分支未推送**（`feature/theme-studio` 是否推送等你确认）；
 - 未发送真实 QQ 消息，未调用付费 API，未重启真实机器人服务；
 - 未覆盖 `D:\feiyu-rv\build\dist3`（v1.0.0 产物完好）；
+- 未做代码签名（按你的指示不写入 v1.1.0 范围）；
 - 未删除任何断言、未跳过测试、未弱化安全校验。
+
+### 7.5 安装版验收的隔离性
+
+安装链路验收全程在 `D:\feiyu-v11-build\install\` 内：
+
+| 子目录 | 用途 | 是否写入 |
+|---|---|---|
+| `app/` | 静默安装目标 | 是（安装产物，随后被卸载清除） |
+| `userdata/` | 隔离 userData | 是（生成 theme.json，卸载后保留） |
+| `bot/` | 模拟机器人目录 | **否**（只读，用于 SHA-256 前后比对） |
+
+`bot/` 里的 `ai_config.json` / `secrets.json` 是**本轮自造的模拟文件**（内容为
+`example.invalid` 与 `sk-simulated-not-a-real-key`），与真实配置无关。
 
 ---
 
@@ -379,9 +535,10 @@ $ git status --short
 
 ### 8.1 已验证
 
+**功能**
 - [x] 6 套预设色值与需求逐项一致
 - [x] 亮度判定 `lum<0.5`、surface 混合比例（7% / 4%）、text / muted 取值 —— 与需求一致
-- [x] 六预设严格保留需求指定色（可读性保险不触发）
+- [x] 六预设严格保留需求指定色（可读性保险不触发，`textAdjusted === false`）
 - [x] 自定义调色盘：改 bg/a/b 后其余颜色自动推算
 - [x] 4 种背景动画 + 速度 0.3~2.5
 - [x] prefers-reduced-motion 命中时**不启动**动画循环
@@ -389,24 +546,50 @@ $ git status --short
 - [x] 圆角 4~28、毛玻璃 0~30 生效
 - [x] 主题导出 JSON 合法；导入非法 JSON **不改动当前主题**（界面与磁盘双向验证）
 - [x] 界面全部颜色改用 CSS 变量，浅色主题下可读性有量化断言
+
+**可读性（本轮补强）**
+- [x] 六个预设的 text / muted / accent 在 bg 与 surface 上的实际对比度已逐项列表（见 4.2.1）
+- [x] 正文与次要文字在六个预设下**全部达标**（text ≥ 4.5、muted ≥ 3）
+- [x] **muted 有兜底**：基准色不达标时自动提升到 ≥ 3:1，且**不与正文同色**（层级保留）
+- [x] 兜底语义为「改动最小」—— 次要文字不会被推到与正文同色
+- [x] `--accent`（按钮底色/描边/进度条）**永不被改写**；`--accent-text`（品牌名）保证 ≥ 4.5:1
+- [x] 强调色作文字全色域抽样达标；色相在调整中保持（等比缩放）
+- [x] 兜底在数学可达时必然达标；不可达时取可达最优（抽样 286 个背景，偏差 > 0.05 的 0 个）
+- [x] 全色域抽样正文最差对比度 ≥ 3:1（WCAG AA 大字号底线）
+
+**数据与安全**
 - [x] 主题只存 `userData/theme.json`，与机器人目录 / 配置 / 密钥完全分离（SHA-256 不变）
 - [x] 颜色 / 枚举 / 数值 / 未知字段 / 原型污染 五类校验
 - [x] 文件缺失、损坏、非法 → 回退默认主题，不抛错
 - [x] 写入中途失败（writeFileSync / renameSync 两种故障）不留半写文件，原文件不被破坏
 - [x] 打包产物不含密钥 / 配置 / 主题 / 日志文件
+
+**产物**
 - [x] 便携版在隔离 userData 下启动，主题页切换预设 / 动画 / 导入导出全部通过，重启后主题保留
-- [x] 节点测试 380/380、语法检查全通过、打包检查 EXIT=0、smoke `handlers=63`
+- [x] **安装版完整链路**（隔离目录）：静默安装（75 文件）→ 首次启动 → 切换预设与动画 →
+      导出/导入（含非法 JSON 不改动主题）→ 重启后主题保留 → 卸载（残留 0 文件）→
+      用户数据 theme.json 保留
+- [x] 安装链路前后 `ai_config.json` / `secrets.json` 的 SHA-256 **完全不变**
+- [x] **应用图标四处一致**：安装包 / 便携版 / 主程序 exe / 窗口图标，
+      均源自同一份 `build/icon.ico`，逐像素比对差异 0.00%
+- [x] 产物不含 Electron 默认图标（参考图标中心为奶白鱼身，非蓝紫默认标志）
+
+**回归**
+- [x] 节点测试 384/384、语法检查全通过、打包检查 EXIT=0（57 项）、smoke `handlers=63`
 
 ### 8.2 未验证 / 受环境限制
 
 - [ ] **GUI 逐页人工验收未完成** —— 本机 Windows 会话处于锁屏状态（`LockApp` / `LogonUI` 运行中），
       界面能渲染但收不到鼠标输入。已用 Electron 脚本做**等价的程序化点击验收**
-      （`theme-func-main.js` / `theme-portable-check.js` 均真实点击 DOM 按钮并断言结果），
+      （`theme-func-main.js` / `theme-portable-check.js` / `install-theme-check.js`
+      均真实点击 DOM 按钮并断言结果），
       但**人工逐页视觉走查、拖动滑块的原生手感、动画观感仍需在解锁环境下补做**。
-- [ ] **代码签名** —— 本轮产物未签名（`signAndEditExecutable=false`），首次运行可能出现 SmartScreen 提示。
-- [ ] **应用图标** —— 仍为 Electron 默认图标（构建日志：`default Electron icon is used`）。
-- [ ] **Windows 真实安装版的主题行为** —— 本轮只验了便携版产物；安装版走同一套 `theme.json` 路径，
-      但未做「安装 → 运行 → 升级 → 卸载后主题保留」的完整链路实测。
+- [ ] **代码签名** —— 按你的指示不做，未写入 v1.1.0 范围。产物未签名，
+      首次运行可能出现 SmartScreen 提示。
+- [ ] **升级链** —— 本轮只验了「全新安装 → 卸载」，**未做** v1.0.0 → v1.1.0 的原地升级实测
+      （v1.0.0 的升级链在 v1.0.0 验收中已验证过一次，但未用带图标的 v1.1.0 重跑）。
+- [ ] **真实机器人目录下的桌面端行为** —— 全程用模拟目录验证哈希不变，
+      未在真实 `D:\NapCat` 上做任何写操作（按硬性限制）。
 
 ---
 
@@ -415,5 +598,8 @@ $ git status --short
 1. **可读性保险的边界**：亮度阈值附近的窄带（自定义背景才可能出现）上，
    「同时对 `bg` 与 `surface2` 保持 4.5:1」在数学上不可达，此时取理论最优（实测下限 4.04:1）。
    若后续要更严格，可改为按底色分别设定文字色（会让 CSS 变量从一个变三个）。
-2. **安装版链路**建议在 v1.1.0 正式发布前补做，与 v1.0.0 的升级/卸载验收合并跑一轮。
-3. **图标与签名**是 v1.0.0 就遗留的待办，本轮未处理。
+2. **升级链**建议在 v1.1.0 正式发布前补跑一轮（v1.0.0 → v1.1.0 原地升级 + 主题保留）。
+3. **代码签名**按你的指示不做；若将来要做，`build/no-sign.js` 需替换为真实证书流程，
+   并注意 `win.sign` 与 `signAndEditExecutable=false` 的差别（后者会连带跳过图标注入）。
+4. **图标生成**依赖 Electron 运行时（`npx electron build/make-icon.js`），
+   改 SVG 后需重跑该命令并重新构建产物。

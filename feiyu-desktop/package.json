@@ -24,16 +24,18 @@
     "appId": "com.feiyu.desktop",
     "productName": "肥鱼桌面控制中心",
     "copyright": "Copyright © 2026 Feiyu",
-    "files": ["src/**/*", "renderer/**/*", "package.json"],
+    "files": ["src/**/*", "renderer/**/*", "build/icon.png", "package.json"],
+    "afterPack": "build/after-pack-icon.js",
     "directories": { "output": "dist", "buildResources": "build" },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         { "target": "nsis", "arch": "x64" },
         { "target": "portable", "arch": "x64" }
       ],
       "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
     },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "deleteAppDataOnUninstall": false },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "deleteAppDataOnUninstall": false, "installerIcon": "build/icon.ico", "uninstallerIcon": "build/icon.ico", "installerHeaderIcon": "build/icon.ico", "shortcutName": "肥鱼桌面控制中心" },
     "portable": { "artifactName": "${productName}-${version}-portable.${ext}" }
   }
 }

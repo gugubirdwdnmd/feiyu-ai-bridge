@@ -98,8 +98,20 @@ function contrastRatio(a, b) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+/** 把颜色按比例变暗（保持色相与饱和度关系）。k=0 原色，k=1 全黑。 */
+function shade(color, k) {
+  const c = hexToRgb(color);
+  return rgbToHex(c.r * (1 - k), c.g * (1 - k), c.b * (1 - k));
+}
+
+/** 把颜色按比例变亮（保持色相）。k=0 原色，k=1 全白。 */
+function tint(color, k) {
+  const c = hexToRgb(color);
+  return rgbToHex(c.r + (255 - c.r) * k, c.g + (255 - c.g) * k, c.b + (255 - c.b) * k);
+}
+
 /**
- * 保底对比度。
+ * 保底对比度：找**最小改动**即可达标的颜色。
  *
  * 需求规定的固定文字色（深色 #e8f1f5 / 浅色 #1c2a33 / muted）由亮度阈值决定，
  * 在接近阈值的中灰背景上对比度会掉到 4.5 以下（例如 #767676 背景下只有 3.97），
@@ -108,32 +120,62 @@ function contrastRatio(a, b) {
  * 这里不改动需求的基准色规则，而是加一层「可读性保险」：
  *  1. 先算基准色在 bg / surface / surface2 三种底色上的**最差**对比度；
  *  2. 已达目标 → **原样保留**（六个内置预设与绝大多数自定义背景都走这条）；
- *  3. 未达目标 → 在「朝纯白混合」与「朝纯黑混合」的候选中，挑**最差对比度最大**的那个，
- *     即在数学允许的范围内尽可能提升可读性，同时保留原有的冷/暖倾向。
+ *  3. 未达目标 → 在候选里挑**改动最小**且能达标的那个（而不是对比度最大的那个）。
+ *     「改动最小」很重要：否则次要文字会被一路推到与正文同色，层级信息丢失。
+ *  4. 若没有任何候选能达标（数学上不可达），退到对比度最大的候选。
  *
  * 注意：当背景落在亮度阈值附近的窄带（自定义背景才有，六个预设不在此列），
  * 「对 bg 与 surface2 同时保持 4.5:1」在数学上不可达 ——
  * 此时返回的是可达的最优值（全色域实测下限约 4.04:1，仍高于 WCAG AA 大字号门槛 3:1）。
+ *
+ * @param {object} [opts]
+ *   hue    —— true：候选用等比缩放（保持色相），用于强调色这类品牌色
+ *   anchor —— 层级锚点（正文色）；候选朝它靠拢，用于次要文字
+ *   exclude —— 禁止等于的颜色（避免退化成与正文同色）
  */
-function bestContrastColor(color, bgs, target) {
+function bestContrastColor(color, bgs, target, opts) {
+  const o = opts || {};
   const list = Array.isArray(bgs) ? bgs : [bgs];
   const worst = (c) => list.reduce((m, b) => Math.min(m, contrastRatio(c, b)), Infinity);
   const baseWorst = worst(color);
   if (baseWorst >= target) return { color, worst: baseWorst, adjusted: false };
 
-  let best = color, bestWorst = baseWorst, bestDev = 0;
-  const consider = (c, dev) => {
-    const w = worst(c);
-    if (w > bestWorst + 1e-9 || (Math.abs(w - bestWorst) < 1e-9 && dev < bestDev)) {
-      bestWorst = w; best = c; bestDev = dev;
+  const anchor = o.anchor || null;
+  const exclude = o.exclude || null;
+  const candidates = [];
+
+  if (o.hue) {
+    // 保持色相：等比变暗 / 变亮
+    for (let step = 1; step <= 40; step++) {
+      const t = step / 40;
+      candidates.push({ c: shade(color, t), dev: t });
+      candidates.push({ c: tint(color, t), dev: t });
     }
-  };
-  for (let step = 1; step <= 20; step++) {
-    const t = step / 20;
-    consider(mix(color, '#ffffff', t), t);
-    consider(mix(color, '#000000', t), t);
+  } else if (anchor) {
+    // 保持层级：朝正文色靠拢
+    for (let step = 1; step <= 40; step++) {
+      const t = step / 40;
+      candidates.push({ c: mix(color, anchor, t), dev: t });
+    }
+  } else {
+    for (let step = 1; step <= 40; step++) {
+      const t = step / 40;
+      candidates.push({ c: mix(color, '#ffffff', t), dev: t });
+      candidates.push({ c: mix(color, '#000000', t), dev: t });
+    }
   }
-  return { color: best, worst: bestWorst, adjusted: best !== color };
+
+  let best = null, bestDev = Infinity, bestWorst = -1;
+  let fallback = null, fallbackWorst = -1;
+  for (const cand of candidates) {
+    if (exclude && cand.c === exclude) continue;
+    const w = worst(cand.c);
+    if (w > fallbackWorst) { fallbackWorst = w; fallback = cand.c; }
+    // 达标候选中取改动最小者
+    if (w >= target && cand.dev < bestDev) { bestDev = cand.dev; best = cand.c; bestWorst = w; }
+  }
+  if (best) return { color: best, worst: bestWorst, adjusted: true };
+  return { color: fallback, worst: fallbackWorst, adjusted: true };
 }
 
 /* ---------------- 校验 ---------------- */
@@ -225,9 +267,21 @@ function deriveTheme(theme) {
   // 保底对比度：正文 ≥ 4.5（WCAG AA），次要文字 ≥ 3
   // 背景集合取 bg / surface / surface2：正文在这三种底色上都必须可读。
   const textRes = bestContrastColor(textBase, [theme.bg, surface, surface2], 4.5);
-  const mutedRes = bestContrastColor(mutedBase, [theme.bg, surface, surface2], 3);
   const text = textRes.color;
+  // 次要文字：达标就原样保留；不达标时**向正文色靠拢**（而不是跳到纯黑/纯白），
+  // 这样既保证 ≥3:1，又不会退化成与正文同色（层级不丢）。
+  const mutedRes = bestContrastColor(mutedBase, [theme.bg, surface, surface2], 3, { anchor: text, exclude: text });
   const muted = mutedRes.color;
+
+  // 强调色**作为文字**时的可读版本（品牌名等）。
+  // --accent 本身保持用户/预设设定值不变（按钮底色、描边、进度条都用它）；
+  // 只有「把强调色当文字写」的场景改用 --accent-text / --accent2-text。
+  // 用等比缩放保持色相 —— 用户选定的品牌色相必须保留。
+  // 底色集合只取 surface：强调色作文字实际只出现在侧栏品牌名（.brand，背景是 --surface）。
+  const accentTextRes = bestContrastColor(theme.a, [surface], 4.5, { hue: true });
+  const accent2TextRes = bestContrastColor(theme.b, [surface], 4.5, { hue: true });
+  const accentText = accentTextRes.color;
+  const accent2Text = accent2TextRes.color;
   const onAccent = contrastRatio(theme.a, '#ffffff') >= contrastRatio(theme.a, '#111111') ? '#ffffff' : '#111111';
   const onAccent2 = contrastRatio(theme.b, '#ffffff') >= contrastRatio(theme.b, '#111111') ? '#ffffff' : '#111111';
   const ok = dark ? '#3ecf8e' : '#177245';
@@ -249,6 +303,8 @@ function deriveTheme(theme) {
     '--line': line,
     '--on-accent': onAccent,
     '--on-accent2': onAccent2,
+    '--accent-text': accentText,
+    '--accent2-text': accent2Text,
     '--glass': 'rgba(' + r + ',' + g + ',' + b + ',0.72)',
     '--ok': ok,
     '--warn': warn,
@@ -260,6 +316,9 @@ function deriveTheme(theme) {
     textBase, mutedBase,
     textContrast: textRes.worst, mutedContrast: mutedRes.worst,
     textAdjusted: textRes.adjusted, mutedAdjusted: mutedRes.adjusted,
+    accentText, accent2Text,
+    accentTextContrast: accentTextRes.worst, accent2TextContrast: accent2TextRes.worst,
+    accentTextAdjusted: accentTextRes.adjusted, accent2TextAdjusted: accent2TextRes.adjusted,
     ok, warn, err, glass: 'rgba(' + r + ',' + g + ',' + b + ',0.72)',
     cssVars,
   };
@@ -403,6 +462,8 @@ module.exports = {
   luminance,
   isDark,
   mix,
+  shade,
+  tint,
   relativeLuminance,
   contrastRatio,
   bestContrastColor,

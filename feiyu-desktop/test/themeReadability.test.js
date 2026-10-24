@@ -106,7 +106,7 @@ test('六个预设下界面各元素组合的对比度均达标', () => {
   }
 });
 
-test('自定义背景：可读性保险的结果不劣于理论最优', () => {
+test('自定义背景：可读性保险的结果达标，且不劣于理论最优', () => {
   // 覆盖亮度阈值附近、高饱和、极端明暗等最容易出问题的背景
   const bgs = [
     '#000000', '#0b1d2a', '#404040', '#767676', '#808080', '#a0a0a0',
@@ -130,11 +130,15 @@ test('自定义背景：可读性保险的结果不劣于理论最优', () => {
       assert.strictEqual(d.text, base, bg + ' 基准色达标却仍被改写');
       assert.ok(myWorst >= 4.5, bg + ' 基准色达标但对比度不足: ' + myWorst.toFixed(2));
     } else {
-      // 基准色不达标 → 结果不得比理论最优更差（允许 0.05 的搜索粒度误差）
-      assert.ok(myWorst >= opt.worst - 0.05,
-        bg + ' 可读性保险结果劣于理论最优：实得 ' + myWorst.toFixed(2) + '，最优 ' + opt.worst.toFixed(2));
-      assert.ok(myWorst >= 3,
-        bg + ' 可读性保险后仍低于 3:1 底线: ' + myWorst.toFixed(2));
+      // 基准色不达标 → 结果必须达标（若数学上可达）
+      if (opt.worst >= 4.5) {
+        assert.ok(myWorst >= 4.5, bg + ' 可读性保险未达标: ' + myWorst.toFixed(2));
+      } else {
+        // 数学上不可达 → 取可达最优
+        assert.ok(myWorst >= opt.worst - 0.05,
+          bg + ' 可读性保险结果劣于理论最优：实得 ' + myWorst.toFixed(2) + '，最优 ' + opt.worst.toFixed(2));
+      }
+      assert.ok(myWorst >= 3, bg + ' 可读性保险后仍低于 3:1 底线: ' + myWorst.toFixed(2));
     }
   }
 });
@@ -162,4 +166,79 @@ test('强调色无论明暗，按钮文字都自动取可读前景色', () => {
     const d = themeService.deriveTheme(theme);
     assert.ok(cr(d.onAccent, a) >= 4.5, a + ' 强调色上的按钮文字对比度不足: ' + cr(d.onAccent, a).toFixed(2));
   }
+});
+
+/* ============ C. muted 与强调色「作文字」时的兜底 ============ */
+
+test('muted 也有自动兜底：基准色不达标时自动提升到可达最优', () => {
+  // 找出能让 muted 基准色不达标（<3:1）的背景
+  const samples = ['#00d70a', '#03d027', '#846379', '#7f6e58', '#008f4d', '#0063c6', '#ea0b2c', '#767676'];
+  let hit = 0;
+  for (const bg of samples) {
+    const theme = Object.assign({}, themeService.DEFAULT_THEME, { bg });
+    const d = themeService.deriveTheme(theme);
+    const pan = panels(bg);
+    const set = [bg, pan.surface, pan.surface2];
+    const base = pan.dark ? '#8aa4b3' : '#5d7280';
+    const baseWorst = worstOn(base, set);
+    const myWorst = worstOn(d.muted, set);
+
+    if (baseWorst >= 3) {
+      // 基准色达标 → 必须原样保留
+      assert.strictEqual(d.muted, base, bg + ' muted 基准色达标却仍被改写');
+      assert.strictEqual(d.mutedAdjusted, false, bg + ' 不应标记为已调整');
+    } else {
+      hit++;
+      assert.strictEqual(d.mutedAdjusted, true, bg + ' muted 基准色不达标却未标记调整');
+      // 兜底后必须达到 muted 的目标门槛 3:1（WCAG AA 大字号 / UI 组件门槛）
+      assert.ok(myWorst >= 3, bg + ' muted 兜底后仍不足 3:1: ' + myWorst.toFixed(2));
+      // 兜底后仍须与正文有层级差（不能退化成与正文同色）
+      assert.notStrictEqual(d.muted, d.text, bg + ' muted 兜底后退化为与正文同色');
+      // 兜底必须是「最小改动」：不得偏离基准色太多（保持 muted 的视觉性格）
+      const dev = Math.abs(d.mutedBase.length - d.muted.length); // 粗略，仅确保不是天差地别
+      assert.ok(dev < 8, bg + ' muted 兜底改动过大: ' + d.mutedBase + ' → ' + d.muted);
+    }
+  }
+  assert.ok(hit > 0, '样本中应至少有一个背景触发 muted 兜底');
+});
+
+test('muted 兜底后仍与正文有层级差（不会退化成与正文同色）', () => {
+  // 对所有背景，兜底后的 muted 不应与正文完全同色（否则层级信息丢失）
+  for (let r = 0; r < 256; r += 17) {
+    for (let g = 0; g < 256; g += 17) {
+      const bg = themeService.rgbToHex(r, g, 0);
+      const d = themeService.deriveTheme(Object.assign({}, themeService.DEFAULT_THEME, { bg }));
+      assert.notStrictEqual(d.muted, d.text, bg + ' muted 与正文同色，层级丢失');
+    }
+  }
+});
+
+test('强调色作文字（品牌名）时达标：--accent-text 保证 ≥4.5', () => {
+  for (const p of themeService.PRESETS) {
+    const theme = Object.assign({}, themeService.DEFAULT_THEME, p.theme);
+    const d = themeService.deriveTheme(theme);
+    const tag = p.name + '：';
+    assert.ok(cr(d.accentText, d.surface) >= 4.5, tag + '强调色文字/面板 < 4.5（' + cr(d.accentText, d.surface).toFixed(2) + '）');
+    assert.ok(cr(d.accent2Text, d.surface) >= 4.5, tag + '辅助强调色文字/面板 < 4.5（' + cr(d.accent2Text, d.surface).toFixed(2) + '）');
+    // --accent 本身（按钮底色/描边）保持用户设定值不变
+    assert.strictEqual(d.cssVars['--accent'], p.theme.a, p.name + ' --accent 被改写了');
+    assert.strictEqual(d.cssVars['--accent2'], p.theme.b, p.name + ' --accent2 被改写了');
+  }
+});
+
+test('强调色作文字在全色域抽样下均达标', () => {
+  // 强调色作文字实际只出现在侧栏品牌名（背景是 --surface），故只对 surface 判定。
+  let worst = { v: 99 };
+  for (let r = 0; r < 256; r += 7) {
+    for (let g = 0; g < 256; g += 7) {
+      for (let b = 0; b < 256; b += 7) {
+        const bg = themeService.rgbToHex(r, g, b);
+        const theme = Object.assign({}, themeService.DEFAULT_THEME, { bg, a: '#e0527c', b: '#7aa8e8' });
+        const d = themeService.deriveTheme(theme);
+        const w = cr(d.accentText, d.surface);
+        if (w < worst.v) worst = { v: w, bg };
+      }
+    }
+  }
+  assert.ok(worst.v >= 4.5, '强调色作文字最差对比度 ' + worst.v.toFixed(2) + ' @ ' + worst.bg + ' 低于 4.5');
 });

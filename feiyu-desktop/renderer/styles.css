@@ -12,6 +12,8 @@
      --muted     次要文字色
      --line      分隔线/描边
      --on-accent 强调色上的前景色（自动选黑/白）
+     --accent-text / --accent2-text  强调色「当作文字写」时的可读版本
+                                        （--accent 本身保持设定值不变）
      --radius    圆角
      --blur      毛玻璃模糊半径
      --speed     背景动画速度
@@ -21,6 +23,7 @@
   --accent: #ff8a5c; --accent2: #4fd1c5;
   --text: #e8f1f5; --muted: #8aa4b3; --line: #2b414f;
   --on-accent: #ffffff; --on-accent2: #101010;
+  --accent-text: #ff8a5c; --accent2-text: #4fd1c5;
   --glass: rgba(22,35,44,0.72);
   --ok: #3ecf8e; --warn: #f5b54a; --err: #ff6b6b;
   --radius: 16px; --blur: 14px; --speed: 1;
@@ -36,7 +39,7 @@ body { margin: 0; background: var(--bg); color: var(--text);
 .app { display: flex; height: 100vh; position: relative; z-index: 1; }
 
 .nav { width: 210px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 14px 10px; }
-.brand { font-weight: 700; font-size: 15px; padding: 6px 8px 14px; color: var(--accent); }
+.brand { font-weight: 700; font-size: 15px; padding: 6px 8px 14px; color: var(--accent-text); }
 .nav button { display: block; width: 100%; text-align: left; background: transparent; color: var(--muted);
   border: none; padding: 10px 12px; border-radius: calc(var(--radius) * 0.5); cursor: pointer; font-size: 13.5px; margin-bottom: 2px; }
 .nav button:hover { background: var(--surface2); color: var(--text); }
