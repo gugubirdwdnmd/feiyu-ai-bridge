@@ -79,10 +79,10 @@ const USER_B = '10002';   // 普通用户 B
 const GID = '808214611';
 
 function groupCtx(uid) {
-  return { userId: Number(uid), isGroup: true, ev: { group_id: GID, group_name: '测试群', message_type: 'group', user_id: Number(uid), self_id: 1430831772, message_id: Math.floor(Math.random() * 1e9) }, sessionId: 'group_' + GID };
+  return { userId: Number(uid), isGroup: true, ev: { group_id: GID, group_name: '测试群', message_type: 'group', user_id: Number(uid), self_id: 100000001, message_id: Math.floor(Math.random() * 1e9) }, sessionId: 'group_' + GID };
 }
 function privCtx(uid) {
-  return { userId: Number(uid), isGroup: false, ev: { message_type: 'private', user_id: Number(uid), self_id: 1430831772, message_id: Math.floor(Math.random() * 1e9) }, sessionId: 'private_' + uid };
+  return { userId: Number(uid), isGroup: false, ev: { message_type: 'private', user_id: Number(uid), self_id: 100000001, message_id: Math.floor(Math.random() * 1e9) }, sessionId: 'private_' + uid };
 }
 
 (async () => {
