@@ -74,6 +74,73 @@ const CHANNELS = {
   THEME_PRESETS: 'theme:presets',
   THEME_EXPORT: 'theme:export',
   THEME_IMPORT: 'theme:import',
+
+  // ===== 模块 A：NapCat 实例与 QQ 登录中心 =====
+  NAPCAT_QR_PLAN: 'napcat:qr:plan',
+  NAPCAT_QR_START: 'napcat:qr:start',
+  NAPCAT_QR_POLL: 'napcat:qr:poll',
+  NAPCAT_INSTANCE_LIST: 'napcat:instance:list',
+  NAPCAT_INSTANCE_SAVE: 'napcat:instance:save',
+  NAPCAT_INSTANCE_DELETE: 'napcat:instance:delete',
+
+  // ===== 模块 B：统一服务编排与一键启动 =====
+  SERVICE_LIST: 'service:list',
+  SERVICE_SAVE: 'service:save',
+  SERVICE_DELETE: 'service:delete',
+  SERVICE_PRESETS: 'service:presets',
+  SERVICE_PLAN: 'service:plan',
+  SERVICE_START_PRESET: 'service:startPreset',
+  SERVICE_PRESET_SAVE: 'service:preset:save',
+  SERVICE_PRESET_DELETE: 'service:preset:delete',
+
+  // ===== 模块 C：ComfyUI 环境检测（只读） =====
+  ENV_DETECT: 'env:detect',
+
+  // ===== 模块 D：MCP 外部导入与权限中心 =====
+  MCP_LIST: 'mcp:list',
+  MCP_PARSE: 'mcp:parse',
+  MCP_IMPORT: 'mcp:import',
+  MCP_SET_ENABLED: 'mcp:setEnabled',
+  MCP_DELETE: 'mcp:delete',
+  MCP_EXPORT: 'mcp:export',
+
+  // ===== 模块 E：技能树与分类扩展 =====
+  SKILL_TREE: 'skill:tree',
+  SKILL_CATEGORY_LIST: 'skill:category:list',
+  SKILL_CATEGORY_ADD: 'skill:category:add',
+  SKILL_CATEGORY_DELETE: 'skill:category:delete',
+
+  // ===== 模块 F：市场接入（华为云 / 通用 / 本地） =====
+  MARKET_SOURCES: 'market:sources',
+  MARKET_PARSE: 'market:parse',
+  MARKET_FETCH: 'market:fetch',
+  MARKET_PLAN: 'market:plan',
+
+  // ===== 模块 G：配置备份 / 恢复 / 升级保护 =====
+  BACKUP_LIST: 'backup:list',
+  BACKUP_CREATE: 'backup:create',
+  BACKUP_DIFF: 'backup:diff',
+  BACKUP_RESTORE: 'backup:restore',
+  BACKUP_DELETE: 'backup:delete',
+
+  // ===== 模块 H：可视化自动化工作流 =====
+  WORKFLOW_LIST: 'workflow:list',
+  WORKFLOW_GET: 'workflow:get',
+  WORKFLOW_SAVE: 'workflow:save',
+  WORKFLOW_DELETE: 'workflow:delete',
+  WORKFLOW_RUN: 'workflow:run',
+
+  // ===== 模块 I：用量与成本管理 =====
+  COST_REPORT: 'cost:report',
+  COST_BUDGET_GET: 'cost:budget:get',
+  COST_BUDGET_SET: 'cost:budget:set',
+
+  // ===== 模块 J：日志 / 诊断 / 通知中心 =====
+  DIAG_COLLECT: 'diag:collect',
+  DIAG_EXPORT: 'diag:export',
+  NOTIFY_LIST: 'notify:list',
+  NOTIFY_MARK_READ: 'notify:markRead',
+  NOTIFY_CLEAR: 'notify:clear',
 };
 
 const ALLOWED_RANGE = ['today', 'yesterday', '7d', 'month', 'all'];
@@ -246,6 +313,152 @@ function validate(channel, args) {
         return { ok: false, error: '需要 {json: string}' };
       }
       return { ok: true };
+
+    // —————————— 模块 A：登录中心 ——————————
+    case CHANNELS.NAPCAT_QR_PLAN:
+    case CHANNELS.NAPCAT_INSTANCE_LIST:
+      return { ok: true };
+    case CHANNELS.NAPCAT_QR_START:
+      if (args != null && args.instanceId != null && !isString(args.instanceId)) return { ok: false, error: 'instanceId 必须是 string' };
+      if (args != null && args.endpoint != null && !isString(args.endpoint)) return { ok: false, error: 'endpoint 必须是 string' };
+      return { ok: true };
+    case CHANNELS.NAPCAT_QR_POLL:
+      if (!isObject(args) || !isString(args.sessionId)) return { ok: false, error: '需要 {sessionId: string}' };
+      if (args.payload != null && !isObject(args.payload)) return { ok: false, error: 'payload 必须是 object' };
+      return { ok: true };
+    case CHANNELS.NAPCAT_INSTANCE_SAVE:
+      if (!isObject(args) || !isObject(args.instance)) return { ok: false, error: '需要 {instance: object}' };
+      return { ok: true };
+    case CHANNELS.NAPCAT_INSTANCE_DELETE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+
+    // —————————— 模块 B：服务编排 ——————————
+    case CHANNELS.SERVICE_LIST:
+    case CHANNELS.SERVICE_PRESETS:
+      return { ok: true };
+    case CHANNELS.SERVICE_SAVE:
+      if (!isObject(args) || !isObject(args.service)) return { ok: false, error: '需要 {service: object}' };
+      return { ok: true };
+    case CHANNELS.SERVICE_DELETE:
+    case CHANNELS.SERVICE_PRESET_DELETE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+    case CHANNELS.SERVICE_PLAN:
+    case CHANNELS.SERVICE_START_PRESET:
+      if (!isObject(args) || !isString(args.presetId)) return { ok: false, error: '需要 {presetId: string}' };
+      if (args.force != null && typeof args.force !== 'boolean') return { ok: false, error: 'force 必须是 boolean' };
+      return { ok: true };
+    case CHANNELS.SERVICE_PRESET_SAVE:
+      if (!isObject(args) || !isObject(args.preset)) return { ok: false, error: '需要 {preset: object}' };
+      return { ok: true };
+
+    // —————————— 模块 C：环境检测 ——————————
+    case CHANNELS.ENV_DETECT:
+      if (args != null && args.dir != null && !isString(args.dir)) return { ok: false, error: 'dir 必须是 string' };
+      return { ok: true };
+
+    // —————————— 模块 D：MCP ——————————
+    case CHANNELS.MCP_LIST:
+    case CHANNELS.MCP_EXPORT:
+      return { ok: true };
+    case CHANNELS.MCP_PARSE:
+    case CHANNELS.MCP_IMPORT:
+      if (!isObject(args)) return { ok: false, error: '需要 {payload}' };
+      if (typeof args.payload !== 'string' && !isObject(args.payload)) return { ok: false, error: 'payload 必须是对象或 JSON 字符串' };
+      if (channel === CHANNELS.MCP_IMPORT && args.overwrite != null && typeof args.overwrite !== 'boolean') return { ok: false, error: 'overwrite 必须是 boolean' };
+      return { ok: true };
+    case CHANNELS.MCP_SET_ENABLED:
+      if (!isObject(args) || !isString(args.name) || typeof args.enabled !== 'boolean') return { ok: false, error: '需要 {name: string, enabled: boolean}' };
+      return { ok: true };
+    case CHANNELS.MCP_DELETE:
+      if (!isObject(args) || !isString(args.name)) return { ok: false, error: '需要 {name: string}' };
+      return { ok: true };
+
+    // —————————— 模块 E：技能树 ——————————
+    case CHANNELS.SKILL_TREE:
+    case CHANNELS.SKILL_CATEGORY_LIST:
+      return { ok: true };
+    case CHANNELS.SKILL_CATEGORY_ADD:
+      if (!isObject(args) || !isObject(args.category)) return { ok: false, error: '需要 {category: object}' };
+      return { ok: true };
+    case CHANNELS.SKILL_CATEGORY_DELETE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+
+    // —————————— 模块 F：市场 ——————————
+    case CHANNELS.MARKET_SOURCES:
+      return { ok: true };
+    case CHANNELS.MARKET_PARSE:
+      if (!isObject(args)) return { ok: false, error: '需要 {payload}' };
+      if (typeof args.payload !== 'string' && !isObject(args.payload)) return { ok: false, error: 'payload 必须是对象或 JSON 字符串' };
+      return { ok: true };
+    case CHANNELS.MARKET_FETCH:
+      if (!isObject(args) || !isString(args.sourceId) || !isString(args.endpoint)) return { ok: false, error: '需要 {sourceId: string, endpoint: string}' };
+      if (args.token != null && !isString(args.token)) return { ok: false, error: 'token 必须是 string' };
+      return { ok: true };
+    case CHANNELS.MARKET_PLAN:
+      if (!isObject(args) || !isObject(args.item)) return { ok: false, error: '需要 {item: object}' };
+      if (args.hasToken != null && typeof args.hasToken !== 'boolean') return { ok: false, error: 'hasToken 必须是 boolean' };
+      return { ok: true };
+
+    // —————————— 模块 G：备份恢复 ——————————
+    case CHANNELS.BACKUP_LIST:
+      return { ok: true };
+    case CHANNELS.BACKUP_CREATE:
+      if (args != null && args.includeSecret != null && typeof args.includeSecret !== 'boolean') return { ok: false, error: 'includeSecret 必须是 boolean' };
+      if (args != null && args.label != null && !isString(args.label)) return { ok: false, error: 'label 必须是 string' };
+      return { ok: true };
+    case CHANNELS.BACKUP_DIFF:
+    case CHANNELS.BACKUP_DELETE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+    case CHANNELS.BACKUP_RESTORE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      if (args.includeSecret != null && typeof args.includeSecret !== 'boolean') return { ok: false, error: 'includeSecret 必须是 boolean' };
+      if (args.force != null && typeof args.force !== 'boolean') return { ok: false, error: 'force 必须是 boolean' };
+      return { ok: true };
+
+    // —————————— 模块 H：工作流 ——————————
+    case CHANNELS.WORKFLOW_LIST:
+      return { ok: true };
+    case CHANNELS.WORKFLOW_GET:
+    case CHANNELS.WORKFLOW_DELETE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+    case CHANNELS.WORKFLOW_SAVE:
+      if (!isObject(args) || !isObject(args.workflow)) return { ok: false, error: '需要 {workflow: object}' };
+      return { ok: true };
+    case CHANNELS.WORKFLOW_RUN:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      if (args.dryRun != null && typeof args.dryRun !== 'boolean') return { ok: false, error: 'dryRun 必须是 boolean' };
+      if (args.vars != null && !isObject(args.vars)) return { ok: false, error: 'vars 必须是 object' };
+      return { ok: true };
+
+    // —————————— 模块 I：成本 ——————————
+    case CHANNELS.COST_BUDGET_GET:
+      return { ok: true };
+    case CHANNELS.COST_REPORT:
+      if (args && args.range != null && !inSet(args.range, ALLOWED_RANGE)) return { ok: false, error: 'range 必须是 ' + ALLOWED_RANGE.join('/') };
+      return { ok: true };
+    case CHANNELS.COST_BUDGET_SET:
+      if (!isObject(args) || !isObject(args.budget)) return { ok: false, error: '需要 {budget: object}' };
+      return { ok: true };
+
+    // —————————— 模块 J：诊断与通知 ——————————
+    case CHANNELS.DIAG_COLLECT:
+    case CHANNELS.DIAG_EXPORT:
+    case CHANNELS.NOTIFY_CLEAR:
+      return { ok: true };
+    case CHANNELS.NOTIFY_LIST:
+      if (args != null && args.level != null && !isString(args.level)) return { ok: false, error: 'level 必须是 string' };
+      if (args != null && args.unreadOnly != null && typeof args.unreadOnly !== 'boolean') return { ok: false, error: 'unreadOnly 必须是 boolean' };
+      if (args != null && args.limit != null && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200)) return { ok: false, error: 'limit 必须 1-200' };
+      return { ok: true };
+    case CHANNELS.NOTIFY_MARK_READ:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+
     default:
       return { ok: false, error: '未知通道: ' + channel };
   }

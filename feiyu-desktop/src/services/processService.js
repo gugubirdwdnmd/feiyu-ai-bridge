@@ -139,7 +139,34 @@ function createProcessManager(opts = {}) {
     return { stopped: true, forced: true };
   }
 
-  return { getStatus, preCheck, startBot, stopByPids, findPortOwner, resolveNodeBin, PORTS };
+  /**
+   * 通用「分离式启动」：用于服务编排（模块 B）拉起 ComfyUI / 自定义服务。
+   *
+   * 安全约束（与 startBot 一致）：
+   *  - 只接受**固定的 argv 数组**，绝不把用户输入拼成命令行字符串；
+   *  - command 不得包含 shell 元字符（即使用 spawn 不走 shell，也做防御性拒绝）；
+   *  - 工作目录必须已存在，不自动创建。
+   * @param spec { command, args[], cwd, env }
+   */
+  function spawnDetached(spec = {}) {
+    const cmd = spec.command;
+    if (typeof cmd !== 'string' || !cmd.trim()) return { ok: false, error: 'command 必须是非空字符串' };
+    if (/[&|<>;`\n\r]/.test(cmd)) return { ok: false, error: 'command 不得包含 shell 元字符' };
+    const args = Array.isArray(spec.args) ? spec.args : [];
+    if (!args.every((a) => typeof a === 'string')) return { ok: false, error: 'args 必须是字符串数组' };
+    const cwd = spec.cwd || process.cwd();
+    try { if (!fs.existsSync(cwd)) return { ok: false, error: '工作目录不存在' }; } catch (_) { return { ok: false, error: '工作目录不可访问' }; }
+    try {
+      const child = deps.spawn(cmd, args, {
+        cwd, detached: true, stdio: 'ignore',
+        env: Object.assign({}, process.env, spec.env || {}),
+      });
+      if (child && child.pid) { child.unref(); return { ok: true, pid: child.pid }; }
+      return { ok: false, error: '进程未返回 pid' };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
+
+  return { getStatus, preCheck, startBot, stopByPids, findPortOwner, resolveNodeBin, spawnDetached, PORTS };
 }
 
 module.exports = { createProcessManager, createDefaultDeps, parseNetstat, PORTS };

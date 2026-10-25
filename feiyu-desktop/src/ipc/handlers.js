@@ -6,6 +6,8 @@
  */
 const fs = require('fs');
 const path = require('path');
+const cp = require('child_process');
+const os = require('os');
 const { CHANNELS, validate } = require('../services/ipcChannels');
 const configService = require('../services/configService');
 const personalityService = require('../services/personalityService');
@@ -22,6 +24,17 @@ const skillService = require('../services/skillService');
 const comfyService = require('../services/comfyService');
 const themeService = require('../services/themeService');
 const botDirResolver = require('../services/botDirResolver');
+// —— 全量升级新增模块（A–J）——
+const napcatLoginService = require('../services/napcatLoginService');
+const serviceRegistry = require('../services/serviceRegistry');
+const envDetector = require('../services/envDetector');
+const mcpService = require('../services/mcpService');
+const skillTreeService = require('../services/skillTreeService');
+const marketService = require('../services/marketService');
+const backupService = require('../services/backupService');
+const workflowService = require('../services/workflowService');
+const costService = require('../services/costService');
+const diagnosticService = require('../services/diagnosticService');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
 
@@ -527,6 +540,465 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     if (!r.ok) return { ok: false, error: r.error, errors: r.errors || [], applied: false };
     return { ok: true, applied: true, theme: r.theme, derived: r.derived, warnings: r.warnings || [] };
   });
+
+  // ==================================================================
+  // 以下为「全量功能升级」新增的 A–J 模块处理器
+  // 统一约定：先 validate → 再 needBotDir（涉及机器人目录时）→ 调用 service。
+  // ==================================================================
+
+  // -------- 通用小工具 --------
+  const pushNote = (n) => { try { return diagnosticService.pushNotification(getUserDataDir(), n); } catch (_) { return { ok: false }; } };
+
+  /** 固定参数执行外部命令（只读探测用；超时 5s，不拼接 shell）。 */
+  const runFixedCommand = (cmd, argv) => new Promise((resolve) => {
+    try {
+      cp.execFile(cmd, argv, { encoding: 'utf8', timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) return resolve({ ok: false, error: err.message, stdout: String(stdout || ''), stderr: String(stderr || '') });
+        resolve({ ok: true, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      });
+    } catch (e) { resolve({ ok: false, error: e.message }); }
+  });
+
+  /** 读取 JSON（仅 GET，超时保护）。 */
+  const fetchJson = async (url, timeoutMs = 8000) => {
+    if (typeof globalThis.fetch !== 'function') return { ok: false, error: '当前环境不支持 fetch' };
+    try {
+      const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+      const res = await globalThis.fetch(url, { method: 'GET', signal: ctrl ? ctrl.signal : undefined });
+      if (timer) clearTimeout(timer);
+      if (!res || !res.ok) return { ok: false, error: 'HTTP ' + (res ? res.status : '无响应') };
+      const text = await res.text();
+      try { return { ok: true, data: JSON.parse(text) }; } catch (_) { return { ok: false, error: '返回内容不是 JSON' }; }
+    } catch (e) {
+      return { ok: false, error: e && e.name === 'AbortError' ? '请求超时' : (e && e.message) || '请求失败' };
+    }
+  };
+
+  // ==================== A. NapCat 实例与 QQ 登录中心 ====================
+  // 登录会话只存内存（进程退出即失效）；二维码内容绝不写日志/通知/诊断包。
+  const qrSessions = new Map();
+
+  ipcMain.handle(CHANNELS.NAPCAT_QR_PLAN, () => {
+    const s = getSettings();
+    return napcatLoginService.qrLoginPlan({ endpoint: (s.napcat && s.napcat.qrEndpoint) || '' });
+  });
+
+  ipcMain.handle(CHANNELS.NAPCAT_QR_START, async (e, args) => {
+    const v = validate(CHANNELS.NAPCAT_QR_START, args); if (!v.ok) return { ok: false, error: v.error };
+    const settings = getSettings();
+    const endpoint = (args && args.endpoint) || (settings.napcat && settings.napcat.qrEndpoint) || '';
+    const session = napcatLoginService.createSession({ instanceId: (args && args.instanceId) || 'default' });
+    session.endpoint = endpoint || null;
+
+    // 1) 允许调用方直接给已取得的载荷（例如用户从 NapCat 控制台复制）
+    if (args && args.qrPayload != null) {
+      napcatLoginService.applyQr(session, args.qrPayload);
+      qrSessions.set(session.id, session);
+      return { ok: true, session: napcatLoginService.publicSession(session, { withQr: true }) };
+    }
+    // 2) 配置了接口 → 主动取一次二维码（用户显式点击触发）
+    if (endpoint) {
+      const r = await fetchJson(endpoint);
+      if (!r.ok) {
+        session.state = 'failed';
+        session.message = '获取二维码失败：' + r.error;
+        qrSessions.set(session.id, session);
+        return { ok: false, error: session.message, session: napcatLoginService.publicSession(session) };
+      }
+      napcatLoginService.applyQr(session, r.data);
+      qrSessions.set(session.id, session);
+      return { ok: true, session: napcatLoginService.publicSession(session, { withQr: true }) };
+    }
+    // 3) 都没配 → 明确告知，不伪造二维码
+    session.state = 'needs_endpoint';
+    session.message = '尚未配置 NapCat 二维码接口地址。可填入接口地址后重试，或直接把接口返回的 JSON 作为 qrPayload 传入。';
+    qrSessions.set(session.id, session);
+    return { ok: true, needsEndpoint: true, session: napcatLoginService.publicSession(session) };
+  });
+
+  ipcMain.handle(CHANNELS.NAPCAT_QR_POLL, async (e, args) => {
+    const v = validate(CHANNELS.NAPCAT_QR_POLL, args); if (!v.ok) return { ok: false, error: v.error };
+    const session = qrSessions.get(args.sessionId);
+    if (!session) return { ok: false, error: '登录会话不存在或已失效，请重新获取二维码' };
+    let payload = args.payload || null;
+    if (!payload && session.endpoint) {
+      const r = await fetchJson(session.endpoint);
+      if (!r.ok) return { ok: false, error: '轮询失败：' + r.error, session: napcatLoginService.publicSession(session) };
+      payload = r.data;
+    }
+    if (!payload) return { ok: false, error: '缺少轮询载荷（payload），且会话未绑定接口地址' };
+    napcatLoginService.applyPoll(session, payload);
+    if (session.state === 'ok') {
+      // 登录成功：更新实例最近登录时间（不记录任何凭据）
+      const d = needBotDir();
+      if (d) napcatLoginService.markLoggedIn(d, session.instanceId);
+      pushNote({ title: 'QQ 登录成功', message: '实例 ' + session.instanceId + ' 已完成扫码登录', level: 'success', source: 'napcat' });
+      qrSessions.delete(session.id);
+    }
+    if (session.state === 'expired' || session.state === 'failed') qrSessions.delete(session.id);
+    return { ok: true, session: napcatLoginService.publicSession(session, { withQr: session.state === 'pending' || session.state === 'scanned' }) };
+  });
+
+  ipcMain.handle(CHANNELS.NAPCAT_INSTANCE_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', instances: [] };
+    return napcatLoginService.listInstances(d);
+  });
+  ipcMain.handle(CHANNELS.NAPCAT_INSTANCE_SAVE, (e, args) => {
+    const v = validate(CHANNELS.NAPCAT_INSTANCE_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = napcatLoginService.saveInstance(d, args.instance);
+    if (!r.ok) return { ok: false, error: (r.errors || []).join('；') || '保存失败', errors: r.errors || [] };
+    return { ok: true, instance: r.instance, created: r.created, note: '已保存实例（不含密码；密码 MD5 仅在启动时经环境变量注入）' };
+  });
+  ipcMain.handle(CHANNELS.NAPCAT_INSTANCE_DELETE, (e, args) => {
+    const v = validate(CHANNELS.NAPCAT_INSTANCE_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = napcatLoginService.removeInstance(d, args.id);
+    return r.ok ? { ok: true } : { ok: false, error: r.error };
+  });
+
+  // ==================== B. 统一服务编排与一键启动 ====================
+  const registry = () => serviceRegistry.createRegistry({ botDir: needBotDir() || '' });
+
+  ipcMain.handle(CHANNELS.SERVICE_LIST, () => {
+    const d = needBotDir();
+    const reg = serviceRegistry.createRegistry({ botDir: d || '' });
+    return {
+      ok: true,
+      botDirConfigured: !!d,
+      services: reg.allServices(),
+      presets: reg.presets(),
+      builtin: serviceRegistry.BUILTIN_SERVICES,
+      ports: { bridge: 3001, napcat: 3000, comfyui: 8188 },
+    };
+  });
+  ipcMain.handle(CHANNELS.SERVICE_SAVE, (e, args) => {
+    const v = validate(CHANNELS.SERVICE_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = registry().addService(args.service);
+    if (!r.ok) return { ok: false, error: (r.errors || [r.error]).filter(Boolean).join('；'), errors: r.errors || [] };
+    return { ok: true, id: r.id };
+  });
+  ipcMain.handle(CHANNELS.SERVICE_DELETE, (e, args) => {
+    const v = validate(CHANNELS.SERVICE_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = registry().removeService(args.id);
+    return r.ok ? { ok: true } : { ok: false, error: (r.errors || [r.error]).filter(Boolean).join('；') };
+  });
+  ipcMain.handle(CHANNELS.SERVICE_PRESETS, () => ({ ok: true, presets: registry().presets() }));
+  ipcMain.handle(CHANNELS.SERVICE_PRESET_SAVE, (e, args) => {
+    const v = validate(CHANNELS.SERVICE_PRESET_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = registry().addPreset(args.preset);
+    return r.ok ? { ok: true, presets: registry().presets() } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.SERVICE_PRESET_DELETE, (e, args) => {
+    const v = validate(CHANNELS.SERVICE_PRESET_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = registry().removePreset(args.id);
+    return r.ok ? { ok: true, presets: registry().presets() } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.SERVICE_PLAN, async (e, args) => {
+    const v = validate(CHANNELS.SERVICE_PLAN, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const plan = registry().planPreset(args.presetId);
+    if (!plan.ok) return { ok: false, error: plan.error };
+    // 叠加真实端口占用情况（只读）
+    const live = {};
+    for (const s of plan.services) {
+      if (s.port) live[s.id] = await pm.findPortOwner(s.port);
+    }
+    return { ok: true, plan, liveOwners: live, blocked: plan.hasCycle || plan.portConflicts.length > 0 };
+  });
+  ipcMain.handle(CHANNELS.SERVICE_START_PRESET, async (e, args) => {
+    const v = validate(CHANNELS.SERVICE_START_PRESET, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const plan = registry().planPreset(args.presetId);
+    if (!plan.ok) return { ok: false, error: plan.error };
+    if (plan.hasCycle) return { ok: false, error: '存在依赖环，已阻止启动: ' + (plan.cycle || []).join(' → '), plan };
+    if (plan.portConflicts.length && !args.force) {
+      return { ok: false, error: '预设内存在端口冲突，已阻止启动（确认后可强制）', plan, portConflicts: plan.portConflicts };
+    }
+    const settings = getSettings();
+    const started = [];
+    const skipped = [];
+    const failed = [];
+    for (const id of plan.order) {
+      const svc = plan.services.find((s) => s.id === id);
+      if (!svc) continue;
+      // 已占用端口 → 跳过，不重复拉起
+      if (svc.port) {
+        const owner = await pm.findPortOwner(svc.port);
+        if (owner) { skipped.push({ id, pid: owner, reason: 'already_running', port: svc.port }); continue; }
+      }
+      const napcatOpts = (svc.type === 'napcat' && settings.napcat)
+        ? { account: settings.napcat.account, passwordMd5: settings.napcat.passwordMd5 }
+        : {};
+      const desc = serviceRegistry.describeStart(svc, napcatOpts);
+      if (!desc.ok) { failed.push({ id, error: desc.error }); continue; }
+      let r;
+      if (svc.type === 'bridge' || svc.type === 'napcat') {
+        r = pm.spawnDetached({ command: pm.resolveNodeBin(d, settings), args: desc.command, cwd: d, env: desc.env });
+      } else if (svc.type === 'comfyui') {
+        const comfyCwd = settings.comfyDir || d;
+        r = pm.spawnDetached({ command: settings.pythonBin || 'python', args: desc.command, cwd: comfyCwd, env: {} });
+      } else {
+        r = pm.spawnDetached({ command: desc.command[0], args: desc.command.slice(1), cwd: svc.cwd || d, env: {} });
+      }
+      if (r.ok) started.push({ id, pid: r.pid }); else failed.push({ id, error: r.error });
+    }
+    if (failed.length) pushNote({ title: '部分服务启动失败', message: failed.map((f) => f.id + ': ' + f.error).join('；'), level: 'warn', source: 'services' });
+    return { ok: true, started, skipped, failed, order: plan.order, warnings: plan.warnings };
+  });
+
+  // ==================== C. ComfyUI 环境检测（只读） ====================
+  ipcMain.handle(CHANNELS.ENV_DETECT, async (e, args) => {
+    const v = validate(CHANNELS.ENV_DETECT, args); if (!v.ok) return { ok: false, error: v.error };
+    const settings = getSettings();
+    const dir = (args && args.dir) || settings.comfyDir || '';
+    const env = await envDetector.detectEnvironment({ dir, runCommand: runFixedCommand });
+    return { ok: true, env };
+  });
+
+  // ==================== D. MCP 外部导入与权限中心 ====================
+  ipcMain.handle(CHANNELS.MCP_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', servers: [] };
+    return mcpService.list(d);
+  });
+  ipcMain.handle(CHANNELS.MCP_PARSE, (e, args) => {
+    const v = validate(CHANNELS.MCP_PARSE, args); if (!v.ok) return { ok: false, error: v.error };
+    return mcpService.parseConfig(args.payload);
+  });
+  ipcMain.handle(CHANNELS.MCP_IMPORT, (e, args) => {
+    const v = validate(CHANNELS.MCP_IMPORT, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return mcpService.importConfig(d, args.payload, { overwrite: !!args.overwrite });
+  });
+  ipcMain.handle(CHANNELS.MCP_SET_ENABLED, (e, args) => {
+    const v = validate(CHANNELS.MCP_SET_ENABLED, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return mcpService.setEnabled(d, args.name, args.enabled);
+  });
+  ipcMain.handle(CHANNELS.MCP_DELETE, (e, args) => {
+    const v = validate(CHANNELS.MCP_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return mcpService.remove(d, args.name);
+  });
+  ipcMain.handle(CHANNELS.MCP_EXPORT, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return mcpService.exportAll(d);
+  });
+
+  // ==================== E. 技能树与分类扩展 ====================
+  ipcMain.handle(CHANNELS.SKILL_TREE, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const list = skillService.list(d);
+    return skillTreeService.buildTree(list.skills, { botDir: d });
+  });
+  ipcMain.handle(CHANNELS.SKILL_CATEGORY_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', categories: skillTreeService.BUILTIN_CATEGORIES };
+    return { ok: true, categories: skillTreeService.allCategories(d) };
+  });
+  ipcMain.handle(CHANNELS.SKILL_CATEGORY_ADD, (e, args) => {
+    const v = validate(CHANNELS.SKILL_CATEGORY_ADD, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillTreeService.addCategory(d, args.category);
+    if (!r.ok) return { ok: false, error: (r.errors || [r.error]).filter(Boolean).join('；') };
+    return { ok: true, id: r.id, categories: skillTreeService.allCategories(d) };
+  });
+  ipcMain.handle(CHANNELS.SKILL_CATEGORY_DELETE, (e, args) => {
+    const v = validate(CHANNELS.SKILL_CATEGORY_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = skillTreeService.removeCategory(d, args.id);
+    if (!r.ok) return { ok: false, error: (r.errors || [r.error]).filter(Boolean).join('；') };
+    return { ok: true, note: r.note, categories: skillTreeService.allCategories(d) };
+  });
+
+  // ==================== F. 市场接入（华为云 / 通用 / 本地） ====================
+  ipcMain.handle(CHANNELS.MARKET_SOURCES, () => marketService.listSources());
+  ipcMain.handle(CHANNELS.MARKET_PARSE, (e, args) => {
+    const v = validate(CHANNELS.MARKET_PARSE, args); if (!v.ok) return { ok: false, error: v.error };
+    return marketService.parseCatalog(args.payload);
+  });
+  ipcMain.handle(CHANNELS.MARKET_FETCH, async (e, args) => {
+    const v = validate(CHANNELS.MARKET_FETCH, args); if (!v.ok) return { ok: false, error: v.error };
+    // 令牌仅在本次请求内使用，不落盘、不写日志
+    const r = await marketService.fetchCatalog(args.sourceId, args.endpoint, { token: args.token || '', timeoutMs: 15000 });
+    if (!r.ok) return { ok: false, error: redactText(r.error), needsAuth: !!r.needsAuth };
+    return { ok: true, items: r.items, warnings: r.warnings, errors: r.errors, meta: r.meta, tokenUsed: !!args.token };
+  });
+  ipcMain.handle(CHANNELS.MARKET_PLAN, (e, args) => {
+    const v = validate(CHANNELS.MARKET_PLAN, args); if (!v.ok) return { ok: false, error: v.error };
+    return { ok: true, plan: marketService.planImport(args.item, { hasToken: !!args.hasToken }) };
+  });
+
+  // ==================== G. 配置备份 / 恢复 / 升级保护 ====================
+  ipcMain.handle(CHANNELS.BACKUP_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', backups: [] };
+    return backupService.listBackups(d);
+  });
+  ipcMain.handle(CHANNELS.BACKUP_CREATE, (e, args) => {
+    const v = validate(CHANNELS.BACKUP_CREATE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = backupService.createBackup(d, {
+      includeSecret: !!(args && args.includeSecret),
+      label: (args && args.label) || '',
+      appVersion: getAppVersion(),
+    });
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, id: r.id, fileCount: r.fileCount, skipped: r.skipped, includeSecret: r.includeSecret, note: r.note };
+  });
+  ipcMain.handle(CHANNELS.BACKUP_DIFF, (e, args) => {
+    const v = validate(CHANNELS.BACKUP_DIFF, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return backupService.diffBackup(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.BACKUP_RESTORE, (e, args) => {
+    const v = validate(CHANNELS.BACKUP_RESTORE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = backupService.restoreBackup(d, args.id, {
+      includeSecret: !!(args && args.includeSecret),
+      force: !!(args && args.force),
+      appVersion: getAppVersion(),
+    });
+    if (r.ok && !r.noop) pushNote({ title: '配置已从备份恢复', message: '备份 ' + args.id + '，恢复 ' + (r.restored || []).length + ' 个文件', level: 'success', source: 'backup' });
+    if (!r.ok) pushNote({ title: '配置恢复失败', message: redactText(r.error || '未知错误'), level: 'error', source: 'backup' });
+    return r;
+  });
+  ipcMain.handle(CHANNELS.BACKUP_DELETE, (e, args) => {
+    const v = validate(CHANNELS.BACKUP_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return backupService.deleteBackup(d, args.id);
+  });
+
+  // ==================== H. 可视化自动化工作流 ====================
+  ipcMain.handle(CHANNELS.WORKFLOW_LIST, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', workflows: [] };
+    return workflowService.list(d);
+  });
+  ipcMain.handle(CHANNELS.WORKFLOW_GET, (e, args) => {
+    const v = validate(CHANNELS.WORKFLOW_GET, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    return workflowService.get(d, args.id);
+  });
+  ipcMain.handle(CHANNELS.WORKFLOW_SAVE, (e, args) => {
+    const v = validate(CHANNELS.WORKFLOW_SAVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = workflowService.save(d, args.workflow);
+    if (!r.ok) return { ok: false, error: (r.errors || [r.error]).filter(Boolean).join('；'), errors: r.errors || [] };
+    return { ok: true, id: r.id, created: r.created, warnings: r.warnings };
+  });
+  ipcMain.handle(CHANNELS.WORKFLOW_DELETE, (e, args) => {
+    const v = validate(CHANNELS.WORKFLOW_DELETE, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const r = workflowService.remove(d, args.id);
+    return r.ok ? { ok: true } : { ok: false, error: r.error };
+  });
+  ipcMain.handle(CHANNELS.WORKFLOW_RUN, async (e, args) => {
+    const v = validate(CHANNELS.WORKFLOW_RUN, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const g = workflowService.get(d, args.id);
+    if (!g.ok) return { ok: false, error: g.error };
+    const reg = registry();
+    const result = await workflowService.runWorkflow(g.workflow, {
+      dryRun: args.dryRun !== false,
+      vars: args.vars || {},
+      listServices: () => reg.allServices().map((s) => s.id),
+      onNotify: (n) => pushNote({ title: n.title, message: n.message, level: 'info', source: 'workflow:' + n.workflowId }),
+      // 安全策略：工作流内**不**直接拉起服务（避免误启动真实机器人）；
+      // 如需启动服务请到「服务编排」页显式操作。
+      onServiceCall: () => ({ ok: true, detail: '已按安全策略跳过（请在「服务编排」页显式启动）' }),
+    });
+    if (!result.ok) pushNote({ title: '工作流执行失败', message: redactText(result.error || ''), level: 'error', source: 'workflow' });
+    return { ok: result.ok, run: result };
+  });
+
+  // ==================== I. 用量与成本管理 ====================
+  ipcMain.handle(CHANNELS.COST_REPORT, async (e, args) => {
+    const v = validate(CHANNELS.COST_REPORT, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
+    const range = (args && args.range) || 'today';
+    const status = await pm.getStatus();
+    const livePort = status.bridge.running ? status.bridge.port : null;
+    const usage = await usageService.getUsage(d, range, {
+      livePort,
+      deps: livePort ? { headers: usageAuthHeaders(d) } : undefined,
+    });
+    const report = costService.buildCostReport(usage, getPrice(), { budget: costService.getBudget(getUserDataDir()), range });
+    return { ok: true, report };
+  });
+  ipcMain.handle(CHANNELS.COST_BUDGET_GET, () => ({ ok: true, budget: costService.getBudget(getUserDataDir()) }));
+  ipcMain.handle(CHANNELS.COST_BUDGET_SET, (e, args) => {
+    const v = validate(CHANNELS.COST_BUDGET_SET, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = costService.setBudget(getUserDataDir(), args.budget);
+    if (!r.ok) return { ok: false, error: (r.errors || [r.error]).filter(Boolean).join('；') };
+    return { ok: true, budget: r.budget };
+  });
+
+  // ==================== J. 日志 / 诊断 / 通知中心 ====================
+  const collectDiag = async () => {
+    const d = needBotDir();
+    const settings = getSettings();
+    const status = await pm.getStatus();
+    const services = [
+      { id: 'bridge', port: status.bridge.port, running: status.bridge.running },
+      { id: 'napcat', port: status.napcat.port, running: status.napcat.running },
+    ];
+    let providerCount = 0;
+    let skillsCount = 0;
+    let mcpCount = 0;
+    let workflowCount = 0;
+    let isCheckout = false;
+    if (d) {
+      try { providerCount = providerService.list(d, configService.readRaw(d).data).providers.length; } catch (_) {}
+      try { skillsCount = skillService.list(d).skills.length; } catch (_) {}
+      try { mcpCount = mcpService.list(d).servers.length; } catch (_) {}
+      try { workflowCount = workflowService.list(d).workflows.length; } catch (_) {}
+      try { isCheckout = botDirResolver.isSourceCheckout(d); } catch (_) {}
+    }
+    return diagnosticService.collectDiagnostics({
+      appVersion: getAppVersion(),
+      electronVersion: (process.versions && process.versions.electron) || '',
+      nodeVersion: (process.versions && process.versions.node) || '',
+      platform: process.platform,
+      arch: process.arch,
+      locale: process.env.LANG || process.env.LANGUAGE || '',
+      userDataDir: getUserDataDir(),
+      botDir: d || '',
+      isCheckout,
+      settings,
+      services,
+      providerCount,
+      skillsCount,
+      mcpCount,
+      workflowCount,
+      logs: (() => { try { return logService.readTail(d, 50).lines.map((l) => ({ level: 'info', message: l })); } catch (_) { return []; } })(),
+    });
+  };
+
+  ipcMain.handle(CHANNELS.DIAG_COLLECT, async () => {
+    const diag = await collectDiag();
+    return { ok: true, diagnostics: diag };
+  });
+  ipcMain.handle(CHANNELS.DIAG_EXPORT, async () => {
+    const diag = await collectDiag();
+    const json = diagnosticService.buildBundle(diag);
+    return { ok: true, json, bytes: Buffer.byteLength(json, 'utf8'), note: '已脱敏：不含密钥、令牌、完整路径或配置内容' };
+  });
+  ipcMain.handle(CHANNELS.NOTIFY_LIST, (e, args) => {
+    const v = validate(CHANNELS.NOTIFY_LIST, args); if (!v.ok) return { ok: false, error: v.error };
+    return diagnosticService.listNotifications(getUserDataDir(), {
+      level: (args && args.level) || null,
+      unreadOnly: !!(args && args.unreadOnly),
+      limit: (args && args.limit) || 50,
+    });
+  });
+  ipcMain.handle(CHANNELS.NOTIFY_MARK_READ, (e, args) => {
+    const v = validate(CHANNELS.NOTIFY_MARK_READ, args); if (!v.ok) return { ok: false, error: v.error };
+    return diagnosticService.markRead(getUserDataDir(), args.id);
+  });
+  ipcMain.handle(CHANNELS.NOTIFY_CLEAR, () => diagnosticService.clearNotifications(getUserDataDir()));
 }
 
 module.exports = { registerHandlers };

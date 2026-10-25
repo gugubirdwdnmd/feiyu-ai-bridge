@@ -76,7 +76,9 @@ async function refreshBotDirLabel() {
 
 function render(page) {
   refreshBotDirLabel();
-  const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, theme: pageTheme, logs: pageLogs, importexport: pageImportExport, about: pageAbout };
+  const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, theme: pageTheme, logs: pageLogs, importexport: pageImportExport, about: pageAbout,
+    // 新增聚合页（模块 A–J）
+    loginservices: pageLoginServices, extensions: pageExtensions, ops: pageOps };
   (map[page] || pageOverview)();
 }
 
@@ -341,8 +343,8 @@ async function pageRun() {
     </div>
     <div class="section">
       <h3>NapCat 快速登录（可选）</h3>
-      <label>QQ 号</label><input id="ncAcc" value="${esc(set.napcat && set.napcat.account || '')}" placeholder="如 1430831772" />
-      <label>密码 MD5</label><input id="ncMd5" value="${esc(set.napcat && set.napcat.passwordMd5 || '')}" placeholder="NAPCAT_QUICK_PASSWORD_MD5" />
+      <label>QQ 号</label><input id="ncAcc" value="${esc(set.napcat && set.napcat.account || '')}" placeholder="如 10000（请填你自己的 QQ 号）" />
+      <label>密码 MD5</label><input id="ncMd5" value="${esc(set.napcat && set.napcat.passwordMd5 || '')}" placeholder="填 32 位密码 MD5（不是明文密码）" />
       <div class="hint">留空则只启动 AI 桥（需外部 NapCat 已就绪）。</div>
     </div>
     <div class="section"><h3>启动输出 / 日志</h3><div class="log" id="runlog"></div></div>`;
@@ -1142,6 +1144,656 @@ async function pageAbout() {
     <div class="hint">用量数据来自机器人真实记录（memory/usage/*.jsonl 或运行中的 /api/usage），不做任何伪造。</div>
   </div>`;
   $('#pickBtn2').onclick = async () => { const d = await pickBotDir(); if (d) pageAbout(); };
+}
+
+/* ==================================================================================
+ * 全量升级新增的聚合页（模块 A–J 的 UI 入口）
+ * 设计原则：
+ *  - 原有 11 个页面**一个不删**；新模块按主题聚合成 3 个页面，页内二级 Tab 切换，
+ *    避免导航被十几个散页撑爆。
+ *  - 仍然只通过 window.feiyu.invoke 的固定通道取数，不直接接触 fs / 网络 / 进程。
+ *  - 任何「有风险」的动作（启动服务、恢复备份、真执行工作流）都需要用户在按钮上显式确认。
+ * ================================================================================== */
+
+const SUBTABS = {
+  loginservices: { active: 'qr', tabs: [['qr', 'QQ 登录中心'], ['svc', '服务编排']] },
+  extensions: { active: 'tree', tabs: [['tree', '技能树'], ['mcp', 'MCP 导入'], ['market', '市场接入']] },
+  ops: { active: 'wf', tabs: [['wf', '自动化工作流'], ['bak', '备份与恢复'], ['cost', '成本与预算'], ['diag', '诊断与通知']] },
+};
+
+/** 渲染一个聚合页：顶部二级 Tab + 下方内容容器。 */
+function mountGroup(key, renderers) {
+  const g = SUBTABS[key];
+  content.innerHTML = '<div class="subnav" id="subnav"></div><div id="subBody"></div>';
+  const nav = $('#subnav');
+  for (const [k, label] of g.tabs) {
+    const b = document.createElement('button');
+    b.className = 'btn sec' + (g.active === k ? ' active' : '');
+    b.textContent = label;
+    b.onclick = () => { g.active = k; mountGroup(key, renderers); };
+    nav.appendChild(b);
+  }
+  const body = $('#subBody');
+  const fn = renderers[g.active];
+  if (fn) fn(body);
+}
+
+async function pageLoginServices() {
+  content.innerHTML = '<h2>登录与服务</h2>';
+  mountGroup('loginservices', { qr: subQrLogin, svc: subServices });
+}
+
+/* ---------------- A. QQ 登录中心（二维码 / 多实例） ---------------- */
+let qrSessionId = null;
+let qrImageSrc = null;
+
+async function subQrLogin(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const [plan, inst] = await Promise.all([invoke(C.NAPCAT_QR_PLAN), invoke(C.NAPCAT_INSTANCE_LIST)]);
+  const p = (plan && plan.ok) ? plan : { steps: [], securityNotes: [], candidateEndpoints: [] };
+  const list = (inst && inst.instances) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>二维码登录</h3>
+      <div class="hint">${(p.steps || []).map((s, i) => (i + 1) + '. ' + esc(s)).join('<br>')}</div>
+      <div class="row" style="margin-top:10px">
+        <label>NapCat 二维码接口地址</label>
+        <input id="qrEp" placeholder="如 http://127.0.0.1:3000/get_qrcode（留空则只显示已配置的地址）" style="min-width:360px" />
+        <button class="btn" id="qrGet">获取二维码</button>
+      </div>
+      <div class="hint">候选路径（不同 NapCat 版本可能不同，请以你的实际接口为准）：${esc((p.candidateEndpoints || []).join(' / '))}</div>
+      <div id="qrBox" style="margin-top:12px"></div>
+      <div class="hint" style="margin-top:8px">安全提示：${(p.securityNotes || []).map((s) => esc(s)).join('；')}</div>
+    </div>
+    <div class="section">
+      <h3>实例列表（${list.length}）</h3>
+      <div id="instList">${list.length ? list.map((x) => `
+        <div class="card" style="display:inline-block;margin:6px 8px 0 0;min-width:220px">
+          <div class="k">${esc(x.name)} ${x.mode === 'quick' ? '<span class="badge on">快速登录</span>' : '<span class="badge off">扫码</span>'}</div>
+          <div class="v">${esc(x.account || '未填写账号')}</div>
+          <div class="hint">id: ${esc(x.id)}｜端口: ${esc(x.port == null ? '默认' : x.port)}</div>
+          <div class="hint">最近登录: ${esc(x.lastLoginAt || '—')}</div>
+          <div class="row"><button class="btn sec" data-del="${esc(x.id)}">删除</button></div>
+        </div>`).join('') : '<div class="hint">还没有实例。可在下方添加。</div>'}</div>
+      <h3 style="margin-top:14px">新增 / 更新实例</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label>ID</label><input id="iId" placeholder="如 main" style="width:110px" />
+        <label>名称</label><input id="iName" placeholder="主号" style="width:120px" />
+        <label>QQ 号</label><input id="iAcc" placeholder="你的 QQ 号（仅本机保存）" style="width:160px" />
+        <label>方式</label><select id="iMode"><option value="qr">扫码登录</option><option value="quick">快速登录</option></select>
+        <label>端口</label><input id="iPort" placeholder="3000" style="width:80px" />
+        <button class="btn" id="iSave">保存实例</button>
+      </div>
+      <div class="hint">密码不会被本工具保存：快速登录的密码 MD5 只在启动时通过环境变量注入子进程。</div>
+      <div id="iMsg"></div>
+    </div>`;
+
+  const box = $('#qrBox');
+  const drawQr = (s) => {
+    qrSessionId = s.id;
+    qrImageSrc = s.qrImage || null;
+    box.innerHTML = `
+      <div class="card" style="display:inline-block">
+        <div class="k">状态：${esc(s.state)}</div>
+        <div class="v">${esc(s.message || '')}</div>
+        ${s.qrImage ? `<div style="margin:10px 0"><img src="${esc(s.qrImage)}" alt="登录二维码" style="width:220px;height:220px;image-rendering:pixelated;background:#fff;padding:8px;border-radius:8px" /></div>` : ''}
+        ${s.qrUrl ? `<div class="hint">二维码链接：${esc(s.qrUrl)}</div>` : ''}
+        <div class="row"><button class="btn sec" id="qrPoll">刷新登录状态</button></div>
+        <div class="hint">二维码等同一次性凭据，请勿截图外传；本工具不会把它写进日志或诊断包。</div>
+      </div>`;
+    const pb = $('#qrPoll');
+    if (pb) pb.onclick = async () => {
+      if (!qrSessionId) return;
+      const r = await invoke(C.NAPCAT_QR_POLL, { sessionId: qrSessionId });
+      if (r && r.session) drawQr(r.session); else if (r && r.error) box.innerHTML = '<div class="err">' + esc(r.error) + '</div>';
+    };
+  };
+
+  $('#qrGet').onclick = async () => {
+    const endpoint = $('#qrEp').value.trim();
+    box.innerHTML = '<div class="hint">正在请求 NapCat 二维码接口…</div>';
+    const r = await invoke(C.NAPCAT_QR_START, endpoint ? { endpoint } : {});
+    if (r && r.session) {
+      if (r.session.qrImage || r.session.qrUrl) drawQr(r.session);
+      else box.innerHTML = '<div class="warn" style="padding:8px">' + esc(r.session.message || r.error || '未取得二维码') + '</div>';
+    } else if (r && r.error) box.innerHTML = '<div class="err">' + esc(r.error) + '</div>';
+  };
+
+  $('#iSave').onclick = async () => {
+    const instance = {
+      id: $('#iId').value.trim(), name: $('#iName').value.trim(),
+      account: $('#iAcc').value.trim(), mode: $('#iMode').value,
+    };
+    const port = parseInt($('#iPort').value, 10);
+    if (!isNaN(port)) instance.port = port;
+    const r = await invoke(C.NAPCAT_INSTANCE_SAVE, { instance });
+    $('#iMsg').innerHTML = r.ok ? '<span class="ok">已保存</span>' : '<span class="err">' + esc(r.error) + '</span>';
+    if (r.ok) setTimeout(() => subQrLogin(body), 400);
+  };
+
+  document.querySelectorAll('#instList [data-del]').forEach((b) => b.onclick = async () => {
+    if (!confirm('删除该实例记录？（不会影响正在运行的机器人）')) return;
+    const r = await invoke(C.NAPCAT_INSTANCE_DELETE, { id: b.dataset.del });
+    if (r.ok) subQrLogin(body); else alert('删除失败：' + r.error);
+  });
+}
+
+/* ---------------- B. 服务编排与一键启动 ---------------- */
+async function subServices(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.SERVICE_LIST);
+  const services = (r && r.services) || [];
+  const presets = (r && r.presets) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>预设组合（一键启动）</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <select id="pvPreset">${presets.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
+        <button class="btn sec" id="pvPlan">生成计划</button>
+        <button class="btn" id="pvStart">一键启动</button>
+      </div>
+      <div class="hint">启动前会先做「依赖环 / 端口冲突 / 已在运行」检查；任一不通过都不会盲启动。</div>
+      <div id="pvOut" style="margin-top:10px"></div>
+    </div>
+    <div class="section">
+      <h3>服务注册表（${services.length}）</h3>
+      <table class="tbl"><thead><tr><th>id</th><th>名称</th><th>类型</th><th>端口</th><th>来源</th><th></th></tr></thead><tbody>
+      ${services.map((s) => `<tr>
+        <td>${esc(s.id)}</td><td>${esc(s.name)}</td><td>${esc(s.type || 'generic')}</td>
+        <td>${esc(s.port == null ? '—' : s.port)}</td>
+        <td>${s.builtin ? '<span class="badge on">内置</span>' : '<span class="badge off">自定义</span>'}</td>
+        <td>${s.builtin ? '' : `<button class="btn sec" data-sdel="${esc(s.id)}">删除</button>`}</td>
+      </tr>`).join('')}
+      </tbody></table>
+      <h3 style="margin-top:14px">新增自定义服务</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <input id="svId" placeholder="id（字母数字-_）" style="width:140px" />
+        <input id="svName" placeholder="名称" style="width:130px" />
+        <input id="svPort" placeholder="端口" style="width:80px" />
+        <input id="svCmd" placeholder="可执行文件，如 python" style="width:170px" />
+        <input id="svArgs" placeholder="参数，空格分隔，如 main.py --port 8188" style="min-width:260px" />
+        <button class="btn" id="svSave">保存</button>
+      </div>
+      <div id="svMsg"></div>
+    </div>`;
+
+  $('#pvPlan').onclick = async () => {
+    const presetId = $('#pvPreset').value;
+    const out = $('#pvOut'); out.innerHTML = '<div class="hint">检查中…</div>';
+    const p = await invoke(C.SERVICE_PLAN, { presetId });
+    if (!p.ok) { out.innerHTML = '<div class="err">' + esc(p.error) + '</div>'; return; }
+    const pl = p.plan;
+    out.innerHTML = `
+      <div class="card">
+        <div class="k">启动顺序</div><div class="v">${esc((pl.order || []).join(' → ') || '—')}</div>
+        <div class="hint">依赖环: ${pl.hasCycle ? '<span class="err">有（' + esc((pl.cycle || []).join(' → ')) + '）</span>' : '<span class="ok">无</span>'}
+          ｜端口冲突: ${pl.portConflicts.length ? '<span class="err">' + esc(pl.portConflicts.map((x) => '端口' + x.port + '(' + x.services.join('/') + ')').join('、')) + '</span>' : '<span class="ok">无</span>'}</div>
+        <div class="hint">当前占用: ${esc(Object.keys(p.liveOwners || {}).map((k) => k + (p.liveOwners[k] ? '(PID ' + p.liveOwners[k] + ')' : '(空闲)')).join('、') || '—')}</div>
+        ${(pl.warnings || []).length ? '<div class="warn" style="margin-top:6px">' + pl.warnings.map((w) => esc(w)).join('<br>') + '</div>' : ''}
+      </div>`;
+  };
+
+  $('#pvStart').onclick = async () => {
+    const presetId = $('#pvPreset').value;
+    if (!confirm('将启动该预设内的服务（已在运行或端口被占用的会自动跳过）。继续？')) return;
+    const out = $('#pvOut'); out.innerHTML = '<div class="hint">启动中…</div>';
+    const r = await invoke(C.SERVICE_START_PRESET, { presetId });
+    if (!r.ok) { out.innerHTML = '<div class="err">' + esc(r.error) + '</div>'; return; }
+    out.innerHTML = `<div class="card">
+      <div class="k">启动结果</div>
+      <div class="v">已启动 ${r.started.length} 个｜跳过 ${r.skipped.length} 个｜失败 ${r.failed.length} 个</div>
+      <div class="hint">${esc(r.started.map((x) => x.id + '(PID ' + x.pid + ')').join('、') || '—')}</div>
+      ${r.skipped.length ? '<div class="hint">跳过：' + esc(r.skipped.map((x) => x.id + '：' + (x.reason === 'already_running' ? '端口已被占用' : x.reason)).join('、')) + '</div>' : ''}
+      ${r.failed.length ? '<div class="err">失败：' + esc(r.failed.map((x) => x.id + '：' + x.error).join('；')) + '</div>' : ''}
+    </div>`;
+  };
+
+  $('#svSave').onclick = async () => {
+    const service = {
+      id: $('#svId').value.trim(), name: $('#svName').value.trim(),
+      type: 'generic', command: ($('#svArgs').value.trim() ? [$('#svCmd').value.trim()].concat($('#svArgs').value.trim().split(/\s+/)) : [$('#svCmd').value.trim()]),
+    };
+    const port = parseInt($('#svPort').value, 10);
+    if (!isNaN(port)) service.port = port;
+    const r = await invoke(C.SERVICE_SAVE, { service });
+    $('#svMsg').innerHTML = r.ok ? '<span class="ok">已保存</span>' : '<span class="err">' + esc(r.error || (r.errors || []).join('；')) + '</span>';
+    if (r.ok) setTimeout(() => subServices(body), 300);
+  };
+  document.querySelectorAll('[data-sdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('删除自定义服务 ' + b.dataset.sdel + '？')) return;
+    const r = await invoke(C.SERVICE_DELETE, { id: b.dataset.sdel });
+    if (r.ok) subServices(body); else alert(r.error);
+  });
+}
+
+async function pageExtensions() {
+  content.innerHTML = '<h2>技能与扩展</h2>';
+  mountGroup('extensions', { tree: subSkillTree, mcp: subMcp, market: subMarket });
+}
+
+/* ---------------- E. 技能树（分类 + 冲突） ---------------- */
+async function subSkillTree(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.SKILL_TREE);
+  if (!r.ok) { body.innerHTML = '<div class="err">' + esc(r.error) + '</div>'; return; }
+  const s = r.stats || {};
+  body.innerHTML = `
+    <div class="row" style="flex-wrap:wrap;gap:8px;margin-bottom:10px">
+      <span class="badge on">技能 ${s.skills || 0}</span>
+      <span class="badge on">启用 ${s.enabled || 0}</span>
+      <span class="badge ${s.errors ? 'off' : 'on'}">错误 ${s.errors || 0}</span>
+      <span class="badge ${s.warnings ? 'off' : 'on'}">警告 ${s.warnings || 0}</span>
+      <span class="badge on">分类 ${s.categories || 0}（自定义 ${s.customCategories || 0}）</span>
+    </div>
+    ${(r.issues || []).length ? `<div class="section"><h3>冲突与依赖问题</h3>${r.issues.map((i) => `<div class="${i.level === 'error' ? 'err' : 'warn'}" style="padding:3px 0">[${esc(i.level)}] ${esc(i.message)}</div>`).join('')}</div>` : '<div class="ok" style="padding:6px 0">未发现冲突或依赖问题</div>'}
+    <div class="section"><h3>技能树</h3>
+      ${(r.tree || []).filter((c) => c.count > 0 || !c.parent).map((c) => `
+        <div class="card" style="display:inline-block;vertical-align:top;margin:6px 8px 0 0;min-width:240px">
+          <div class="k">${esc(c.name)} <small>${esc(c.id)}</small></div>
+          <div class="hint">${esc(c.description || '')}</div>
+          <div class="v">${c.count} 个技能</div>
+          ${c.skills.length ? '<div class="hint">' + c.skills.map((x) => esc(x.name) + (x.enabled ? '' : '(停用)')).join('、') + '</div>' : ''}
+          ${!c.builtin ? `<div class="row"><button class="btn sec" data-cdel="${esc(c.id)}">删除分类</button></div>` : ''}
+        </div>`).join('')}
+    </div>
+    <div class="section"><h3>新增分类</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <input id="ctId" placeholder="id（小写字母数字-_）" style="width:180px" />
+        <input id="ctName" placeholder="显示名称" style="width:140px" />
+        <input id="ctDesc" placeholder="说明（可选）" style="min-width:240px" />
+        <button class="btn" id="ctAdd">添加</button>
+      </div><div id="ctMsg"></div>
+      <div class="hint">分类只影响桌面端的组织方式，不改写机器人的 feiyu_skills.json。</div>
+    </div>`;
+  $('#ctAdd').onclick = async () => {
+    const category = { id: $('#ctId').value.trim(), name: $('#ctName').value.trim(), description: $('#ctDesc').value.trim() };
+    const x = await invoke(C.SKILL_CATEGORY_ADD, { category });
+    $('#ctMsg').innerHTML = x.ok ? '<span class="ok">已添加</span>' : '<span class="err">' + esc(x.error) + '</span>';
+    if (x.ok) setTimeout(() => subSkillTree(body), 300);
+  };
+  document.querySelectorAll('[data-cdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('删除该分类？其下技能会落到「未分类」。')) return;
+    const x = await invoke(C.SKILL_CATEGORY_DELETE, { id: b.dataset.cdel });
+    if (x.ok) subSkillTree(body); else alert(x.error);
+  });
+}
+
+/* ---------------- D. MCP 导入与权限中心 ---------------- */
+async function subMcp(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.MCP_LIST);
+  const servers = (r && r.servers) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>导入 MCP 配置</h3>
+      <div class="hint">粘贴标准 MCP 配置（<code>{"mcpServers":{...}}</code>）。导入只做「解析 + 安全审查 + 保存为禁用状态」，<b>绝不会执行</b>其中的命令。</div>
+      <textarea id="mcpIn" rows="7" placeholder='{"mcpServers":{"example":{"command":"npx","args":["-y","some-mcp-server"]}}}' style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn sec" id="mcpParse">解析并审查</button>
+        <button class="btn" id="mcpImport">确认导入</button>
+        <label style="margin-left:8px"><input type="checkbox" id="mcpOverwrite" /> 覆盖同名</label>
+      </div>
+      <div id="mcpPreview"></div>
+    </div>
+    <div class="section">
+      <h3>已导入（${servers.length}）</h3>
+      ${servers.length ? servers.map((s) => `
+        <div class="card" style="margin-top:8px">
+          <div class="k">${esc(s.name)} <span class="badge ${s.risk === 'high' ? 'off' : 'on'}">风险：${esc(s.risk)}</span> ${s.enabled ? '<span class="badge on">已登记启用</span>' : '<span class="badge off">禁用</span>'}</div>
+          <div class="hint">传输: ${esc(s.transport)}｜命令: ${esc((s.argv || []).join(' ') || '—')}${s.url ? '｜地址: ' + esc(s.url) : ''}</div>
+          ${(s.envKeys || []).length ? '<div class="hint">环境变量: ' + esc(s.envKeys.join('、')) + '（值已掩码）</div>' : ''}
+          ${(s.findings || []).length ? '<div class="hint">' + s.findings.map((f) => '[' + esc(f.level) + '] ' + esc(f.message)).join('<br>') + '</div>' : ''}
+          <div class="row">
+            <button class="btn sec" data-mtoggle="${esc(s.name)}" data-on="${s.enabled ? '0' : '1'}">${s.enabled ? '禁用' : '启用'}</button>
+            <button class="btn sec" data-mdel="${esc(s.name)}">删除</button>
+          </div>
+        </div>`).join('') : '<div class="hint">还没有导入任何 MCP 配置。</div>'}
+      <div class="hint" style="margin-top:8px">「启用」只是登记状态；真正让机器人使用 MCP 需要机器人侧支持，本工具不代为实现。</div>
+    </div>`;
+
+  const readPayload = () => {
+    const txt = $('#mcpIn').value.trim();
+    if (!txt) return null;
+    try { return JSON.parse(txt); } catch (e) { $('#mcpPreview').innerHTML = '<div class="err">JSON 语法错误：' + esc(e.message) + '</div>'; return null; }
+  };
+
+  $('#mcpParse').onclick = async () => {
+    const payload = readPayload(); if (!payload) return;
+    const p = await invoke(C.MCP_PARSE, { payload });
+    const c = p.counts || {};
+    $('#mcpPreview').innerHTML = `<div class="card">
+      <div class="k">解析结果</div>
+      <div class="v">共 ${c.total || 0} 个：高危 ${c.high || 0}｜中 ${c.medium || 0}｜低 ${c.low || 0}</div>
+      ${(p.errors || []).length ? '<div class="err">' + p.errors.map(esc).join('<br>') + '</div>' : '<div class="ok">结构校验通过</div>'}
+      ${(p.warnings || []).length ? '<div class="warn">' + p.warnings.map(esc).join('<br>') + '</div>' : ''}
+      ${(p.servers || []).map((s) => `<div class="hint" style="margin-top:6px"><b>${esc(s.name)}</b>（${esc(s.risk)}）：${(s.findings || []).map((f) => esc(f.message)).join('；') || '无风险项'}<br>权限需求: ${(s.permissions || []).map((x) => esc(x.label)).join('、') || '—'}</div>`).join('')}
+    </div>`;
+  };
+
+  $('#mcpImport').onclick = async () => {
+    const payload = readPayload(); if (!payload) return;
+    if (!confirm('导入后会以「禁用」状态保存，不会执行任何命令。继续？')) return;
+    const p = await invoke(C.MCP_IMPORT, { payload, overwrite: $('#mcpOverwrite').checked });
+    $('#mcpPreview').innerHTML = p.ok
+      ? '<div class="ok">已保存：' + esc((p.added || []).join('、') || '—') + '。' + esc(p.note || '') + '</div>'
+      : '<div class="err">' + esc((p.errors || [p.error]).filter(Boolean).join('；')) + '</div>';
+    if (p.ok) setTimeout(() => subMcp(body), 500);
+  };
+
+  document.querySelectorAll('[data-mtoggle]').forEach((b) => b.onclick = async () => {
+    const x = await invoke(C.MCP_SET_ENABLED, { name: b.dataset.mtoggle, enabled: b.dataset.on === '1' });
+    if (x.ok) subMcp(body); else alert(x.error);
+  });
+  document.querySelectorAll('[data-mdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('删除 MCP 配置 ' + b.dataset.mdel + '？')) return;
+    const x = await invoke(C.MCP_DELETE, { name: b.dataset.mdel });
+    if (x.ok) subMcp(body); else alert(x.error);
+  });
+}
+
+/* ---------------- F. 市场接入 ---------------- */
+async function subMarket(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.MARKET_SOURCES);
+  const sources = (r && r.sources) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>来源</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <select id="mkSrc">${sources.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select>
+        <input id="mkEp" placeholder="目录 HTTPS 地址" style="min-width:300px" />
+        <input id="mkTok" type="password" placeholder="访问令牌（仅本次使用，不保存）" style="min-width:200px" />
+        <button class="btn" id="mkFetch">获取目录</button>
+      </div>
+      <div class="hint" id="mkSrcHint"></div>
+      <div class="hint">也可直接粘贴 catalogue JSON：</div>
+      <textarea id="mkJson" rows="5" placeholder='{"items":[{"id":"x","name":"示例","type":"skill","downloadUrl":"https://...","sha256":"..."}]}' style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="margin-top:8px"><button class="btn sec" id="mkParse">解析粘贴内容</button></div>
+      <div id="mkOut"></div>
+    </div>
+    <div class="hint">本工具不代你购买、不绕过鉴权；付费或需鉴权的条目会明确拒绝导入。</div>`;
+
+  const paint = (items, warnings) => {
+    const out = $('#mkOut');
+    if (!items || !items.length) { out.innerHTML = '<div class="hint">没有条目</div>'; return; }
+    out.innerHTML = `<div class="card"><div class="k">目录条目（${items.length}）</div>
+      ${(warnings || []).length ? '<div class="warn">' + warnings.map(esc).join('<br>') + '</div>' : ''}
+      <table class="tbl"><thead><tr><th>id</th><th>名称</th><th>类型</th><th>版本</th><th>完整性</th><th>鉴权/付费</th></tr></thead><tbody>
+      ${items.map((i) => `<tr>
+        <td>${esc(i.id)}</td><td>${esc(i.name)}</td><td>${esc(i.type)}</td><td>${esc(i.version || '—')}</td>
+        <td>${i.integrity === 'declared' ? '<span class="badge on">已声明 sha256</span>' : '<span class="badge off">未提供</span>'}</td>
+        <td>${i.requiresAuth ? '<span class="badge off">需鉴权</span>' : ''}${i.paid ? '<span class="badge off">付费</span>' : ''}${!i.requiresAuth && !i.paid ? '<span class="badge on">可导入</span>' : ''}</td>
+      </tr>`).join('')}</tbody></table>
+      <div class="hint">导入动作需要在「技能扩展」页逐项确认；此处只做展示与校验。</div></div>`;
+  };
+
+  $('#mkSrc').onchange = () => {
+    const s = sources.find((x) => x.id === $('#mkSrc').value) || {};
+    $('#mkSrcHint').textContent = (s.description || '') + (s.docHint ? ' ' + s.docHint : '');
+  };
+  $('#mkSrc').onchange();
+
+  $('#mkFetch').onclick = async () => {
+    const out = $('#mkOut'); out.innerHTML = '<div class="hint">请求中…</div>';
+    const x = await invoke(C.MARKET_FETCH, { sourceId: $('#mkSrc').value, endpoint: $('#mkEp').value.trim(), token: $('#mkTok').value });
+    if (!x.ok) { out.innerHTML = '<div class="err">' + esc(x.error) + '</div>'; return; }
+    paint(x.items, x.warnings);
+  };
+  $('#mkParse').onclick = async () => {
+    const txt = $('#mkJson').value.trim();
+    if (!txt) return;
+    let payload;
+    try { payload = JSON.parse(txt); } catch (e) { $('#mkOut').innerHTML = '<div class="err">JSON 语法错误：' + esc(e.message) + '</div>'; return; }
+    const x = await invoke(C.MARKET_PARSE, { payload });
+    paint(x.items, (x.warnings || []).concat(x.errors || []));
+  };
+}
+
+async function pageOps() {
+  content.innerHTML = '<h2>自动化与运维</h2>';
+  mountGroup('ops', { wf: subWorkflow, bak: subBackup, cost: subCost, diag: subDiag });
+}
+
+/* ---------------- H. 自动化工作流 ---------------- */
+const WF_TEMPLATE = {
+  id: 'demo-flow', name: '示例流程',
+  nodes: [
+    { id: 'start', type: 'start', title: '开始' },
+    { id: 'set', type: 'setVar', title: '设置变量', params: { name: 'count', value: '3' } },
+    { id: 'cond', type: 'if', title: '判断', params: { expr: 'count > 2' } },
+    { id: 'msg', type: 'log', title: '记录', params: { message: '计数为 {{count}}' } },
+    { id: 'end', type: 'end', title: '结束' },
+  ],
+  edges: [
+    { from: 'start', to: 'set' }, { from: 'set', to: 'cond' },
+    { from: 'cond', to: 'msg', when: true }, { from: 'msg', to: 'end' },
+  ],
+};
+
+async function subWorkflow(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.WORKFLOW_LIST);
+  const list = (r && r.workflows) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>工作流（${list.length}）</h3>
+      ${list.length ? `<table class="tbl"><thead><tr><th>id</th><th>名称</th><th>节点</th><th>连线</th><th>更新时间</th><th></th></tr></thead><tbody>
+        ${list.map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.name)}</td><td>${esc(w.nodeCount)}</td><td>${esc(w.edgeCount)}</td><td>${esc(w.updatedAt || '—')}</td>
+        <td><button class="btn sec" data-wopen="${esc(w.id)}">打开</button> <button class="btn sec" data-wdel="${esc(w.id)}">删除</button></td></tr>`).join('')}
+      </tbody></table>` : '<div class="hint">还没有工作流。可用下方模板快速创建一个。</div>'}
+    </div>
+    <div class="section">
+      <h3>编辑器（JSON）</h3>
+      <div class="hint">支持节点类型：start / log / setVar / if / delay / notify / serviceCall / end。条件只支持 <code>变量 op 值</code>（op 为 == != &gt; &gt;= &lt; &lt;= contains），不支持任意表达式。</div>
+      <textarea id="wfJson" rows="16" style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn sec" id="wfTpl">载入模板</button>
+        <button class="btn" id="wfSave">保存</button>
+        <button class="btn sec" id="wfDry">演练（不产生副作用）</button>
+        <button class="btn" id="wfRun">真正执行</button>
+      </div>
+      <div id="wfOut"></div>
+    </div>`;
+
+  $('#wfTpl').onclick = () => { $('#wfJson').value = JSON.stringify(WF_TEMPLATE, null, 2); };
+  if (!list.length) $('#wfJson').value = JSON.stringify(WF_TEMPLATE, null, 2);
+
+  const readWf = () => {
+    try { return JSON.parse($('#wfJson').value); } catch (e) { $('#wfOut').innerHTML = '<div class="err">JSON 语法错误：' + esc(e.message) + '</div>'; return null; }
+  };
+
+  $('#wfSave').onclick = async () => {
+    const wf = readWf(); if (!wf) return;
+    const x = await invoke(C.WORKFLOW_SAVE, { workflow: wf });
+    $('#wfOut').innerHTML = x.ok ? '<div class="ok">已保存' + (x.warnings && x.warnings.length ? '（提示：' + esc(x.warnings.join('；')) + '）' : '') + '</div>'
+      : '<div class="err">' + esc(x.error) + '</div>';
+    if (x.ok) setTimeout(() => subWorkflow(body), 400);
+  };
+
+  const run = async (dryRun) => {
+    const wf = readWf(); if (!wf) return;
+    const out = $('#wfOut');
+    out.innerHTML = '<div class="hint">执行中…</div>';
+    const x = await invoke(C.WORKFLOW_RUN, { id: wf.id, dryRun });
+    if (!x.ok) { out.innerHTML = '<div class="err">' + esc((x.run && x.run.error) || x.error || '执行失败') + '</div>'; return; }
+    const rr = x.run;
+    out.innerHTML = `<div class="card">
+      <div class="k">${dryRun ? '演练' : '执行'}结果：${rr.ok ? '成功' : '失败'}</div>
+      <div class="v">${rr.steps} 步｜耗时 ${esc(rr.elapsedMs)}ms</div>
+      <table class="tbl"><thead><tr><th>#</th><th>节点</th><th>类型</th><th>状态</th><th>说明</th></tr></thead><tbody>
+      ${(rr.trace || []).map((t) => `<tr><td>${esc(t.step)}</td><td>${esc(t.nodeId)}</td><td>${esc(t.type)}</td><td>${esc(t.status)}</td><td>${esc(t.detail || '')}</td></tr>`).join('')}
+      </tbody></table>
+      ${rr.error ? '<div class="err">' + esc(rr.error) + '</div>' : ''}
+    </div>`;
+  };
+  $('#wfDry').onclick = () => run(true);
+  $('#wfRun').onclick = () => { if (confirm('真正执行该工作流？（delay 会真实等待，notify 会写入通知中心；服务启动类节点会被安全策略跳过）')) run(false); };
+
+  document.querySelectorAll('[data-wopen]').forEach((b) => b.onclick = async () => {
+    const x = await invoke(C.WORKFLOW_GET, { id: b.dataset.wopen });
+    if (x.ok) $('#wfJson').value = JSON.stringify(x.workflow, null, 2);
+    else alert(x.error);
+  });
+  document.querySelectorAll('[data-wdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('删除工作流 ' + b.dataset.wdel + '？')) return;
+    const x = await invoke(C.WORKFLOW_DELETE, { id: b.dataset.wdel });
+    if (x.ok) subWorkflow(body); else alert(x.error);
+  });
+}
+
+/* ---------------- G. 备份与恢复 ---------------- */
+async function subBackup(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.BACKUP_LIST);
+  const backups = (r && r.backups) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>创建备份</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <input id="bkLabel" placeholder="备注（可选）" style="width:220px" />
+        <label><input type="checkbox" id="bkSecret" /> 包含密钥文件</label>
+        <button class="btn" id="bkNew">立即备份</button>
+      </div>
+      <div class="hint">默认<b>不</b>备份 secrets.json / feiyu_provider_secrets.json；勾选后会一并备份，请妥善保管备份目录。</div>
+      <div id="bkMsg"></div>
+    </div>
+    <div class="section">
+      <h3>已有备份（${backups.length}）</h3>
+      ${backups.length ? backups.map((b) => `
+        <div class="card" style="margin-top:8px">
+          <div class="k">${esc(b.id)} ${b.includeSecret ? '<span class="badge off">含密钥</span>' : '<span class="badge on">不含密钥</span>'}</div>
+          <div class="hint">${esc(b.createdAt || '')}｜文件 ${esc(b.fileCount)} 个｜${esc((b.bytes / 1024).toFixed(1))} KB ${b.label ? '｜' + esc(b.label) : ''}</div>
+          <div class="row">
+            <button class="btn sec" data-bdiff="${esc(b.id)}">差异预览</button>
+            <button class="btn sec" data-brestore="${esc(b.id)}">恢复此备份</button>
+            <button class="btn sec" data-bdel="${esc(b.id)}">删除</button>
+          </div>
+        </div>`).join('') : '<div class="hint">还没有备份。</div>'}
+      <div id="bkOut" style="margin-top:10px"></div>
+    </div>`;
+
+  $('#bkNew').onclick = async () => {
+    const x = await invoke(C.BACKUP_CREATE, { label: $('#bkLabel').value.trim(), includeSecret: $('#bkSecret').checked });
+    $('#bkMsg').innerHTML = x.ok ? '<span class="ok">已备份（' + esc(x.fileCount) + ' 个文件）</span>' : '<span class="err">' + esc(x.error) + '</span>';
+    if (x.ok) setTimeout(() => subBackup(body), 400);
+  };
+
+  document.querySelectorAll('[data-bdiff]').forEach((b) => b.onclick = async () => {
+    const x = await invoke(C.BACKUP_DIFF, { id: b.dataset.bdiff });
+    const out = $('#bkOut');
+    if (!x.ok) { out.innerHTML = '<div class="err">' + esc(x.error) + '</div>'; return; }
+    out.innerHTML = `<div class="card"><div class="k">差异预览：${esc(x.id)}</div>
+      <div class="v">新增 ${esc(x.counts.added)}｜变更 ${esc(x.counts.changed)}｜一致 ${esc(x.counts.same)}｜仅当前有 ${esc(x.counts.removed)}</div>
+      <table class="tbl"><thead><tr><th>文件</th><th>状态</th><th>当前字节</th><th>备份字节</th></tr></thead><tbody>
+      ${x.files.map((f) => `<tr><td>${esc(f.name)}</td><td>${esc(f.status)}</td><td>${esc(f.bytesFrom == null ? '—' : f.bytesFrom)}</td><td>${esc(f.bytesTo == null ? '—' : f.bytesTo)}</td></tr>`).join('')}
+      </tbody></table>
+      ${(x.warnings || []).length ? '<div class="warn">' + x.warnings.map(esc).join('<br>') + '</div>' : ''}</div>`;
+  });
+
+  document.querySelectorAll('[data-brestore]').forEach((b) => b.onclick = async () => {
+    if (!confirm('恢复会用备份内容覆盖当前配置（恢复前会自动再备份一次当前状态）。继续？')) return;
+    const x = await invoke(C.BACKUP_RESTORE, { id: b.dataset.brestore });
+    const out = $('#bkOut');
+    out.innerHTML = x.ok
+      ? `<div class="card"><div class="k">恢复完成</div><div class="v">已恢复 ${esc((x.restored || []).length)} 个文件</div>
+         ${x.preRestoreId ? '<div class="hint">恢复前快照：' + esc(x.preRestoreId) + '</div>' : ''}
+         ${(x.skipped || []).length ? '<div class="hint">跳过：' + esc(x.skipped.map((s) => s.name + '(' + s.reason + ')').join('、')) + '</div>' : ''}
+         ${(x.warnings || []).length ? '<div class="warn">' + x.warnings.map(esc).join('<br>') + '</div>' : ''}</div>`
+      : `<div class="err">恢复失败：${esc(x.error)}${x.rolledBack ? '（已回滚到恢复前状态）' : ''}</div>`;
+  });
+  document.querySelectorAll('[data-bdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('删除备份 ' + b.dataset.bdel + '？此操作不可恢复。')) return;
+    const x = await invoke(C.BACKUP_DELETE, { id: b.dataset.bdel });
+    if (x.ok) subBackup(body); else alert(x.error);
+  });
+}
+
+/* ---------------- I. 成本与预算 ---------------- */
+async function subCost(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const [rep, bud] = await Promise.all([invoke(C.COST_REPORT, { range: 'month' }), invoke(C.COST_BUDGET_GET)]);
+  const rp = (rep && rep.report) || {};
+  const b = (bud && bud.budget) || {};
+  const bs = rp.budget || {};
+  body.innerHTML = `
+    <div class="section">
+      <h3>本月估算（${esc(rp.currency || 'CNY')}）</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <span class="badge on">请求 ${esc(rp.totals ? rp.totals.requests : 0)}</span>
+        <span class="badge on">Token ${esc(rp.totals ? rp.totals.totalTokens : 0)}</span>
+        <span class="badge ${rp.priced ? 'on' : 'off'}">估算费用 ${rp.priced ? esc(rp.totals.cost) : '未计价'}</span>
+      </div>
+      <div class="hint" style="margin-top:6px">${esc(rp.note || '')}</div>
+      <div class="warn" style="margin-top:6px">${esc(rp.disclaimer || '')}</div>
+      ${bs.configured ? `<div class="${bs.level === 'exceeded' ? 'err' : (bs.level === 'warn' ? 'warn' : 'ok')}" style="margin-top:8px">${esc(bs.message || '')}</div>` : ''}
+      ${(rp.byModel || []).length ? `<table class="tbl" style="margin-top:10px"><thead><tr><th>模型</th><th>输入 Token</th><th>输出 Token</th><th>请求</th><th>估算费用</th></tr></thead><tbody>
+        ${rp.byModel.map((m) => `<tr><td>${esc(m.model)}</td><td>${fmt(m.promptTokens)}</td><td>${fmt(m.completionTokens)}</td><td>${fmt(m.requests)}</td>
+        <td>${m.priced ? esc(m.cost) : '<span class="warn">未定价</span>'}</td></tr>`).join('')}
+      </tbody></table>` : '<div class="hint">本月没有可统计的模型用量。</div>'}
+      ${(rp.unpricedModels || []).length ? '<div class="warn">以下模型未在价格表中，费用未计入：' + esc(rp.unpricedModels.join('、')) + '</div>' : ''}
+    </div>
+    <div class="section">
+      <h3>预算提醒</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label>月度预算</label><input id="bdMonth" value="${esc(b.monthly == null ? '' : b.monthly)}" style="width:110px" placeholder="如 50" />
+        <label>预警比例</label><input id="bdRatio" value="${esc(b.warnRatio == null ? '0.8' : b.warnRatio)}" style="width:80px" />
+        <button class="btn" id="bdSave">保存</button>
+      </div>
+      <div class="hint">预算只是本地提醒阈值，不会限流或拦截真实请求。</div>
+      <div id="bdMsg"></div>
+    </div>`;
+  $('#bdSave').onclick = async () => {
+    const budget = {};
+    const m = parseFloat($('#bdMonth').value);
+    const rt = parseFloat($('#bdRatio').value);
+    if (!isNaN(m)) budget.monthly = m;
+    if (!isNaN(rt)) budget.warnRatio = rt;
+    const x = await invoke(C.COST_BUDGET_SET, { budget });
+    $('#bdMsg').innerHTML = x.ok ? '<span class="ok">已保存</span>' : '<span class="err">' + esc(x.error) + '</span>';
+    if (x.ok) setTimeout(() => subCost(body), 300);
+  };
+}
+
+/* ---------------- J. 诊断与通知 ---------------- */
+async function subDiag(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const [dg, nt] = await Promise.all([invoke(C.DIAG_COLLECT), invoke(C.NOTIFY_LIST, { limit: 30 })]);
+  const d = (dg && dg.diagnostics) || {};
+  const items = (nt && nt.items) || [];
+  body.innerHTML = `
+    <div class="section">
+      <h3>环境诊断</h3>
+      <div class="card">
+        <div class="k">运行环境</div>
+        <div class="hint">App ${esc(d.env ? d.env.appVersion : '')}｜Electron ${esc(d.env ? d.env.electronVersion : '')}｜Node ${esc(d.env ? d.env.nodeVersion : '')}</div>
+        <div class="hint">平台 ${esc(d.env ? d.env.platform + '/' + d.env.arch : '')}｜CPU ${esc(d.env ? d.env.cpus : 0)} 核｜内存 ${esc(d.env ? d.env.freeMemMB : 0)}MB 可用 / ${esc(d.env ? d.env.totalMemMB : 0)}MB</div>
+        <div class="hint">机器人目录：配置 ${d.paths && d.paths.botDirConfigured ? '是' : '否'}｜存在 ${d.paths && d.paths.botDirExists ? '是' : '否'}｜核心文件 ${d.paths && d.paths.botCorePresent ? '有' : '缺'}｜源码检出 ${d.paths && d.paths.isSourceCheckout ? '是' : '否'}</div>
+        <div class="hint">密钥文件：bot ${d.secrets && d.secrets.botSecretsPresent ? '存在' : '不存在'}｜桌面 Provider ${d.secrets && d.secrets.providerSecretsPresent ? '存在' : '不存在'}（仅统计存在性）</div>
+        <div class="hint">统计：Provider ${esc(d.counts ? d.counts.providers : 0)}｜技能 ${esc(d.counts ? d.counts.skills : 0)}｜MCP ${esc(d.counts ? d.counts.mcp : 0)}｜工作流 ${esc(d.counts ? d.counts.workflows : 0)}</div>
+      </div>
+      ${(d.timeline || []).length ? '<div style="margin-top:8px">' + d.timeline.map((t) => `<div class="${t.level === 'error' ? 'err' : (t.level === 'warn' ? 'warn' : 'hint')}">${esc(t.message)}</div>`).join('') + '</div>' : ''}
+      <div class="row" style="margin-top:10px"><button class="btn" id="dgExport">导出脱敏诊断包</button></div>
+      <div id="dgOut"></div>
+    </div>
+    <div class="section">
+      <h3>通知（未读 ${esc(nt.unread || 0)} / 共 ${esc(nt.total || 0)}）</h3>
+      <div class="row" style="gap:8px"><button class="btn sec" id="ntRead">全部标为已读</button><button class="btn sec" id="ntClear">清空</button></div>
+      ${items.length ? items.map((n) => `<div class="card" style="margin-top:8px;opacity:${n.read ? '0.6' : '1'}">
+        <div class="k"><span class="badge ${n.level === 'error' ? 'off' : 'on'}">${esc(n.level)}</span> ${esc(n.title)}</div>
+        <div class="hint">${esc(n.message)}</div>
+        <div class="hint">${esc(n.at)}｜来源 ${esc(n.source)}${n.read ? '' : '｜<b>未读</b>'}</div>
+      </div>`).join('') : '<div class="hint">没有通知。</div>'}
+    </div>`;
+
+  $('#dgExport').onclick = async () => {
+    const x = await invoke(C.DIAG_EXPORT);
+    $('#dgOut').innerHTML = x.ok
+      ? `<div class="ok">已生成脱敏诊断包（${esc(x.bytes)} 字节）。可直接复制下面内容上报。</div>
+         <textarea rows="12" style="width:100%;font-family:monospace" readonly>${esc(x.json)}</textarea>`
+      : '<div class="err">' + esc(x.error) + '</div>';
+  };
+  $('#ntRead').onclick = async () => { const x = await invoke(C.NOTIFY_MARK_READ, { id: 'all' }); if (x.ok) subDiag(body); };
+  $('#ntClear').onclick = async () => { if (!confirm('清空所有通知？')) return; const x = await invoke(C.NOTIFY_CLEAR); if (x.ok) subDiag(body); };
 }
 
 // 启动：先加载主题（写 CSS 变量 + 启动背景动画），再渲染首页。

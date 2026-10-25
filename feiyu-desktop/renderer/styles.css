@@ -117,3 +117,13 @@ code { background: var(--bg); padding: 1px 6px; border-radius: 5px; border: 1px 
 .preview-box .pv-bar2 { height: 8px; border-radius: 999px; background: var(--accent2); margin-bottom: 10px; }
 .preview-box .pv-text { color: var(--text); font-size: 13px; }
 .preview-box .pv-muted { color: var(--muted); font-size: 12px; }
+
+/* ---------- 扩展模块（全量升级 A–J）---------- */
+.nav-group { margin: 14px 0 6px; padding: 0 4px; font-size: 11px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; opacity: .75; }
+.subnav { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.subnav .btn.active { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.tbl { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
+.tbl th, .tbl td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.tbl tr:hover td { background: var(--surface2); }
+.section textarea, .section input[type=password] { background: var(--surface2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
