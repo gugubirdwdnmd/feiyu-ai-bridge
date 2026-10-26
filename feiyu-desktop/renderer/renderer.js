@@ -384,17 +384,22 @@ async function pageOverview() {
   content.innerHTML = '<h2>总览</h2><div id="ov"></div>';
   const box = $('#ov');
   box.innerHTML = '<div class="hint">加载中…</div>';
-  const [st, cfg, usage] = await Promise.all([invoke(C.PROC_STATUS), invoke(C.CONFIG_READ), invoke(C.USAGE_GET, { range: 'today' })]);
+  const [st, cfg, usage, per] = await Promise.all([invoke(C.PROC_STATUS), invoke(C.CONFIG_READ), invoke(C.USAGE_GET, { range: 'today' }), invoke(C.PERSONALITY_READ)]);
   const s = st.status;
   const api = (cfg.config && cfg.config.api) || {};
   const person = (cfg.config && cfg.config.personality) || {};
+  // 人格以「实际生效的 ai_prompt.txt」为准：config.personality.name 只是可选标签，没有也照样生效
+  const perText = (per && per.content) || '';
+  const perLine = perText.split(/\r?\n/).map((x) => x.trim()).find(Boolean) || '';
+  const perConfigured = !!(per && per.exists && perText.trim());
+  const perLabel = perConfigured ? (perLine.length > 28 ? perLine.slice(0, 28) + '…' : perLine) : '未配置';
   const u = usage.usage || {};
   box.innerHTML = `
     <div class="grid">
       <div class="card"><div class="k">AI 桥（3001）</div><div class="v">${statusBadge(s.bridge)}</div></div>
       <div class="card"><div class="k">NapCat（3000）</div><div class="v">${statusBadge(s.napcat)}</div></div>
       <div class="card"><div class="k">Provider / 模型</div><div class="v" style="font-size:15px">${esc(api.model || '未配置')}</div></div>
-      <div class="card"><div class="k">人格</div><div class="v" style="font-size:15px">${esc(person.name || '未配置')}</div></div>
+      <div class="card"><div class="k">人格</div><div class="v" style="font-size:15px">${esc(perLabel)}</div><div class="hint">${perConfigured ? ('生效来源 ai_prompt.txt（' + perText.length + ' 字）' + (person.name ? '｜标签 ' + esc(person.name) : '')) : '未配置：去「人格设置」写系统提示词'}</div></div>
     </div>
     <div class="grid">
       <div class="card"><div class="k">今日请求(成功/失败)</div><div class="v" style="font-size:15px">${fmt(u.successRequests || 0)} <span class="muted">/</span> <span class="err">${fmt(u.failRequests || 0)}</span></div></div>
