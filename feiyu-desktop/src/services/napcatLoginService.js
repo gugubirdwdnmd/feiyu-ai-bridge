@@ -285,4 +285,41 @@ module.exports = {
   validateInstance, sanitizeInstance,
   instancesPath, readInstances, writeInstances,
   listInstances, saveInstance, removeInstance, markLoggedIn, qrLoginPlan,
+  readOnebotToken,
 };
+
+/**
+ * 读取 NapCat OneBot HTTP 服务端的 access_token。
+ *
+ * 背景：NapCat 侧配了 token（onebot11_*.json → network.httpServers[].token）时，
+ * 任何不带 Authorization 头的 OneBot 调用都会返回 "token verify failed!"，
+ * 表现为「机器人收得到消息但发不出去」。
+ * AI 桥从环境变量 NAPCAT_ONEBOT_TOKEN 读取该令牌，因此桌面在拉起桥时注入即可，
+ * 无需改动机器人目录里的任何文件。
+ *
+ * @returns { token:string, source:string, port:number } 找不到时 token 为空串
+ */
+function readOnebotToken(napcatDir) {
+  const out = { token: '', source: '', port: 0 };
+  if (!napcatDir) return out;
+  try {
+    const cfgDir = path.join(napcatDir, 'napcat', 'config');
+    if (!fs.existsSync(cfgDir)) return out;
+    const files = fs.readdirSync(cfgDir).filter((f) => /^onebot11_.*\.json$/i.test(f));
+    for (const f of files) {
+      let j = null;
+      try { j = JSON.parse(fs.readFileSync(path.join(cfgDir, f), 'utf-8')); } catch (_) { continue; }
+      const net = (j && j.network) || {};
+      const servers = Array.isArray(net.httpServers) ? net.httpServers : [];
+      const hit = servers.find((s) => s && s.enable !== false && Number(s.port) === 3000)
+        || servers.find((s) => s && s.token);
+      if (hit && hit.token) {
+        out.token = String(hit.token).trim();
+        out.source = path.join(cfgDir, f);
+        out.port = Number(hit.port) || 0;
+        return out;
+      }
+    }
+  } catch (_) {}
+  return out;
+}

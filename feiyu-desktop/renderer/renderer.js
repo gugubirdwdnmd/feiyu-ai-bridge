@@ -415,6 +415,8 @@ async function pageRun() {
   box.innerHTML = '<div class="hint">加载中…</div>';
   const st = (await invoke(C.PROC_STATUS)).status;
   const set = (await invoke(C.SETTINGS_GET)).settings || {};
+  const bd = (await invoke(C.BOTDIR_STATUS)) || {};
+  const napInfo = bd.napcat || {};
   const botDir = set.botDir || '';
   box.innerHTML = `
     <div class="section botdir-banner">
@@ -441,6 +443,7 @@ async function pageRun() {
         <button class="btn sec" id="pickNcDir">选择 NapCat 目录…</button>
       </div>
       <div class="hint">NapCat 目录是含 <code>index.js</code> 和 <code>node.exe</code> 的那个文件夹（例如 <code>D:\\NapCat</code>），不是机器人代码仓库。</div>
+      <div class="hint">OneBot 令牌：${napInfo.tokenFound ? '<span class="ok">已找到（启动 AI 桥时自动注入）</span>' : '<span class="err">未找到——机器人会收得到消息但发不出去，请检查 NapCat 的 access_token</span>'}</div>
       <label>QQ 号</label><input id="ncAcc" value="${esc(set.napcat && set.napcat.account || '')}" placeholder="你的 QQ 号" />
       <label>QQ 密码</label><input id="ncPwd" type="password" placeholder="填 QQ 密码（自动转 MD5，不保存明文）" />
       <div class="row" style="margin-top:8px"><button class="btn" id="ncStart">只启动 NapCat（登录 QQ）</button></div>

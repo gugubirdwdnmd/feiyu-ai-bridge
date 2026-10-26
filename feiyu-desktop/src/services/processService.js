@@ -101,9 +101,10 @@ function createProcessManager(opts = {}) {
     const napcatEntry = settings.napcatEntry || 'index.js';
     const nodeBin = resolveNodeBin(botDir, opts.settings);
     const pids = [];
-    // AI 桥
+    // AI 桥：注入 NapCat OneBot 令牌（否则 NapCat 侧 token 校验会让所有发送调用被拒）
+    const bridgeEnv = Object.assign({}, process.env, opts.onebotToken ? { NAPCAT_ONEBOT_TOKEN: String(opts.onebotToken) } : {});
     const bridge = deps.spawn(nodeBin, [bridgeEntry], {
-      cwd: botDir, detached: true, stdio: 'ignore', env: process.env,
+      cwd: botDir, detached: true, stdio: 'ignore', env: bridgeEnv,
     });
     if (bridge.pid) { bridge.unref(); pids.push(bridge.pid); }
     // NapCat（可选）：默认在独立 NapCat 目录启动（该目录含 index.js 与 node.exe）
@@ -300,8 +301,9 @@ function createProcessManager(opts = {}) {
     const results = { bridge: null, napcat: null };
     // 只启动 NapCat（QQ 登录）时可跳过 AI 桥，避免「没配 API Key → 桥失败 → 整次登录显示失败」
     if (!opts.onlyNapcat) {
+      const bridgeEnv = Object.assign({}, cleanEnv(process.env), opts.onebotToken ? { NAPCAT_ONEBOT_TOKEN: String(opts.onebotToken) } : {});
       results.bridge = await launchAndVerify(
-        { command: nodeBin, args: [bridgeEntry], cwd: botDir, env: cleanEnv(process.env) },
+        { command: nodeBin, args: [bridgeEntry], cwd: botDir, env: bridgeEnv },
         { port: PORTS.bridge, timeoutMs },
       );
     }

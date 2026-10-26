@@ -90,21 +90,25 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
       hasCore = exists && fs.existsSync(path.join(configured, 'ai_bridge.js'));
       isCheckout = exists && botDirResolver.isSourceCheckout(configured);
     } catch (_) {}
+    // NapCat 侧 OneBot 令牌状态：启动 AI 桥时会自动注入，缺失会导致发不出消息
+    const napcatDir = resolveNapcatDir();
+    const onebot = napcatLoginService.readOnebotToken(napcatDir);
+    const napcatInfo = { dir: napcatDir || null, tokenFound: !!onebot.token, tokenPort: onebot.port || 0 };
     if (!configured) {
       return {
-        ok: true, configured: false, exists: false, hasCore: false, isCheckout: false,
+        ok: true, configured: false, exists: false, hasCore: false, isCheckout: false, napcat: napcatInfo,
         message: '未配置机器人目录，请点击「选择机器人目录」指定（含 ai_bridge.js 的目录）',
       };
     }
     if (!exists) {
       return {
-        ok: true, configured: true, exists: false, hasCore: false, isCheckout: false,
+        ok: true, configured: true, exists: false, hasCore: false, isCheckout: false, napcat: napcatInfo,
         message: '配置的机器人目录已不存在，请重新选择',
       };
     }
     if (!hasCore) {
       return {
-        ok: true, configured: true, exists: true, hasCore: false, isCheckout,
+        ok: true, configured: true, exists: true, hasCore: false, isCheckout, napcat: napcatInfo,
         message: '机器人目录中未找到 ai_bridge.js，机器人功能可能不可用',
       };
     }
@@ -288,11 +292,14 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     const settings = getSettings();
     const napcat = (args && args.napcat) || settings.napcat || null;
     const onlyNapcat = !!(args && args.only === 'napcat');
+    // NapCat 目录与 OneBot 令牌：AI 桥必须带该令牌才能调用 NapCat，
+    // 否则 NapCat 侧 access_token 校验会拒绝所有发送调用（token verify failed）。
+    const napcatDir = resolveNapcatDir();
+    const onebot = napcatLoginService.readOnebotToken(napcatDir);
 
     // —— 只启动 NapCat（QQ 登录）：不依赖 AI 桥 / API Key，最适合新手 ——
     if (onlyNapcat) {
       if (!napcat || !napcat.account) return { ok: false, error: '请先填写 QQ 号（NapCat 登录需要）' };
-      const napcatDir = resolveNapcatDir();
       if (!napcatDir) return { ok: false, error: '未找到 NapCat 目录（需含 index.js 与 node.exe，例如 D:\\NapCat）。请在「机器人运行」页点「选择 NapCat 目录…」指定。' };
       if (napcatDir !== settings.napcatDir) { try { setSettings(Object.assign({}, settings, { napcatDir })); } catch (_) {} }
       const owner = await pm.findPortOwner(pm.PORTS.napcat);
@@ -306,12 +313,13 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
 
     const pre = await pm.preCheck();
     if (pre.alreadyRunning && !(args && args.force)) return { ok: false, alreadyRunning: true, status: pre.status, error: '机器人已在运行，避免重复启动' };
-    const napcatDir = (napcat && napcat.account) ? resolveNapcatDir() : undefined;
-    const r = await pm.startBotVerified(d, { napcat, settings, napcatDir });
+    const napcatDir2 = (napcat && napcat.account) ? napcatDir : undefined;
+    const r = await pm.startBotVerified(d, { napcat, settings, napcatDir: napcatDir2, onebotToken: onebot.token });
     return {
       ok: r.ok,
       started: r.started, pids: r.pids, failed: r.failed,
       note: (secretService.hasUsableKey(d) ? '' : '未检测到 API Key，AI 桥可能启动后即退出（请先配置密钥）；')
+        + (onebot.token ? '' : '未从 NapCat 配置读到 OneBot 令牌，若发不出消息请检查 NapCat 的 access_token；')
         + (r.ok ? '已确认 AI 桥/NapCat 端口监听' : '部分服务启动失败，见 failed'),
     };
   });
@@ -1162,8 +1170,10 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     if (pre.alreadyRunning && op !== 'restart') { out('system', '机器人已在运行，无需重复启动。\r\n'); return true; }
     const settings = getSettings();
     const napcat = settings.napcat || null;
-    out('system', '正在启动机器人（已剥离电子壳环境变量，避免干扰子进程）…\r\n');
-    const r = await pm.startBotVerified(d, { napcat, settings });
+    const napcatDir = resolveNapcatDir();
+    const onebot = napcatLoginService.readOnebotToken(napcatDir);
+    out('system', '正在启动机器人（已剥离电子壳环境变量' + (onebot.token ? '，并注入 NapCat OneBot 令牌' : '，未读到 OneBot 令牌') + '）…\r\n');
+    const r = await pm.startBotVerified(d, { napcat, settings, napcatDir, onebotToken: onebot.token });
     if (r.ok) {
       out('system', '已确认启动：AI 桥' + (r.started.bridge && r.started.bridge.pid ? ' (PID ' + r.started.bridge.pid + ')' : '')
         + (r.started.napcat && r.started.napcat.pid ? '，NapCat (PID ' + r.started.napcat.pid + ')' : '') + '，端口已监听。\r\n');
