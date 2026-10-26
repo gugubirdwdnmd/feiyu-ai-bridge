@@ -84,10 +84,13 @@ function createProcessManager(opts = {}) {
    * @returns { started:{bridge, napcat}, pids:[] }
    */
   function startBot(botDir, opts = {}) {
+    const settings = opts.settings || {};
+    const bridgeEntry = settings.botEntry || 'ai_bridge.js';
+    const napcatEntry = settings.napcatEntry || 'index.js';
     const nodeBin = resolveNodeBin(botDir, opts.settings);
     const pids = [];
     // AI 桥
-    const bridge = deps.spawn(nodeBin, ['ai_bridge.js'], {
+    const bridge = deps.spawn(nodeBin, [bridgeEntry], {
       cwd: botDir, detached: true, stdio: 'ignore', env: process.env,
     });
     if (bridge.pid) { bridge.unref(); pids.push(bridge.pid); }
@@ -98,7 +101,7 @@ function createProcessManager(opts = {}) {
         NAPCAT_QUICK_ACCOUNT: String(opts.napcat.account),
         NAPCAT_QUICK_PASSWORD_MD5: String(opts.napcat.passwordMd5 || ''),
       });
-      const nc = deps.spawn(nodeBin, ['index.js', '-q', String(opts.napcat.account)], {
+      const nc = deps.spawn(nodeBin, [napcatEntry, '-q', String(opts.napcat.account)], {
         cwd: botDir, detached: true, stdio: 'ignore', env,
       });
       if (nc.pid) { nc.unref(); napcatPid = nc.pid; pids.push(nc.pid); }
@@ -256,9 +259,15 @@ function createProcessManager(opts = {}) {
       if (up) return { ok: true, pid, verified: true };
       await deps.sleep(400);
     }
+    // 超时了，但进程仍存活 → 视为「正在启动」（ComfyUI 首次加载模型可能很慢），不算失败
+    let alive = false;
+    try { process.kill(pid, 0); alive = true; } catch (_) { alive = false; }
+    if (alive) {
+      return { ok: true, pid, verified: false, starting: true, stderrTail: getTail() };
+    }
     return {
       ok: false, pid, verified: false,
-      error: '在 ' + Math.round(timeoutMs / 1000) + 's 内未检测到服务就绪（端口 ' + (opts.port || '?') + ' 未监听），可能依赖缺失、配置错误或启动缓慢。',
+      error: '在 ' + Math.round(timeoutMs / 1000) + 's 内未检测到服务就绪且进程已退出（端口 ' + (opts.port || '?') + ' 未监听），可能依赖缺失或配置错误。',
       stderrTail: getTail(),
     };
   }
@@ -269,13 +278,16 @@ function createProcessManager(opts = {}) {
    * 返回 { started:{bridge,napcat}, pids[], failed[], ok }。
    */
   async function startBotVerified(botDir, opts = {}) {
+    const settings = opts.settings || {};
+    const bridgeEntry = settings.botEntry || 'ai_bridge.js';
+    const napcatEntry = settings.napcatEntry || 'index.js';
     const nodeBin = resolveNodeBin(botDir, opts.settings);
     const timeoutMs = opts.timeoutMs || 15000;
     const results = { bridge: null, napcat: null };
     // 只启动 NapCat（QQ 登录）时可跳过 AI 桥，避免「没配 API Key → 桥失败 → 整次登录显示失败」
     if (!opts.onlyNapcat) {
       results.bridge = await launchAndVerify(
-        { command: nodeBin, args: ['ai_bridge.js'], cwd: botDir, env: cleanEnv(process.env) },
+        { command: nodeBin, args: [bridgeEntry], cwd: botDir, env: cleanEnv(process.env) },
         { port: PORTS.bridge, timeoutMs },
       );
     }
@@ -285,7 +297,7 @@ function createProcessManager(opts = {}) {
         NAPCAT_QUICK_PASSWORD_MD5: String(opts.napcat.passwordMd5 || ''),
       });
       results.napcat = await launchAndVerify(
-        { command: nodeBin, args: ['index.js', '-q', String(opts.napcat.account)], cwd: botDir, env: nenv },
+        { command: nodeBin, args: [napcatEntry, '-q', String(opts.napcat.account)], cwd: botDir, env: nenv },
         { port: PORTS.napcat, timeoutMs },
       );
     }

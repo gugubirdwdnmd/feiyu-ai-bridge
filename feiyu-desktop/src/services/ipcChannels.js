@@ -9,6 +9,7 @@ const CHANNELS = {
   SETTINGS_SET: 'settings:set',
   // 机器人目录定位状态（打包后能否定位到 botDir / 未找到时的原因）
   BOTDIR_STATUS: 'botdir:status',
+  BOT_INSPECT: 'bot:inspect',
   CONFIG_READ: 'config:read',
   CONFIG_APPLY: 'config:apply',
   PERSONALITY_READ: 'personality:read',
@@ -213,6 +214,9 @@ function validate(channel, args) {
       return { ok: true };
     case CHANNELS.LOG_SEARCH:
       if (args && args.keyword != null && !isString(args.keyword)) return { ok: false, error: 'keyword 必须是 string' };
+      return { ok: true };
+    case CHANNELS.BOT_INSPECT:
+      if (!isObject(args) || typeof args.dir !== 'string') return { ok: false, error: '需要 {dir: string}' };
       return { ok: true };
     case CHANNELS.PROC_START:
       if (args && args.napcat != null) {

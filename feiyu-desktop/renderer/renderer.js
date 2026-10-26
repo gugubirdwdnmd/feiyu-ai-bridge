@@ -434,20 +434,37 @@ async function pageRun() {
       <div class="hint" id="runMsg"></div>
     </div>
     <div class="section">
-      <h3>NapCat 快速登录（可选）</h3>
-      <label>QQ 号</label><input id="ncAcc" value="${esc(set.napcat && set.napcat.account || '')}" placeholder="如 10000（请填你自己的 QQ 号）" />
-      <label>密码 MD5</label><input id="ncMd5" value="${esc(set.napcat && set.napcat.passwordMd5 || '')}" placeholder="填 32 位密码 MD5（不是明文密码）" />
-      <div class="hint">留空则只启动 AI 桥（需外部 NapCat 已就绪）。</div>
+      <h3>NapCat 快速登录（推荐）</h3>
+      <label>QQ 号</label><input id="ncAcc" value="${esc(set.napcat && set.napcat.account || '')}" placeholder="你的 QQ 号" />
+      <label>QQ 密码</label><input id="ncPwd" type="password" placeholder="填 QQ 密码（自动转 MD5，不保存明文）" />
+      <div class="row" style="margin-top:8px"><button class="btn" id="ncStart">只启动 NapCat（登录 QQ）</button></div>
+      <div class="hint">只登录 QQ，不依赖 AI 桥 / API Key，最快。</div>
+    </div>
+    <div class="section">
+      <h3>导入他人的 QQ 机器人（兼容多种结构）</h3>
+      <div class="hint">选一个机器人目录，自动识别入口（ai_bridge.js / index.js / app.js / package.json / Koishi 等），兼容不同人的项目结构。</div>
+      <div class="row"><button class="btn sec" id="impBot">选择并检测机器人目录…</button></div>
+      <div id="impMsg"></div>
     </div>
     <div class="section"><h3>启动输出 / 日志</h3><div class="log" id="runlog"></div></div>`;
   const log = await invoke(C.LOG_TAIL, { lines: 20 });
   $('#runlog').textContent = (log.lines && log.lines.length) ? log.lines.join('\n') : '（暂无日志）';
 
+  function readNapcat() {
+    const acc = (($('#ncAcc') && $('#ncAcc').value) || '').trim() || (set.napcat && set.napcat.account) || '';
+    const pwd = ($('#ncPwd') && $('#ncPwd').value) || '';
+    const md5 = pwd ? md5hex(pwd) : ((set.napcat && set.napcat.passwordMd5) || '');
+    return acc ? { account: acc, passwordMd5: md5 } : null;
+  }
   $('#startBtn').onclick = async () => {
-    const napcat = { account: $('#ncAcc').value.trim(), passwordMd5: $('#ncMd5').value.trim() };
-    if (!napcat.account) napcat.account = (set.napcat && set.napcat.account) || '';
-    const r = await invoke(C.PROC_START, { napcat: napcat.account ? napcat : null });
-    $('#runMsg').innerHTML = r.ok ? '<span class="ok">已发起启动，PID=' + (r.pids || []).join(',') + (r.note ? '；' + esc(r.note) : '') + '</span>' : '<span class="err">' + esc(r.error || '启动失败') + '</span>';
+    const napcat = readNapcat();
+    const r = await invoke(C.PROC_START, { napcat });
+    if (r.ok && r.starting) $('#runMsg').innerHTML = '<span class="hint">正在启动（PID=' + (r.pids || []).join(',') + '），稍候看监控</span>';
+    else if (r.ok) $('#runMsg').innerHTML = '<span class="ok">已确认启动，PID=' + (r.pids || []).join(',') + (r.note ? '；' + esc(r.note) : '') + '</span>';
+    else {
+      const d = (r.failed && r.failed.length) ? esc(r.failed.map((f) => f.id + ' ' + (f.error || '')).join('；')) : esc(r.error || '启动失败');
+      $('#runMsg').innerHTML = '<span class="err">启动失败：' + d + '</span>';
+    }
     setTimeout(pageRun, 1500);
   };
   $('#stopBtn').onclick = async () => {
@@ -458,11 +475,38 @@ async function pageRun() {
   $('#restartBtn').onclick = async () => {
     await invoke(C.PROC_STOP, {});
     setTimeout(async () => {
-      const napcat = { account: $('#ncAcc').value.trim() };
-      await invoke(C.PROC_START, { napcat: napcat.account ? napcat : null, force: true });
+      const napcat = readNapcat();
+      await invoke(C.PROC_START, { napcat, force: true });
       pageRun();
     }, 1200);
   };
+  const ncStart = $('#ncStart');
+  if (ncStart) ncStart.onclick = async () => {
+    const napcat = readNapcat();
+    if (!napcat) { $('#runMsg').innerHTML = '<span class="err">请先填 QQ 号</span>'; return; }
+    await invoke(C.SETTINGS_SET, { napcat });
+    $('#runMsg').innerHTML = '<span class="hint">正在启动 NapCat 并校验端口 3000…</span>';
+    const r = await invoke(C.PROC_START, { only: 'napcat', napcat });
+    if (r.ok) $('#runMsg').innerHTML = '<span class="ok">' + esc(r.note || 'NapCat 已启动') + '</span>';
+    else {
+      const d = (r.failed && r.failed.length) ? esc(r.failed.map((f) => f.id + ' ' + (f.error || '')).join('；')) : esc(r.error || '启动失败');
+      $('#runMsg').innerHTML = '<span class="err">NapCat 启动失败：' + d + '</span>';
+    }
+    setTimeout(pageRun, 1500);
+  };
+
+  const impBot = $('#impBot');
+  if (impBot) impBot.onclick = async () => {
+    const pick = await invoke(C.DIALOG_PICKDIR);
+    if (!pick || !pick.ok || !pick.dir) return;
+    const insp = await invoke(C.BOT_INSPECT, { dir: pick.dir });
+    if (!insp || !insp.ok) { $('#impMsg').innerHTML = '<span class="err">' + esc((insp && insp.error) || '检测失败') + '</span>'; return; }
+    if (!insp.compatible) { $('#impMsg').innerHTML = '<span class="warn">未能识别入口（' + esc((insp.notes || []).join('；')) + '）。仍可设为目录，但启动可能失败。</span>'; return; }
+    const s = await invoke(C.SETTINGS_SET, { botDir: pick.dir, botEntry: insp.suggestedEntry || 'ai_bridge.js', napcatEntry: insp.napcatEntry || 'index.js' });
+    $('#impMsg').innerHTML = s.ok ? '<span class="ok">已导入：类型 ' + esc(insp.kind) + '，入口 ' + esc(insp.suggestedEntry || '—') + '</span>' : '<span class="err">' + esc(s.error) + '</span>';
+    if (s.ok) setTimeout(pageRun, 800);
+  };
+
   $('#pickBtn').onclick = async () => { const d = await pickBotDir(); if (d) pageRun(); };
 }
 
@@ -1160,7 +1204,13 @@ async function pageComfy() {
     $('#cfStart').onclick = async () => {
       const qm = $('#cfQuickMsg'); qm.innerHTML = '<span class="hint">启动中…</span>';
       const r = await invoke(C.COMFY_START, { dir: comfyExplicitDir });
-      qm.innerHTML = r.ok ? '<span class="ok">' + (r.alreadyRunning ? '已经在运行' : '已确认启动（PID ' + (r.pid || '') + '，端口已监听）') + '</span>' : '<span class="err">' + esc(r.error) + '</span>';
+      if (r.ok) {
+        if (r.alreadyRunning) qm.innerHTML = '<span class="ok">已经在运行</span>';
+        else if (r.starting) qm.innerHTML = '<span class="hint">ComfyUI 正在启动（PID ' + (r.pid || '') + '，首次加载较慢，稍后监控里端口起来即成功）</span>';
+        else qm.innerHTML = '<span class="ok">已确认启动（PID ' + (r.pid || '') + '，端口已监听）</span>';
+      } else {
+        qm.innerHTML = '<span class="err">' + esc(r.error + (r.detail ? '｜' + r.detail : '')) + '</span>';
+      }
       setTimeout(load, 2500);
     };
     $('#cfStop').onclick = async () => {
@@ -1173,7 +1223,9 @@ async function pageComfy() {
       const r = await invoke(C.COMFY_PICKDIR);
       if (!r || !r.ok || !r.dir) return;
       comfyExplicitDir = r.root || r.dir;
-      $('#cfQuickMsg').innerHTML = '<span class="ok">已选择：' + esc(comfyExplicitDir) + '</span>';
+      // 持久化到设置，重启后「一键启动」仍能找到该目录
+      try { await invoke(C.SETTINGS_SET, { comfyDir: r.dir }); } catch (_) {}
+      $('#cfQuickMsg').innerHTML = '<span class="ok">已选择并记住：' + esc(comfyExplicitDir) + '</span>';
       await load();
     };
     $('#cfPick').onclick = async () => {
@@ -1360,12 +1412,13 @@ async function subQrLogin(body) {
     <div class="section">
       <h3>二维码登录（备选）</h3>
       <div class="hint">${(p.steps || []).map((s, i) => (i + 1) + '. ' + esc(s)).join('<br>')}</div>
-      <div class="row" style="margin-top:10px">
+      <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
         <label>NapCat 二维码接口地址</label>
-        <input id="qrEp" placeholder="如 http://127.0.0.1:3000/get_qrcode（留空则只显示已配置的地址）" style="min-width:360px" />
+        <input id="qrEp" value="http://127.0.0.1:3000/get_qrcode" placeholder="http://127.0.0.1:3000/get_qrcode" style="min-width:360px" />
         <button class="btn" id="qrGet">获取二维码</button>
       </div>
-      <div class="hint">候选路径（不同 NapCat 版本可能不同，请以你的实际接口为准）：${esc((p.candidateEndpoints || []).join(' / '))}</div>
+      <div class="hint">怎么填：就是「NapCat 的 HTTP 服务地址 + 二维码接口路径」。默认 <code>http://127.0.0.1:3000/get_qrcode</code> 适用于大多数 NapCat，其中 3000 是 NapCat 的端口；若你改过端口就换成对应端口。拿不准就直接点「获取二维码」用默认值试。</div>
+      <div class="hint">候选路径（不同 NapCat 版本可能不同）：${esc((p.candidateEndpoints || []).join(' / '))}</div>
       <div id="qrBox" style="margin-top:12px"></div>
       <div class="hint" style="margin-top:8px">安全提示：${(p.securityNotes || []).map((s) => esc(s)).join('；')}</div>
     </div>
@@ -2025,6 +2078,17 @@ async function pageConsole() {
         <div class="mon-card loading" data-svc="napcat"><span class="mon-dot"></span><div class="mon-name">NapCat</div><div class="mon-state">加载中…</div><div class="mon-meta"></div></div>
         <div class="mon-card loading" data-svc="comfy"><span class="mon-dot"></span><div class="mon-name">ComfyUI</div><div class="mon-state">加载中…</div><div class="mon-meta"></div></div>
       </div>
+
+      <div class="perf-row" id="perfRow">
+        <div class="perf-card"><div class="pk">本软件</div><div class="pv" id="pfApp">—</div></div>
+        <div class="perf-card"><div class="pk">机器人</div><div class="pv" id="pfBot">—</div></div>
+        <div class="perf-card total"><div class="pk">合计占用（本软件 + 机器人）</div><div class="pv" id="pfTotal">—</div></div>
+      </div>
+
+      <div class="tl-wrap">
+        <div class="tl-title">运行时间轴（最近 5 分钟）</div>
+        <div id="tlBody"></div>
+      </div>
       <div class="hint" id="monUpd">就绪</div>
     </div>
 
@@ -2079,6 +2143,22 @@ async function pageConsole() {
     card.querySelector('.mon-state').textContent = stateText;
     card.querySelector('.mon-meta').textContent = meta || '';
   }
+  const hist = [];
+  const startedAt = { bridge: 0, napcat: 0, comfy: 0 };
+  const MAXH = 150;
+  const svcName = { bridge: 'AI 桥', napcat: 'NapCat', comfy: 'ComfyUI' };
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    return (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + ss + 's';
+  }
+  function renderTimeline() {
+    const tl = $('#tlBody'); if (!tl) return;
+    tl.innerHTML = Object.keys(svcName).map((svc) => {
+      const segs = hist.map((h) => '<i class="tl-seg ' + (h[svc] ? 'on' : 'off') + '"></i>').join('');
+      return '<div class="tl-row"><span class="tl-name">' + svcName[svc] + '</span><span class="tl-track">' + (segs || '<i class="tl-seg off"></i>') + '</span></div>';
+    }).join('');
+  }
   async function refreshMonitor() {
     monGrid.classList.add('refreshing');
     try {
@@ -2086,16 +2166,29 @@ async function pageConsole() {
       const m = r && r.monitor;
       if (!m) return;
       const map = { bridge: m.bridge, napcat: m.napcat, comfy: m.comfy };
+      const now = m.time || Date.now();
+      const snap = { t: now, bridge: !!(m.bridge && m.bridge.running), napcat: !!(m.napcat && m.napcat.running), comfy: !!(m.comfy && m.comfy.running) };
+      hist.push(snap); if (hist.length > MAXH) hist.shift();
       for (const svc of ['bridge', 'napcat', 'comfy']) {
         const s = map[svc];
         if (!s) continue;
         const running = !!s.running;
+        if (running) { if (!startedAt[svc]) startedAt[svc] = now; } else startedAt[svc] = 0;
         let meta = '';
         if (svc === 'comfy') meta = s.found ? ('端口 ' + s.port + (s.version ? ' · v' + s.version : '')) : '未检测到';
         else meta = '端口 ' + s.port + (running && s.pid ? ' · PID ' + s.pid : '');
+        if (running && startedAt[svc]) meta += ' · 已运行 ' + fmtDur(now - startedAt[svc]);
         setCard(svc, running ? 'running' : 'stopped', running ? '运行中' : '已停止', meta);
       }
-      monUpd.textContent = '更新于 ' + new Date(m.time || Date.now()).toLocaleTimeString('zh-CN');
+      renderTimeline();
+      const pf = r.perf;
+      if (pf) {
+        const $a = $('#pfApp'), $b = $('#pfBot'), $t = $('#pfTotal');
+        if ($a) $a.textContent = 'CPU ' + pf.app.cpuPercent + '% · 内存 ' + pf.app.memMB + ' MB';
+        if ($b) $b.textContent = pf.bot.processes ? ('CPU ' + pf.bot.cpuPercent + '% · 内存 ' + pf.bot.memMB + ' MB（' + pf.bot.processes + ' 进程）') : '未运行';
+        if ($t) $t.textContent = 'CPU ' + pf.total.cpuPercent + '% · 内存 ' + pf.total.memMB + ' MB';
+      }
+      monUpd.textContent = '更新于 ' + new Date(now).toLocaleTimeString('zh-CN');
     } catch (_) {
       monUpd.textContent = '状态获取失败';
     } finally {

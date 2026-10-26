@@ -198,6 +198,24 @@ details.adv summary:hover { color: var(--text); }
 /* 刷新时：柔和描边高亮（不再整格脉冲跳动） */
 .monitor-grid.refreshing .mon-card { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
+/* 合并性能（本软件 + 机器人） */
+.perf-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 12px; }
+.perf-card { background: var(--surface2); border: 1px solid var(--line); border-radius: calc(var(--radius) * 0.7); padding: 10px 12px; transition: border-color .4s ease; }
+.perf-card .pk { font-size: 12px; color: var(--muted); }
+.perf-card .pv { font-size: 14px; font-weight: 700; margin-top: 4px; color: var(--text); font-family: Consolas, monospace; }
+.perf-card.total { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
+.perf-card.total .pv { color: var(--accent-text); }
+
+/* 运行时间轴 */
+.tl-wrap { margin-top: 14px; }
+.tl-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.tl-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.tl-name { width: 64px; font-size: 12px; color: var(--muted); flex: none; }
+.tl-track { display: flex; gap: 1px; flex: 1; height: 14px; align-items: stretch; overflow: hidden; border-radius: 4px; background: var(--bg); padding: 2px; }
+.tl-seg { flex: 1 1 2px; min-width: 1px; border-radius: 1px; }
+.tl-seg.on { background: var(--ok); }
+.tl-seg.off { background: color-mix(in srgb, var(--line) 70%, transparent); }
+
 /* 实时日志徽标 */
 .live-badge { display: inline-block; margin-left: 8px; font-size: 11px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 999px; padding: 1px 9px; animation: feiyu-blink 1.4s ease-in-out infinite; }
 .live-badge.paused { color: var(--muted); border-color: var(--muted); animation: none; }

@@ -36,7 +36,7 @@ const workflowService = require('../services/workflowService');
 const costService = require('../services/costService');
 const diagnosticService = require('../services/diagnosticService');
 const { redactText } = require('../services/redact');
-const { dialog } = require('electron');
+const { dialog, app } = require('electron');
 const { createTerminalManager } = require('../services/terminalService');
 const { createLogTailer } = require('../services/logTailService');
 
@@ -244,6 +244,30 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
   });
 
   ipcMain.handle(CHANNELS.PROC_STATUS, async () => ({ ok: true, status: await pm.getStatus() }));
+  // 导入他人机器人：检测目录结构与入口文件，给出兼容性判断
+  ipcMain.handle(CHANNELS.BOT_INSPECT, (e, args) => {
+    const v = validate(CHANNELS.BOT_INSPECT, args); if (!v.ok) return { ok: false, error: v.error };
+    const dir = String(args.dir || '');
+    const res = { ok: true, dir, exists: false, entries: [], kind: 'unknown', compatible: false, suggestedEntry: null, napcatEntry: null, notes: [] };
+    try {
+      res.exists = fs.existsSync(dir);
+      if (!res.exists) { res.notes.push('目录不存在'); return res; }
+      const has = (n) => { try { return fs.existsSync(path.join(dir, n)); } catch (_) { return false; } };
+      const entries = ['ai_bridge.js', 'index.js', 'app.js', 'main.js', 'bot.js', 'start.js'];
+      res.entries = entries.filter(has);
+      if (has('ai_bridge.js')) { res.kind = 'feiyu+ai'; res.compatible = true; res.suggestedEntry = 'ai_bridge.js'; res.napcatEntry = has('index.js') ? 'index.js' : null; }
+      else if (has('index.js')) { res.kind = 'node-bot'; res.compatible = true; res.suggestedEntry = 'index.js'; res.napcatEntry = 'index.js'; }
+      else if (has('koishi.yml') || has('koishi.config.js')) { res.kind = 'koishi'; res.compatible = true; res.suggestedEntry = res.entries[0] || null; res.notes.push('检测到 Koishi 项目'); }
+      else if (has('package.json')) { res.kind = 'node-project'; res.compatible = true; res.suggestedEntry = res.entries[0] || null; res.notes.push('检测到 Node 项目（package.json）'); }
+      else { res.notes.push('未找到常见入口文件（ai_bridge.js / index.js / app.js / main.js）'); }
+      if (has('package.json')) {
+        try { const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8')); if (pkg && pkg.name) res.packageName = String(pkg.name); } catch (_) {}
+      }
+      if (!res.suggestedEntry && res.entries.length) res.suggestedEntry = res.entries[0];
+    } catch (err) { return { ok: false, error: err.message }; }
+    return res;
+  });
+
   ipcMain.handle(CHANNELS.PROC_START, async (e, args) => {
     const v = validate(CHANNELS.PROC_START, args); if (!v.ok) return { ok: false, error: v.error };
     const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录（请先在「机器人运行」选择机器人目录）' };
@@ -530,8 +554,10 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
   });
   ipcMain.handle(CHANNELS.COMFY_START, async (e, args) => {
     const v = validate(CHANNELS.COMFY_START, args); if (!v.ok) return { ok: false, error: v.error };
-    const det = comfyService.detect({ dir: args && args.dir, endpoint: args && args.endpoint });
-    if (!det.found) return { ok: false, error: '本机未检测到 ComfyUI，请先「安装 ComfyUI」或在「ComfyUI 环境」里指定目录' };
+    // 关键修复：优先用参数目录，其次用已保存的 comfyDir（否则重启后找不到自定义安装路径）
+    const cfg = getSettings();
+    const det = comfyService.detect({ dir: (args && args.dir) || cfg.comfyDir, endpoint: args && args.endpoint });
+    if (!det.found) return { ok: false, error: '本机未检测到 ComfyUI，请在「ComfyUI 生图」页选择安装目录（需含 main.py）' };
     // 已在运行则给出提示，不重复拉起
     const conn = await comfyService.testConnection(det.endpoint);
     if (conn.ok && conn.running) return { ok: true, alreadyRunning: true, pid: null, endpoint: det.endpoint };
@@ -539,8 +565,10 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     if (!spec.ok) return { ok: false, error: spec.error };
     const r = await pm.launchAndVerify(spec.spec, {
       checkUp: async () => { const c = await comfyService.testConnection(det.endpoint); return !!(c && c.ok && c.running); },
-      timeoutMs: 20000,
+      timeoutMs: 45000,
     });
+    // 进程仍存活但尚未监听：属「正在启动」（ComfyUI 首次加载模型较慢），不算失败
+    if (r.ok && r.starting) return { ok: true, starting: true, pid: r.pid, port: det.port, endpoint: det.endpoint, note: 'ComfyUI 正在启动（首次加载较慢），稍后监控里端口 ' + det.port + ' 起来即成功' };
     if (!r.ok) return { ok: false, error: 'ComfyUI 启动失败：' + (r.error || ''), detail: r.stderrTail || null };
     return { ok: true, pid: r.pid, verified: true, port: det.port, endpoint: det.endpoint, note: '已确认监听 ' + det.endpoint };
   });
@@ -1129,7 +1157,7 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
   }
 
   async function runComfyCtrl(op, sessionId, out) {
-    const det = comfyService.detect({});
+    const det = comfyService.detect({ dir: getSettings().comfyDir });
     if (!det.found) { out('system', '本机未检测到 ComfyUI，请先在「ComfyUI 生图」安装或指定目录。\r\n'); return true; }
     if (op === 'stop') {
       const owner = await pm.findPortOwner(det.port);
@@ -1152,9 +1180,10 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     out('system', '正在启动 ComfyUI（稍候校验端口 ' + det.port + '）…\r\n');
     const r = await pm.launchAndVerify(spec.spec, {
       checkUp: async () => { const c = await comfyService.testConnection(det.endpoint); return !!(c && c.ok && c.running); },
-      timeoutMs: 20000,
+      timeoutMs: 45000,
     });
-    out('system', r.ok ? ('已确认启动 (PID ' + r.pid + ')，端口 ' + det.port + ' 已监听。\r\n') : ('启动失败: ' + (r.error || '') + '\r\n'));
+    if (r.ok && r.starting) out('system', 'ComfyUI 正在启动 (PID ' + r.pid + ')，首次加载较慢，稍候用 status 确认端口。\r\n');
+    else out('system', r.ok ? ('已确认启动 (PID ' + r.pid + ')，端口 ' + det.port + ' 已监听。\r\n') : ('启动失败: ' + (r.error || '') + '\r\n'));
     return true;
   }
 
@@ -1179,10 +1208,61 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     return terminal.close(args.sessionId);
   });
 
+  // —— 系统性能：本软件（Electron 全进程）+ 机器人进程 的合并占用 ——
+  let _botSample = { t: 0, map: {} };
+  function sampleBotPerf(pids) {
+    return new Promise((resolve) => {
+      try {
+        const cmd = 'Get-Process -Id ' + pids.join(',') + ' -ErrorAction SilentlyContinue | Select-Object Id,CPU,WorkingSet64 | ConvertTo-Json -Compress';
+        cp.execFile('powershell', ['-NoProfile', '-Command', cmd], { encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer: 1 << 20 }, (err, stdout) => {
+          if (err) return resolve({ memMB: 0, cpuPercent: 0 });
+          let arr = [];
+          try { const j = JSON.parse(String(stdout || 'null')); arr = Array.isArray(j) ? j : (j ? [j] : []); } catch (_) {}
+          let memBytes = 0; const map = {};
+          for (const p of arr) { if (!p || p.Id == null) continue; map[p.Id] = Number(p.CPU) || 0; memBytes += Number(p.WorkingSet64) || 0; }
+          const now = Date.now();
+          const dt = (now - _botSample.t) / 1000;
+          let cpuPercent = 0;
+          if (_botSample.t && dt > 0.5) {
+            let deltaSec = 0;
+            for (const id of Object.keys(map)) if (_botSample.map[id] != null) deltaSec += Math.max(0, map[id] - _botSample.map[id]);
+            const cores = Math.max(1, os.cpus().length);
+            cpuPercent = (deltaSec / (dt * cores)) * 100;
+          }
+          _botSample = { t: now, map };
+          resolve({ memMB: memBytes / 1048576, cpuPercent });
+        });
+      } catch (_) { resolve({ memMB: 0, cpuPercent: 0 }); }
+    });
+  }
+  async function collectPerf(status) {
+    let appMem = 0, appCpu = 0, appCount = 0;
+    try {
+      const metrics = (app && app.getAppMetrics) ? app.getAppMetrics() : [];
+      for (const m of metrics) {
+        appMem += ((m.memory && m.memory.workingSetSize) || 0) / 1024; // KB -> MB
+        appCpu += (m.cpu && m.cpu.percentCPUUsage) || 0;
+        appCount++;
+      }
+    } catch (_) {}
+    const det = comfyService.detect({ dir: getSettings().comfyDir });
+    const comfyPid = await pm.findPortOwner(det.port);
+    const pids = [status.bridge && status.bridge.pid, status.napcat && status.napcat.pid, comfyPid].filter(Boolean);
+    let bot = { memMB: 0, cpuPercent: 0 };
+    if (pids.length) bot = await sampleBotPerf(pids);
+    return {
+      app: { cpuPercent: Math.round(appCpu), memMB: Math.round(appMem), processes: appCount },
+      bot: { cpuPercent: Math.round(bot.cpuPercent), memMB: Math.round(bot.memMB), processes: pids.length },
+      total: { cpuPercent: Math.round(appCpu + bot.cpuPercent), memMB: Math.round(appMem + bot.memMB) },
+    };
+  }
+
   ipcMain.handle(CHANNELS.MONITOR_STATUS, async () => {
     const status = await pm.getStatus();
-    const det = comfyService.detect({});
+    const det = comfyService.detect({ dir: getSettings().comfyDir });
     const conn = await comfyService.testConnection(det.endpoint);
+    let perf = null;
+    try { perf = await collectPerf(status); } catch (_) { perf = null; }
     return {
       ok: true,
       monitor: {
@@ -1192,6 +1272,7 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
         botDirConfigured: !!botDir(),
         time: Date.now(),
       },
+      perf,
     };
   });
 

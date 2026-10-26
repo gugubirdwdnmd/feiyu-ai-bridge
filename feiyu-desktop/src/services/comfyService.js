@@ -534,15 +534,26 @@ function resolvePython(root) {
   const r = resolveComfyRoot(root) || root;
   if (r) {
     const parent = path.dirname(r);
-    const embedded = [
+    const cands = [
+      // Windows 便携版：python_embeded 通常在 ComfyUI 的同级目录
       path.join(parent, 'python_embeded', 'python.exe'),
       path.join(r, 'python_embeded', 'python.exe'),
+      // 常见虚拟环境（git clone 用户 / 自建 venv）
+      path.join(r, '.venv', 'Scripts', 'python.exe'),
+      path.join(r, 'venv', 'Scripts', 'python.exe'),
+      path.join(parent, '.venv', 'Scripts', 'python.exe'),
+      path.join(parent, 'venv', 'Scripts', 'python.exe'),
     ];
-    for (const c of embedded) {
+    for (const c of cands) {
       try { if (fs.existsSync(c)) return c; } catch (_) {}
     }
   }
   return 'python';
+}
+
+/** 判断解释器是否便携版自带的 python_embeded（需要 -s / --windows-standalone-build）。 */
+function isEmbeddedPython(py) {
+  return /python_embeded/i.test(String(py || ''));
 }
 
 /**
@@ -554,11 +565,16 @@ function launchSpec(root, opts = {}) {
   if (!r || !looksLikeComfyDir(r)) return { ok: false, error: '未找到 ComfyUI 安装目录（需含 main.py）' };
   const port = opts.port || DEFAULT_PORT;
   const py = resolvePython(r);
+  // 便携版自带 python_embeded 时，按官方启动方式加 -s 与 --windows-standalone-build，
+  // 避免用户 site-packages 干扰、并启用便携版预期的相对路径行为。
+  const args = isEmbeddedPython(py)
+    ? ['-s', 'main.py', '--windows-standalone-build', '--port', String(port), '--listen', '127.0.0.1']
+    : ['main.py', '--port', String(port), '--listen', '127.0.0.1'];
   return {
     ok: true,
     spec: {
       command: py,
-      args: ['main.py', '--port', String(port), '--listen', '127.0.0.1'],
+      args,
       cwd: r,
     },
   };
