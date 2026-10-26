@@ -27,6 +27,7 @@ const botDirResolver = require('../services/botDirResolver');
 // —— 全量升级新增模块（A–J）——
 const napcatLoginService = require('../services/napcatLoginService');
 const napcatWebuiService = require('../services/napcatWebuiService');
+const qqBackendService = require('../services/qqBackendService');
 const serviceRegistry = require('../services/serviceRegistry');
 const envDetector = require('../services/envDetector');
 const mcpService = require('../services/mcpService');
@@ -1355,6 +1356,103 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send, we
     return { ok: true, lines: r.recent, path: r.path, exists: r.exists };
   });
   ipcMain.handle(CHANNELS.LOG_STREAM_STOP, () => { logTail.stop(); return { ok: true }; });
+
+  // —— QQ 接入后端统一管理（NapCat / SnowLuma）——
+  const qqBackend = qqBackendService.createBackendService({
+    pm,
+    getSettings,
+    // 注意：底层 setSettings 是「整体写入」，这里必须合并，避免把其它配置擦掉
+    setSettings: (patch) => setSettings(Object.assign({}, getSettings(), patch)),
+    resolveNapcatDir,
+    getNapcatAccount: () => {
+      const s = getSettings() || {};
+      const n = s.napcat || {};
+      return { account: n.account || '', passwordMd5: n.passwordMd5 || '' };
+    },
+  });
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_LIST, async () => {
+    const cfg = qqBackend.getConfig();
+    const current = cfg.default;
+    let status = null; let error = null;
+    try { const r = await qqBackend.status(current); status = r.status || null; if (!r.ok) error = r.error; } catch (e) { error = e.message; }
+    return { ok: true, backends: qqBackend.listBackends(), current, config: cfg, status, error };
+  });
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_SET, (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_SET, args); if (!v.ok) return { ok: false, error: v.error };
+    if (args.default) {
+      const r = qqBackend.setDefault(args.default);
+      if (!r.ok) return r;
+    }
+    const patch = {};
+    if (args.napcat) patch.napcat = args.napcat;
+    if (args.snowluma) patch.snowluma = args.snowluma;
+    if (Object.keys(patch).length) qqBackend.setConfig(patch);
+    return { ok: true, config: qqBackend.getConfig() };
+  });
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_STATUS, async (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_STATUS, args); if (!v.ok) return { ok: false, error: v.error };
+    return qqBackend.status(args.id);
+  });
+
+  const startedByUs = new Set();
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_START, async (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_START, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = await qqBackend.start(args.id);
+    if (r && r.ok && r.pid) startedByUs.add(r.pid);
+    return r;
+  });
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_STOP, async (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_STOP, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = await qqBackend.stop(args.id);
+    if (r && r.ok) startedByUs.clear();
+    return r;
+  });
+
+  // 退出策略：默认**不**杀掉用户显式启动的 QQ 服务（避免「关一下工具 QQ 就掉线」）；
+  // 只有在设置里打开 stopOnExit 时才回收本次由本工具拉起的进程。
+  try {
+    if (app && typeof app.once === 'function') {
+      app.once('before-quit', async () => {
+        const s = getSettings() || {};
+        const want = !!(s.qqBackend && s.qqBackend.stopOnExit);
+        if (!want || !startedByUs.size) return;
+        try { await pm.stopByPids(Array.from(startedByUs), { timeoutMs: 5000 }); } catch (_) {}
+        startedByUs.clear();
+      });
+    }
+  } catch (_) {}
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_RESTART, async (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_RESTART, args); if (!v.ok) return { ok: false, error: v.error };
+    return qqBackend.restart(args.id);
+  });
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_HEALTH, async (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_HEALTH, args); if (!v.ok) return { ok: false, error: v.error };
+    return qqBackend.healthCheck(args.id);
+  });
+
+  ipcMain.handle(CHANNELS.QQ_BACKEND_LOGS, async (e, args) => {
+    const v = validate(CHANNELS.QQ_BACKEND_LOGS, args); if (!v.ok) return { ok: false, error: v.error };
+    return qqBackend.getLogs(args.id, args.lines || 120);
+  });
+
+  ipcMain.handle(CHANNELS.SNOWLUMA_DETECT, (e, args) => {
+    const v = validate(CHANNELS.SNOWLUMA_DETECT, args); if (!v.ok) return { ok: false, error: v.error };
+    const s = getSettings() || {};
+    const dir = (args && args.dir) || ((s.qqBackend && s.qqBackend.snowluma) ? s.qqBackend.snowluma.installDir : '');
+    const det = qqBackendService.detectSnowLuma(dir);
+    return {
+      ok: true, detect: det,
+      note: '许可：SnowLuma Source-Available Non-Commercial License v1.0（非商业、非 OSI 开源，原生组件为专有）。'
+        + '本工具不打包、不内嵌、不自动再分发其源码或二进制，仅使用你指定的本地安装目录。',
+    };
+  });
 }
 
 module.exports = { registerHandlers };

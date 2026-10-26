@@ -161,6 +161,16 @@ const CHANNELS = {
   LOG_STREAM_START: 'logstream:start',
   LOG_STREAM_STOP: 'logstream:stop',
   LOG_STREAM_LINE: 'logstream:line',
+  // QQ 接入后端统一管理（NapCat / SnowLuma）
+  QQ_BACKEND_LIST: 'qqbackend:list',
+  QQ_BACKEND_SET: 'qqbackend:set',
+  QQ_BACKEND_STATUS: 'qqbackend:status',
+  QQ_BACKEND_START: 'qqbackend:start',
+  QQ_BACKEND_STOP: 'qqbackend:stop',
+  QQ_BACKEND_RESTART: 'qqbackend:restart',
+  QQ_BACKEND_HEALTH: 'qqbackend:health',
+  QQ_BACKEND_LOGS: 'qqbackend:logs',
+  SNOWLUMA_DETECT: 'snowluma:detect',
 };
 
 /**
@@ -521,6 +531,31 @@ function validate(channel, args) {
       if (args != null && args.lines != null && (!Number.isInteger(args.lines) || args.lines < 1 || args.lines > 5000)) return { ok: false, error: 'lines 必须 1-5000' };
       return { ok: true };
     case CHANNELS.LOG_STREAM_STOP:
+      return { ok: true };
+
+    // —— QQ 接入后端（NapCat / SnowLuma）——
+    case CHANNELS.QQ_BACKEND_LIST:
+      return { ok: true };
+    case CHANNELS.QQ_BACKEND_SET:
+      if (!isObject(args)) return { ok: false, error: '需要 object' };
+      // default 必须是已知后端；config 只能是对象（子字段由服务层白名单化）
+      if (args.default != null && !['napcat', 'snowluma'].includes(args.default)) return { ok: false, error: 'default 必须是 napcat|snowluma' };
+      if (args.napcat != null && !isObject(args.napcat)) return { ok: false, error: 'napcat 必须是 object' };
+      if (args.snowluma != null && !isObject(args.snowluma)) return { ok: false, error: 'snowluma 必须是 object' };
+      return { ok: true };
+    case CHANNELS.QQ_BACKEND_STATUS:
+    case CHANNELS.QQ_BACKEND_START:
+    case CHANNELS.QQ_BACKEND_STOP:
+    case CHANNELS.QQ_BACKEND_RESTART:
+    case CHANNELS.QQ_BACKEND_HEALTH:
+      if (!isObject(args) || !['napcat', 'snowluma'].includes(args.id)) return { ok: false, error: '需要 {id: napcat|snowluma}' };
+      return { ok: true };
+    case CHANNELS.QQ_BACKEND_LOGS:
+      if (!isObject(args) || !['napcat', 'snowluma'].includes(args.id)) return { ok: false, error: '需要 {id: napcat|snowluma}' };
+      if (args.lines != null && (!Number.isInteger(args.lines) || args.lines < 1 || args.lines > 2000)) return { ok: false, error: 'lines 必须 1-2000' };
+      return { ok: true };
+    case CHANNELS.SNOWLUMA_DETECT:
+      if (args != null && args.dir != null && !isString(args.dir)) return { ok: false, error: 'dir 必须是 string' };
       return { ok: true };
 
     default:

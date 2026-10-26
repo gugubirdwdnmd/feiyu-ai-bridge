@@ -150,7 +150,9 @@ function render(page) {
     // 新增聚合页（模块 A–J）
     loginservices: pageLoginServices, extensions: pageExtensions, ops: pageOps,
     // 模块 K：终端 / 实时状态监控 / 实时日志流
-    console: pageConsole };
+    console: pageConsole,
+    // QQ 接入后端统一管理（NapCat / SnowLuma）
+    qqbackend: pageQqBackend };
   (map[page] || pageOverview)();
 }
 
@@ -2344,6 +2346,275 @@ async function pageConsole() {
 
   addCleanup(() => { if (sessionId) { try { invoke(C.TERMINAL_CLOSE, { sessionId }); } catch (_) {} } });
   setTimeout(() => input.focus(), 0);
+}
+
+/* ---------- QQ 接入后端统一管理（NapCat / SnowLuma） ---------- */
+const CAP_LABEL = {
+  onebot11: 'OneBot v11 协议', http: 'HTTP 接口', websocket: 'WebSocket', webui: 'WebUI 管理',
+  quickLogin: '快速登录（账号密码）', qrLogin: '扫码登录', multiAccount: '多账号', mcp: 'MCP 工具服务',
+  sendMessage: '消息收发', getLogs: '本机日志文件', restart: '重启',
+};
+
+function capBadges(caps) {
+  if (!caps) return '';
+  const out = [];
+  for (const k of Object.keys(CAP_LABEL)) {
+    const v = caps[k];
+    if (v === true) out.push(badge(true, CAP_LABEL[k]));
+    else if (v === false) out.push(badge(false, CAP_LABEL[k] + '：不支持'));
+    else out.push(badge(false, CAP_LABEL[k] + '：未验证'));
+  }
+  return out.join(' ');
+}
+
+async function pageQqBackend() {
+  const body = $('#content');
+  body.innerHTML = '<div class="hint">正在读取后端状态…</div>';
+  let data;
+  try { data = await invoke(C.QQ_BACKEND_LIST); } catch (e) { body.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; return; }
+  if (!data || !data.ok) { body.innerHTML = '<div class="err">' + esc((data && data.error) || '读取失败') + '</div>'; return; }
+
+  const backends = data.backends || [];
+  let current = data.current || 'napcat';
+  let cfg = data.config || {};
+  let status = data.status;
+  let timer = null;
+
+  const fmtUptime = (ms) => {
+    if (ms == null) return '—';
+    const s = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return (h ? h + '小时' : '') + (m ? m + '分' : '') + (s % 60) + '秒';
+  };
+
+  const draw = () => {
+    const st = status || {};
+    const isNap = current === 'napcat';
+    const nap = cfg.napcat || {}, sn = cfg.snowluma || {};
+    const caps = (backends.find((b) => b.id === current) || {}).capabilities || {};
+    body.innerHTML = `
+    <div class="section">
+      <h3>当前后端</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label>后端</label>
+        <select id="qbSel">
+          ${backends.map((b) => `<option value="${esc(b.id)}" ${b.id === current ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}
+        </select>
+        <button class="btn" id="qbSwitch">切换为该后端</button>
+        ${badge(!!st.running, st.running ? '运行中' : '未运行')}
+      </div>
+      <div class="monitor-grid" style="margin-top:10px">
+        <div class="mon-card ${st.running ? 'running' : 'stopped'}"><span class="mon-dot"></span>
+          <div class="mon-name">运行状态</div><div class="mon-state">${st.running ? '运行中' : '未运行'}</div>
+          <div class="mon-meta">${st.pid ? 'PID ' + esc(st.pid) : '—'}</div></div>
+        <div class="mon-card"><span class="mon-dot"></span>
+          <div class="mon-name">运行时长</div><div class="mon-state">${esc(fmtUptime(st.uptimeMs))}</div>
+          <div class="mon-meta">${st.port ? '端口 ' + esc(st.port) : ''}</div></div>
+        <div class="mon-card"><span class="mon-dot"></span>
+          <div class="mon-name">版本 / 安装</div>
+          <div class="mon-state">${esc(st.version || (st.installed ? '已安装（版本未知）' : '未安装/未指定'))}</div>
+          <div class="mon-meta">${esc(st.endpoint || '')}</div></div>
+      </div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <button class="btn" id="qbStart">启动</button>
+        <button class="btn sec" id="qbStop">停止</button>
+        <button class="btn alt" id="qbRestart">重启</button>
+        <button class="btn sec" id="qbHealth">检查连接</button>
+        <button class="btn sec" id="qbRefresh">刷新状态</button>
+      </div>
+      <div class="hint" id="qbMsg">${esc((data.error || st.error || '就绪'))}</div>
+    </div>
+
+    <div class="section">
+      <h3>能力（按官方文档如实标注，未验证绝不冒充支持）</h3>
+      <div class="row" style="flex-wrap:wrap;gap:6px">${capBadges(caps)}</div>
+      ${(caps.notes || []).length ? '<div class="hint">官方依据：' + (caps.notes || []).map((s) => esc(s)).join('；') + '</div>' : ''}
+    </div>
+
+    <div class="section">
+      <h3>连接与路径设置</h3>
+      ${isNap ? `
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 200px;min-width:0">OneBot 端口</label>
+          <input id="qbNapPort" value="${esc(nap.onebotPort || 3000)}" style="flex:1 1 160px;min-width:0;width:auto" />
+          <label style="flex:1 1 200px;min-width:0">WebUI 端口</label>
+          <input id="qbNapWeb" value="${esc(nap.webuiPort || 6099)}" style="flex:1 1 160px;min-width:0;width:auto" />
+        </div>
+        <div class="hint">NapCat 目录在「机器人运行」页管理（含 index.js + node.exe 的那个目录）。QQ 号与登录在「登录与服务」页，本页不改动你的登录配置。</div>
+      ` : `
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 220px;min-width:0">安装目录</label>
+          <input id="qbSnDir" value="${esc(sn.installDir || '')}" placeholder="选择 SnowLuma 解压目录" style="flex:1 1 320px;min-width:0;width:auto" />
+          <button class="btn sec" id="qbSnPick">选择目录…</button>
+          <button class="btn sec" id="qbSnDetect">检测安装</button>
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 200px;min-width:0">启动器</label>
+          <select id="qbSnLauncher" style="flex:0 1 180px;width:auto">
+            ${['launcher.bat', 'launcher.sh', 'SnowLuma.exe'].map((l) => `<option value="${esc(l)}" ${sn.launcher === l ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+          </select>
+          <label style="flex:1 1 160px;min-width:0">WebUI 端口</label>
+          <input id="qbSnPort" value="${esc(sn.webuiPort || 5099)}" style="flex:1 1 140px;min-width:0;width:auto" />
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 200px;min-width:0">OneBot 地址（可选）</label>
+          <input id="qbSnUrl" value="${esc(sn.onebotUrl || '')}" placeholder="如 http://127.0.0.1:3000（需在 SnowLuma WebUI 内先配置）" style="flex:1 1 320px;min-width:0;width:auto" />
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 200px;min-width:0">访问令牌（可选，仅本机保存）</label>
+          <input type="password" id="qbSnTok" placeholder="${sn.onebotTokenSet ? '已保存，留空表示不修改' : '留空表示不设置'}" style="flex:1 1 260px;min-width:0;width:auto" />
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 200px;min-width:0">日志文件（可选）</label>
+          <input id="qbSnLog" value="${esc(sn.logPath || '')}" placeholder="官方文档未给出固定日志路径，可指定或留空" style="flex:1 1 320px;min-width:0;width:auto" />
+        </div>
+        <div class="hint">许可：SnowLuma 为「源码可见非商业许可」，<b>本工具不打包、不内嵌、不自动再分发</b>其源码或二进制，只使用你指定的本地安装目录。下载请到官方 Release 页自行获取后，用上方「选择目录」指向解压位置。</div>
+        <div class="hint">SnowLuma 的 QQ 登录、OneBot 连接配置请在其 WebUI（默认 http://127.0.0.1:${esc(sn.webuiPort || 5099)}）内完成——官方文档未给出可用的快速登录/扫码接口，本工具不虚构。</div>
+      `}
+      <div class="row" style="margin-top:10px"><button class="btn" id="qbSave">保存设置</button></div>
+      <div class="hint" id="qbSaveMsg"></div>
+    </div>
+
+    <div class="section">
+      <h3>日志（已脱敏）</h3>
+      <div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn sec" id="qbLogs">读取最近 120 行</button></div>
+      <div class="log" id="qbLogBox" style="max-height:320px">—</div>
+    </div>
+
+    <div class="section">
+      <h3>SnowLuma MCP 接入（复用现有 MCP 权限中心）</h3>
+      <div class="hint">官方提供 <code>@snowluma/mcp</code> 包。本工具<b>不猜测其启动方式</b>：请按官方文档填写命令或地址，先用「解析并审查」看风险与权限，确认后再导入。导入后<b>默认禁用</b>，不会自动执行任何写操作。</div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label style="flex:0 1 120px">名称</label>
+        <input id="mpName" value="snowluma" style="flex:1 1 160px;min-width:0;width:auto" />
+        <label style="flex:0 1 120px">传输</label>
+        <select id="mpTransport" style="flex:0 1 140px;width:auto"><option value="stdio">stdio（本地命令）</option><option value="http">http（远程地址）</option></select>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label style="flex:0 1 120px">命令</label>
+        <input id="mpCmd" placeholder="如 npx（stdio 时必填）" style="flex:1 1 200px;min-width:0;width:auto" />
+        <label style="flex:0 1 120px">参数</label>
+        <input id="mpArgs" placeholder="空格分隔，如 -y @snowluma/mcp" style="flex:1 1 260px;min-width:0;width:auto" />
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label style="flex:0 1 120px">地址</label>
+        <input id="mpUrl" placeholder="http 传输时填写，仅允许本机回环地址" style="flex:1 1 320px;min-width:0;width:auto" />
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <button class="btn sec" id="mpParse">解析并审查</button>
+        <button class="btn" id="mpImport" disabled>确认导入（默认禁用）</button>
+        <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="mpAuth" /> 我已确认风险并授权登记</label>
+      </div>
+      <div id="mpPreview" class="hint">—</div>
+    </div>`;
+
+    $('#qbSel').onchange = (e) => { current = e.target.value; draw(); };
+    $('#qbSwitch').onclick = async () => {
+      const s = current === 'napcat' ? (status && status.id === 'napcat' ? status : (await invoke(C.QQ_BACKEND_STATUS, { id: 'napcat' })).status) : null;
+      if (s && s.running && !confirm('当前后端正在运行。切换默认后端不会自动停止它，确定继续？')) return;
+      const r = await invoke(C.QQ_BACKEND_SET, { default: current });
+      $('#qbMsg').innerHTML = r.ok ? '<span class="ok">已切换默认后端</span>' : '<span class="err">' + esc(r.error) + '</span>';
+      await refresh();
+    };
+    $('#qbStart').onclick = () => act(C.QQ_BACKEND_START, '启动');
+    $('#qbStop').onclick = () => act(C.QQ_BACKEND_STOP, '停止');
+    $('#qbRestart').onclick = () => act(C.QQ_BACKEND_RESTART, '重启');
+    $('#qbRefresh').onclick = async () => { await refresh(); };
+    $('#qbHealth').onclick = async () => {
+      const m = $('#qbMsg'); m.innerHTML = '<span class="hint">检查中…</span>';
+      const r = await invoke(C.QQ_BACKEND_HEALTH, { id: current });
+      m.innerHTML = r && r.ok
+        ? '<span class="ok">连接正常' + (r.statusCode ? '（HTTP ' + esc(r.statusCode) + '）' : '') + (r.onebot ? '；OneBot：' + (r.onebot.ok ? '正常' : esc(r.onebot.error || '不可用')) : '') + '</span>'
+        : '<span class="err">' + esc((r && (r.error || (r.webui && r.webui.error))) || '连接失败') + '</span>';
+    };
+    if (isNap) {
+      // 无
+    } else {
+      $('#qbSnPick').onclick = async () => {
+        const r = await invoke(C.DIALOG_PICKDIR);
+        if (r && r.ok && r.dir) { $('#qbSnDir').value = r.dir; const d = await invoke(C.SNOWLUMA_DETECT, { dir: r.dir }); $('#qbSaveMsg').innerHTML = d.ok ? '<span class="ok">检测到：' + esc(d.detect.version || (d.detect.installed ? '已安装' : '未安装')) + '；启动器 ' + esc(d.detect.launcher || '未找到') + '</span>' : '<span class="err">' + esc(d.error) + '</span>'; }
+      };
+      $('#qbSnDetect').onclick = async () => {
+        const d = await invoke(C.SNOWLUMA_DETECT, { dir: $('#qbSnDir').value.trim() });
+        $('#qbSaveMsg').innerHTML = d.ok
+          ? (d.detect.installed ? '<span class="ok">已安装' + (d.detect.version ? '，版本 ' + esc(d.detect.version) : '') + '；启动器 ' + esc(d.detect.launcher || '未找到') + '</span>' : '<span class="err">未安装/目录无效</span>')
+          : '<span class="err">' + esc(d.error) + '</span>';
+      };
+    }
+    $('#qbSave').onclick = async () => {
+      const patch = {};
+      if (isNap) {
+        patch.napcat = { onebotPort: Number($('#qbNapPort').value) || 3000, webuiPort: Number($('#qbNapWeb').value) || 6099 };
+      } else {
+        const s2 = {};
+        if ($('#qbSnDir').value.trim()) s2.installDir = $('#qbSnDir').value.trim();
+        s2.launcher = $('#qbSnLauncher').value;
+        s2.webuiPort = Number($('#qbSnPort').value) || 5099;
+        s2.onebotUrl = $('#qbSnUrl').value.trim();
+        const tok = $('#qbSnTok').value;
+        if (tok) s2.onebotToken = tok;
+        s2.logPath = $('#qbSnLog').value.trim();
+        patch.snowluma = s2;
+      }
+      const r = await invoke(C.QQ_BACKEND_SET, patch);
+      $('#qbSaveMsg').innerHTML = r.ok ? '<span class="ok">已保存</span>' : '<span class="err">' + esc(r.error) + '</span>';
+      if (r.ok) { cfg = r.config; draw(); }
+    };
+    $('#qbLogs').onclick = async () => {
+      const box = $('#qbLogBox'); box.textContent = '读取中…';
+      const r = await invoke(C.QQ_BACKEND_LOGS, { id: current, lines: 120 });
+      box.textContent = r && r.ok ? (r.lines || []).join('\n') : ('读取失败：' + ((r && r.error) || '未知错误'));
+    };
+
+    // —— MCP 接入：复用现有解析/审查/权限流程，不重复造轮子 ——
+    const mpPayload = () => {
+      const name = ($('#mpName').value.trim() || 'snowluma');
+      const tr = $('#mpTransport').value;
+      const cmd = $('#mpCmd').value.trim();
+      const args = $('#mpArgs').value.trim().split(/\s+/).filter(Boolean);
+      const url = $('#mpUrl').value.trim();
+      const one = {};
+      if (tr === 'stdio') { if (cmd) one.command = cmd; if (args.length) one.args = args; }
+      else { if (url) one.url = url; one.transport = 'http'; }
+      return { mcpServers: { [name]: one } };
+    };
+    $('#mpAuth').onchange = () => { $('#mpImport').disabled = !$('#mpAuth').checked; };
+    $('#mpParse').onclick = async () => {
+      const p = await invoke(C.MCP_PARSE, { payload: JSON.stringify(mpPayload()) });
+      const pv = $('#mpPreview');
+      if (!p || !p.ok) { pv.innerHTML = '<span class="err">' + esc((p && (p.errors || []).join('；')) || '解析失败') + '</span>'; return; }
+      const s = (p.servers || [])[0] || {};
+      pv.innerHTML = `
+        <div class="hint">风险等级：<b>${esc(s.risk || 'unknown')}</b>｜传输：${esc(s.transport || '—')}</div>
+        ${(s.findings || []).length ? '<div class="hint">审查：' + s.findings.map((f) => '[' + esc(f.level) + '] ' + esc(f.message)).join('<br>') + '</div>' : '<div class="hint">审查：无高危项</div>'}
+        ${(s.permissions || []).length ? '<div class="hint">需要权限（默认<b>不授予</b>）：' + s.permissions.map((x) => esc(x.label)).join('、') + '</div>' : ''}
+        ${(p.warnings || []).length ? '<div class="hint">警告：' + p.warnings.map((w) => esc(w)).join('；') + '</div>' : ''}`;
+    };
+    $('#mpImport').onclick = async () => {
+      const r = await invoke(C.MCP_IMPORT, { payload: JSON.stringify(mpPayload()), overwrite: false });
+      const pv = $('#mpPreview');
+      pv.innerHTML = r && r.ok
+        ? '<span class="ok">已导入（默认禁用，未授予任何写权限）。同名冲突请先在 MCP 页删除或用「覆盖同名」。</span>'
+        : '<span class="err">' + esc((r && (r.errors || []).join('；')) || (r && r.error) || '导入失败') + '</span>';
+    };
+  };
+
+  const act = async (ch, label) => {
+    const m = $('#qbMsg'); m.innerHTML = '<span class="hint">' + label + '中…</span>';
+    const r = await invoke(ch, { id: current });
+    if (r && r.ok) m.innerHTML = '<span class="ok">' + label + '成功' + (r.pid ? '（PID ' + esc(r.pid) + '）' : '') + (r.alreadyRunning ? '（已在运行）' : '') + (r.alreadyStopped ? '（本就未运行）' : '') + (r.starting ? '（正在启动，稍候再看状态）' : '') + '</span>';
+    else m.innerHTML = '<span class="err">' + label + '失败：' + esc((r && r.error) || '未知错误') + '</span>';
+    await refresh();
+  };
+
+  const refresh = async () => {
+    const r = await invoke(C.QQ_BACKEND_LIST);
+    if (r && r.ok) { current = r.current; cfg = r.config; status = r.status; data.error = r.error; draw(); }
+  };
+
+  draw();
+  timer = setInterval(refresh, 5000);
+  addCleanup(() => { if (timer) clearInterval(timer); });
 }
 
 // 启动：先加载主题（写 CSS 变量 + 启动背景动画），再渲染首页。
