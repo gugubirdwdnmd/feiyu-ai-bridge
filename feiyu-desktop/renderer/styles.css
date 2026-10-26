@@ -142,24 +142,61 @@ details.adv summary:hover { color: var(--text); }
 @keyframes feiyu-shimmer { 0% { background-position: -240px 0; } 100% { background-position: 240px 0; } }
 @keyframes feiyu-fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
-/* 实时状态监控卡片 */
+/* 实时状态监控卡片 —— 平滑三态动画，支持 data-mon-fx 自定义 */
+@keyframes mon-breathe-dot {
+  0%, 100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 45%, transparent), 0 0 8px color-mix(in srgb, var(--ok) 55%, transparent); }
+  50% { transform: scale(.9); opacity: .82; box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 0%, transparent), 0 0 12px color-mix(in srgb, var(--ok) 35%, transparent); }
+}
+@keyframes mon-breathe-card {
+  0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 22%, transparent), 0 0 14px color-mix(in srgb, var(--ok) 14%, transparent); }
+  50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 36%, transparent), 0 0 22px color-mix(in srgb, var(--ok) 26%, transparent); }
+}
+@keyframes mon-sonar {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent), 0 0 8px color-mix(in srgb, var(--ok) 50%, transparent); }
+  100% { box-shadow: 0 0 0 11px color-mix(in srgb, var(--ok) 0%, transparent), 0 0 8px color-mix(in srgb, var(--ok) 30%, transparent); }
+}
+@keyframes mon-flow-sweep { 0% { left: -45%; } 100% { left: 105%; } }
+@keyframes mon-loading-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.82); } }
+
 .monitor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-.mon-card { position: relative; background: var(--surface2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; transition: border-color .4s, box-shadow .4s, background .4s; overflow: hidden; }
-.mon-card .mon-dot { position: absolute; top: 14px; right: 14px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: background .4s, box-shadow .4s; }
+.mon-card { position: relative; background: var(--surface2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; transition: border-color .45s ease, box-shadow .45s ease, background .45s ease, opacity .45s ease; overflow: hidden; }
+.mon-card .mon-dot { position: absolute; top: 14px; right: 14px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: background .45s ease; will-change: transform, opacity, box-shadow; }
 .mon-card .mon-name { font-weight: 700; font-size: 15px; }
-.mon-card .mon-state { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.mon-card .mon-state { font-size: 13px; color: var(--muted); margin-top: 4px; transition: color .45s ease; }
 .mon-card .mon-meta { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: Consolas, monospace; word-break: break-all; }
-.mon-card.running { border-color: var(--ok); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 30%, transparent), 0 0 18px color-mix(in srgb, var(--ok) 22%, transparent); }
-.mon-card.running .mon-dot { background: var(--ok); box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 70%, transparent); animation: feiyu-pulse 1.4s ease-in-out infinite; }
+
+/* 运行中：基础静态样式 */
+.mon-card.running { border-color: var(--ok); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 26%, transparent), 0 0 18px color-mix(in srgb, var(--ok) 20%, transparent); }
+.mon-card.running .mon-dot { background: var(--ok); }
 .mon-card.running .mon-state { color: var(--ok); }
+
+/* 运行中 · 柔和呼吸（默认） */
+.monitor-grid[data-mon-fx="breathe"] .mon-card.running { animation: mon-breathe-card 2.6s ease-in-out infinite; }
+.monitor-grid[data-mon-fx="breathe"] .mon-card.running .mon-dot { animation: mon-breathe-dot 2.6s ease-in-out infinite; }
+
+/* 运行中 · 声波扩散 */
+.monitor-grid[data-mon-fx="pulse"] .mon-card.running .mon-dot { animation: mon-sonar 1.9s ease-out infinite; }
+
+/* 运行中 · 流光扫过 */
+.monitor-grid[data-mon-fx="flow"] .mon-card.running::before { content: ''; position: absolute; top: 0; bottom: 0; width: 45%; left: -45%; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ok) 18%, transparent), transparent); animation: mon-flow-sweep 2.8s ease-in-out infinite; pointer-events: none; }
+
+/* 运行中 · 极简（完全静止） */
+.monitor-grid[data-mon-fx="min"] .mon-card.running .mon-dot,
+.monitor-grid[data-mon-fx="min"] .mon-card.running { animation: none !important; }
+
+/* 已停止 */
 .mon-card.stopped { opacity: .72; }
 .mon-card.stopped .mon-dot { background: var(--line); }
+
+/* 加载中：柔和微光扫过 + 轻呼吸点 */
 .mon-card.loading { border-color: var(--accent); }
-.mon-card.loading .mon-dot { background: var(--accent); animation: feiyu-blink 1s steps(2, jump-none) infinite; }
+.mon-card.loading .mon-dot { background: var(--accent); animation: mon-loading-dot 1.6s ease-in-out infinite; }
 .mon-card.loading .mon-state { color: var(--accent); }
-/* 加载态：骨架微光扫过 */
-.mon-card.loading::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 16%, transparent), transparent); background-size: 480px 100%; animation: feiyu-shimmer 1.2s linear infinite; pointer-events: none; }
-.monitor-grid.refreshing { animation: feiyu-pulse .5s ease-in-out; }
+.mon-card.loading::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 14%, transparent), transparent); background-size: 480px 100%; animation: feiyu-shimmer 1.8s linear infinite; pointer-events: none; }
+.monitor-grid[data-mon-fx="min"] .mon-card.loading::after { animation: none; opacity: .22; }
+
+/* 刷新时：柔和描边高亮（不再整格脉冲跳动） */
+.monitor-grid.refreshing .mon-card { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
 /* 实时日志徽标 */
 .live-badge { display: inline-block; margin-left: 8px; font-size: 11px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 999px; padding: 1px 9px; animation: feiyu-blink 1.4s ease-in-out infinite; }

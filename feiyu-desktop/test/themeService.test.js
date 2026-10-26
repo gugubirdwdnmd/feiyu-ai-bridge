@@ -84,7 +84,7 @@ test('validateTheme: 越界数值被 clamp 到范围内', () => {
 test('validateTheme: 未知字段被丢弃且不进入结果', () => {
   const v = themeService.validateTheme({ bg: '#000000', a: '#111111', b: '#222222', hack: 'x', __extra: 1, path: 'C:/secret' });
   assert.strictEqual(v.valid, true);
-  assert.deepStrictEqual(Object.keys(v.theme).sort(), ['a', 'b', 'bg', 'blur', 'fx', 'radius', 'speed']);
+  assert.deepStrictEqual(Object.keys(v.theme).sort(), ['a', 'b', 'bg', 'blur', 'fx', 'monFx', 'mouseParallax', 'radius', 'speed']);
   assert.strictEqual(v.theme.hack, undefined);
   assert.strictEqual(v.theme.path, undefined);
   assert.ok(v.warnings.some((w) => w.includes('未知字段')));
@@ -235,6 +235,7 @@ test('DEFAULT_THEME: 深海 / bubbles / spd 1 / rad 16 / blr 14', () => {
   assert.deepStrictEqual(Object.assign({}, themeService.DEFAULT_THEME), {
     bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5',
     fx: 'bubbles', speed: 1, radius: 16, blur: 14,
+    monFx: 'breathe', mouseParallax: true,
   });
 });
 
@@ -242,7 +243,7 @@ test('DEFAULT_THEME: 深海 / bubbles / spd 1 / rad 16 / blr 14', () => {
 
 test('持久化: 写入后读回完全一致', () => {
   const d = tmpDir();
-  const theme = { bg: '#1f1020', a: '#ff6f91', b: '#ffc75f', fx: 'aurora', speed: 2, radius: 22, blur: 8 };
+  const theme = { bg: '#1f1020', a: '#ff6f91', b: '#ffc75f', fx: 'aurora', speed: 2, radius: 22, blur: 8, monFx: 'breathe', mouseParallax: true };
   const s = themeService.saveTheme(d, theme);
   assert.strictEqual(s.ok, true, s.error);
   const r = themeService.readTheme(d);
@@ -293,7 +294,7 @@ test('持久化: 文件不是对象 → 回退默认主题', () => {
 
 test('持久化: 写入过程失败不留半写文件，原文件保持不变', () => {
   const d = tmpDir();
-  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14 };
+  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14, monFx: 'breathe', mouseParallax: true };
   themeService.saveTheme(d, good);
   const target = path.join(d, 'theme.json');
   const before = fs.readFileSync(target, 'utf-8');
@@ -323,7 +324,7 @@ test('持久化: 写入过程失败不留半写文件，原文件保持不变', 
 
 test('持久化: rename 失败时同样不留临时文件且不破坏原文件', () => {
   const d = tmpDir();
-  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14 };
+  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14, monFx: 'breathe', mouseParallax: true };
   themeService.saveTheme(d, good);
   const target = path.join(d, 'theme.json');
   const before = fs.readFileSync(target, 'utf-8');
@@ -340,7 +341,7 @@ test('持久化: rename 失败时同样不留临时文件且不破坏原文件',
 
 test('持久化: 非法主题写入被拒，不改动已有主题文件', () => {
   const d = tmpDir();
-  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14 };
+  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14, monFx: 'breathe', mouseParallax: true };
   themeService.saveTheme(d, good);
   const target = path.join(d, 'theme.json');
   const before = fs.readFileSync(target, 'utf-8');
@@ -370,7 +371,7 @@ test('exportTheme: 导出 JSON 只含白名单字段，无路径/密钥', () => 
   assert.strictEqual(e.ok, true);
   const obj = JSON.parse(e.json);
   assert.deepStrictEqual(Object.keys(obj).sort(), ['theme', 'version']);
-  assert.deepStrictEqual(Object.keys(obj.theme).sort(), ['a', 'b', 'bg', 'blur', 'fx', 'radius', 'speed']);
+  assert.deepStrictEqual(Object.keys(obj.theme).sort(), ['a', 'b', 'bg', 'blur', 'fx', 'monFx', 'mouseParallax', 'radius', 'speed']);
   // 不得出现路径或密钥样式的内容
   assert.ok(!/[A-Za-z]:[\\/]/.test(e.json), '导出内容不得含盘符路径');
   assert.ok(!/apiKey|secret|token/i.test(e.json), '导出内容不得含密钥字段');
@@ -389,7 +390,7 @@ test('importTheme: 合法 JSON 应用成功', () => {
 
 test('importTheme: 非法 JSON 不改动当前主题', () => {
   const d = tmpDir();
-  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14 };
+  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14, monFx: 'breathe', mouseParallax: true };
   themeService.saveTheme(d, good);
   const target = path.join(d, 'theme.json');
   const before = fs.readFileSync(target, 'utf-8');
@@ -403,7 +404,7 @@ test('importTheme: 非法 JSON 不改动当前主题', () => {
 
 test('importTheme: 颜色非法时拒绝导入且不改动当前主题', () => {
   const d = tmpDir();
-  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14 };
+  const good = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5', fx: 'bubbles', speed: 1, radius: 16, blur: 14, monFx: 'breathe', mouseParallax: true };
   themeService.saveTheme(d, good);
   const r = themeService.importTheme(d, JSON.stringify({ bg: 'chartreuse', a: '#111111', b: '#222222' }));
   assert.strictEqual(r.ok, false);
@@ -416,7 +417,7 @@ test('importTheme: 未知字段被丢弃，导入结果仍是干净的主题对�
   const d = tmpDir();
   const r = themeService.importTheme(d, JSON.stringify({ bg: '#101010', a: '#f2c14e', b: '#e5e5e5', evil: 'x', path: 'D:/secret' }));
   assert.strictEqual(r.ok, true);
-  assert.deepStrictEqual(Object.keys(r.theme).sort(), ['a', 'b', 'bg', 'blur', 'fx', 'radius', 'speed']);
+  assert.deepStrictEqual(Object.keys(r.theme).sort(), ['a', 'b', 'bg', 'blur', 'fx', 'monFx', 'mouseParallax', 'radius', 'speed']);
   assert.strictEqual(r.theme.path, undefined);
   fs.rmSync(d, { recursive: true, force: true });
 });

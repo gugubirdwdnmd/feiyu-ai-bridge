@@ -251,8 +251,13 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     if (pre.alreadyRunning && !(args && args.force)) return { ok: false, alreadyRunning: true, status: pre.status, error: '机器人已在运行，避免重复启动' };
     const settings = getSettings();
     const napcat = (args && args.napcat) || settings.napcat || null;
-    const r = pm.startBot(d, { napcat, settings });
-    return { ok: true, started: r.started, pids: r.pids, note: secretService.hasUsableKey(d) ? '' : '未检测到 API Key，AI 桥可能启动后即退出（请先配置密钥）' };
+    const r = await pm.startBotVerified(d, { napcat, settings });
+    return {
+      ok: r.ok,
+      started: r.started, pids: r.pids, failed: r.failed,
+      note: (secretService.hasUsableKey(d) ? '' : '未检测到 API Key，AI 桥可能启动后即退出（请先配置密钥）；')
+        + (r.ok ? '已确认 AI 桥/NapCat 端口监听' : '部分服务启动失败，见 failed'),
+    };
   });
   ipcMain.handle(CHANNELS.PROC_STOP, async (e, args) => {
     const v = validate(CHANNELS.PROC_STOP, args); if (!v.ok) return { ok: false, error: v.error };
@@ -518,9 +523,12 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     if (conn.ok && conn.running) return { ok: true, alreadyRunning: true, pid: null, endpoint: det.endpoint };
     const spec = comfyService.launchSpec(det.root, { port: det.port });
     if (!spec.ok) return { ok: false, error: spec.error };
-    const r = pm.spawnDetached(spec.spec);
-    if (!r.ok) return { ok: false, error: '启动失败：' + (r.error || '') };
-    return { ok: true, pid: r.pid, command: spec.spec.command, port: det.port, endpoint: det.endpoint, note: '已发起启动，稍等几秒后在「运行」里看端口' };
+    const r = await pm.launchAndVerify(spec.spec, {
+      checkUp: async () => { const c = await comfyService.testConnection(det.endpoint); return !!(c && c.ok && c.running); },
+      timeoutMs: 20000,
+    });
+    if (!r.ok) return { ok: false, error: 'ComfyUI 启动失败：' + (r.error || ''), detail: r.stderrTail || null };
+    return { ok: true, pid: r.pid, verified: true, port: det.port, endpoint: det.endpoint, note: '已确认监听 ' + det.endpoint };
   });
   ipcMain.handle(CHANNELS.COMFY_STOP, async (e, args) => {
     const v = validate(CHANNELS.COMFY_STOP, args); if (!v.ok) return { ok: false, error: v.error };
@@ -766,15 +774,16 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
         : {};
       const desc = serviceRegistry.describeStart(svc, napcatOpts);
       if (!desc.ok) { failed.push({ id, error: desc.error }); continue; }
-      let r;
-      if (svc.type === 'bridge' || svc.type === 'napcat') {
-        r = pm.spawnDetached({ command: pm.resolveNodeBin(d, settings), args: desc.command, cwd: d, env: desc.env });
-      } else if (svc.type === 'comfyui') {
-        const comfyCwd = settings.comfyDir || d;
-        r = pm.spawnDetached({ command: settings.pythonBin || 'python', args: desc.command, cwd: comfyCwd, env: {} });
-      } else {
-        r = pm.spawnDetached({ command: desc.command[0], args: desc.command.slice(1), cwd: svc.cwd || d, env: {} });
-      }
+      const verifyPort = svc.type === 'bridge' ? pm.PORTS.bridge
+        : svc.type === 'napcat' ? pm.PORTS.napcat
+        : svc.type === 'comfyui' ? (svc.port || comfyService.DEFAULT_PORT)
+        : null;
+      const spec = (svc.type === 'bridge' || svc.type === 'napcat')
+        ? { command: pm.resolveNodeBin(d, settings), args: desc.command, cwd: d, env: desc.env }
+        : svc.type === 'comfyui'
+          ? { command: settings.pythonBin || 'python', args: desc.command, cwd: settings.comfyDir || d, env: {} }
+          : { command: desc.command[0], args: desc.command.slice(1), cwd: svc.cwd || d, env: {} };
+      const r = await pm.launchAndVerify(spec, { port: verifyPort, timeoutMs: 15000 });
       if (r.ok) started.push({ id, pid: r.pid }); else failed.push({ id, error: r.error });
     }
     if (failed.length) pushNote({ title: '部分服务启动失败', message: failed.map((f) => f.id + ': ' + f.error).join('；'), level: 'warn', source: 'services' });
@@ -1093,12 +1102,14 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     if (pre.alreadyRunning && op !== 'restart') { out('system', '机器人已在运行，无需重复启动。\r\n'); return true; }
     const settings = getSettings();
     const napcat = settings.napcat || null;
-    out('system', '正在启动机器人…\r\n');
-    const r = pm.startBot(d, { napcat, settings });
-    if (r && (r.started.bridge || r.started.napcat)) {
-      out('system', '已启动 (bridge PID ' + (r.started.bridge || '-') + (r.started.napcat ? ', napcat PID ' + r.started.napcat : '') + ')。\r\n');
+    out('system', '正在启动机器人（已剥离电子壳环境变量，避免干扰子进程）…\r\n');
+    const r = await pm.startBotVerified(d, { napcat, settings });
+    if (r.ok) {
+      out('system', '已确认启动：AI 桥' + (r.started.bridge && r.started.bridge.pid ? ' (PID ' + r.started.bridge.pid + ')' : '')
+        + (r.started.napcat && r.started.napcat.pid ? '，NapCat (PID ' + r.started.napcat.pid + ')' : '') + '，端口已监听。\r\n');
     } else {
-      out('system', '启动未返回 PID，请查看日志。\r\n');
+      const detail = (r.failed || []).map((f) => f.id + '：' + f.error).join('\r\n  ');
+      out('system', '启动失败：\r\n  ' + (detail || '未知原因') + '\r\n');
     }
     return true;
   }
@@ -1124,9 +1135,12 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     }
     const spec = comfyService.launchSpec(det.root, { port: det.port });
     if (!spec.ok) { out('system', '启动失败: ' + spec.error + '\r\n'); return true; }
-    out('system', '正在启动 ComfyUI (端口 ' + det.port + ')…\r\n');
-    const r = pm.spawnDetached(spec.spec);
-    out('system', r.ok ? ('已启动 (PID ' + r.pid + ')，稍候在「status」查看。\r\n') : ('启动失败: ' + (r.error || '') + '\r\n'));
+    out('system', '正在启动 ComfyUI（稍候校验端口 ' + det.port + '）…\r\n');
+    const r = await pm.launchAndVerify(spec.spec, {
+      checkUp: async () => { const c = await comfyService.testConnection(det.endpoint); return !!(c && c.ok && c.running); },
+      timeoutMs: 20000,
+    });
+    out('system', r.ok ? ('已确认启动 (PID ' + r.pid + ')，端口 ' + det.port + ' 已监听。\r\n') : ('启动失败: ' + (r.error || '') + '\r\n'));
     return true;
   }
 

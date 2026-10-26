@@ -27,6 +27,10 @@
   let speed = 1;
   let palette = { bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5' };
   let bubbles = [];
+  // 鼠标视差：tgt 为目标归一化坐标(-1..1)，par 为当前平滑偏移；指数缓动逼近 → 丝滑
+  let parOn = true;
+  let tgtX = 0, tgtY = 0;
+  let parX = 0, parY = 0;
 
   /** 是否命中「减少动态效果」系统偏好。 */
   function reducedMotion() {
@@ -117,21 +121,41 @@
     lastTs = ts;
     const k = Math.max(0.3, Math.min(2.5, speed));
 
+    // 鼠标视差：指数缓动（帧率无关）逼近目标，丝滑无跳变；关闭/减少动态时平滑归零
+    if (parOn && !reducedMotion()) {
+      const ease = 1 - Math.exp(-dt * 7);
+      parX += (tgtX - parX) * ease;
+      parY += (tgtY - parY) * ease;
+    } else {
+      const back = 1 - Math.exp(-dt * 4);
+      parX += (0 - parX) * back;
+      parY += (0 - parY) * back;
+    }
+
     ctx.clearRect(0, 0, w, h);
 
     if (fx === 'bubbles') {
+      const ox = parX * 34, oy = parY * 26;
       for (const b of bubbles) {
         b.y -= b.v * 14 * k * dt;
         b.d += 0.4 * dt;
         b.x += Math.sin(b.d) * 8 * k * dt;
         if (b.y + b.r < 0) { b.y = h + b.r; b.x = Math.random() * w; }
+        const color = b.o > 0.1 ? palette.a : palette.b;
+        const cx = b.x + ox, cy = b.y + oy;
+        // 柔和径向渐变，比纯色圆更通透（观感提升）
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, b.r);
+        g.addColorStop(0, rgba(color, Math.min(0.9, b.o * 1.2)));
+        g.addColorStop(0.6, rgba(color, b.o * 0.55));
+        g.addColorStop(1, rgba(color, 0));
+        ctx.fillStyle = g;
         ctx.beginPath();
-        ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-        ctx.fillStyle = rgba(b.o > 0.1 ? palette.a : palette.b, b.o);
+        ctx.arc(cx, cy, b.r, 0, Math.PI * 2);
         ctx.fill();
       }
     } else if (fx === 'aurora') {
       const t = ts / 1000 * k;
+      const px = parX * w * 0.06, py = parY * h * 0.06;
       const blob = (cx, cy, rad, color, alpha) => {
         const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
         g.addColorStop(0, rgba(color, alpha));
@@ -139,12 +163,12 @@
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, w, h);
       };
-      blob(w * (0.28 + 0.16 * Math.sin(t * 0.42)), h * (0.34 + 0.12 * Math.cos(t * 0.33)), Math.max(w, h) * 0.48, palette.a, 0.20);
-      blob(w * (0.74 + 0.14 * Math.cos(t * 0.31)), h * (0.62 + 0.14 * Math.sin(t * 0.27)), Math.max(w, h) * 0.44, palette.b, 0.18);
+      blob(w * (0.28 + 0.16 * Math.sin(t * 0.42)) + px, h * (0.34 + 0.12 * Math.cos(t * 0.33)) + py, Math.max(w, h) * 0.48, palette.a, 0.20);
+      blob(w * (0.74 + 0.14 * Math.cos(t * 0.31)) + px, h * (0.62 + 0.14 * Math.sin(t * 0.27)) + py, Math.max(w, h) * 0.44, palette.b, 0.18);
     } else if (fx === 'waves') {
       const t = ts / 1000 * k;
       const band = 46;
-      const off = (t * 46) % band;
+      const off = (t * 46) % band + parX * band * 1.4;
       ctx.save();
       ctx.globalAlpha = 0.10;
       for (let i = -band; i < w + band; i += band) {
@@ -194,9 +218,15 @@
   function apply(theme, derived) {
     fx = (theme && theme.fx) || 'none';
     speed = (theme && theme.speed) != null ? theme.speed : 1;
+    // 鼠标视差默认开启；主题显式关闭时停止跟随并把偏移平滑归零
+    parOn = !(theme && theme.mouseParallax === false);
+    if (!parOn) { tgtX = 0; tgtY = 0; }
     palette = { bg: (theme && theme.bg) || palette.bg, a: (theme && theme.a) || palette.a, b: (theme && theme.b) || palette.b };
     applyVars(derived, theme);
-    if (document.body) document.body.setAttribute('data-fx', fx);
+    if (document.body) {
+      document.body.setAttribute('data-fx', fx);
+      document.body.setAttribute('data-mon-fx', (theme && theme.monFx) || 'breathe');
+    }
     start();
   }
 
@@ -209,8 +239,19 @@
   window.addEventListener('blur', () => { window.__feiyuWindowInactive = true; stop(); });
   window.addEventListener('focus', () => { window.__feiyuWindowInactive = false; if (!reducedMotion()) start(); });
 
+  // 鼠标位置 → 目标归一化坐标（-1..1）；真正平滑在每帧 drawFrame 里做指数缓动
+  window.addEventListener('mousemove', (e) => {
+    if (!parOn) return;
+    try {
+      const w = window.innerWidth || 1, h = window.innerHeight || 1;
+      tgtX = (e.clientX / w - 0.5) * 2;
+      tgtY = (e.clientY / h - 0.5) * 2;
+    } catch (_) {}
+  }, { passive: true });
+
   window.FeiyuTheme = {
     apply, applyVars, start, stop, reducedMotion,
-    get state() { return { fx, speed, running, reduced: reducedMotion() }; },
+    setMouseParallax(on) { parOn = !!on; if (!parOn) { tgtX = 0; tgtY = 0; } },
+    get state() { return { fx, speed, running, reduced: reducedMotion(), parOn }; },
   };
 })();

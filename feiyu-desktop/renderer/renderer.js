@@ -240,7 +240,23 @@ async function pageTheme() {
         <input type="range" id="thSpeed" min="0.3" max="2.5" step="0.1" value="${t.speed}" />
         <span class="rv" id="thSpeedV">${t.speed}</span>
       </div>
+      <div class="row" style="margin-top:8px;align-items:center">
+        <input type="checkbox" id="thParallax" ${t.mouseParallax === false ? '' : 'checked'} style="width:auto" />
+        <span class="cn">背景随鼠标移动（丝滑视差）</span>
+      </div>
       <div class="hint">命中系统「减少动态效果」偏好时动画自动停止；窗口最小化或隐藏时也会暂停绘制。</div>
+    </div>
+
+    <div class="section">
+      <h3>状态监控动画</h3>
+      <label>跳动效果</label>
+      <select id="thMonFx">
+        <option value="breathe"${t.monFx === 'breathe' ? ' selected' : ''}>柔和呼吸（推荐）</option>
+        <option value="pulse"${t.monFx === 'pulse' ? ' selected' : ''}>声波扩散</option>
+        <option value="flow"${t.monFx === 'flow' ? ' selected' : ''}>流光扫过</option>
+        <option value="min"${t.monFx === 'min' ? ' selected' : ''}>极简（不闪）</option>
+      </select>
+      <div class="hint">用于「终端与监控」页的运行状态卡片；跳动太晃时选「极简」即可完全静止，只保留颜色区分。</div>
     </div>
 
     <div class="section">
@@ -294,6 +310,8 @@ async function pageTheme() {
     $('#thRadiusV').textContent = draft.radius + 'px';
     $('#thBlur').value = draft.blur;
     $('#thBlurV').textContent = draft.blur + 'px';
+    if ($('#thMonFx')) $('#thMonFx').value = draft.monFx || 'breathe';
+    if ($('#thParallax')) $('#thParallax').checked = draft.mouseParallax !== false;
   }
 
   async function saveDraft(msg) {
@@ -331,6 +349,8 @@ async function pageTheme() {
   $('#thSpeed').oninput = (e) => { draft.speed = Number(e.target.value); $('#thSpeedV').textContent = String(draft.speed); };
   $('#thRadius').oninput = (e) => { draft.radius = Number(e.target.value); $('#thRadiusV').textContent = draft.radius + 'px'; };
   $('#thBlur').oninput = (e) => { draft.blur = Number(e.target.value); $('#thBlurV').textContent = draft.blur + 'px'; };
+  if ($('#thMonFx')) $('#thMonFx').onchange = (e) => { draft.monFx = e.target.value; };
+  if ($('#thParallax')) $('#thParallax').onchange = (e) => { draft.mouseParallax = !!e.target.checked; };
 
   $('#thApply').onclick = async () => { await saveDraft('主题已应用'); };
   $('#thReset').onclick = async () => {
@@ -1140,7 +1160,7 @@ async function pageComfy() {
     $('#cfStart').onclick = async () => {
       const qm = $('#cfQuickMsg'); qm.innerHTML = '<span class="hint">启动中…</span>';
       const r = await invoke(C.COMFY_START, { dir: comfyExplicitDir });
-      qm.innerHTML = r.ok ? '<span class="ok">' + (r.alreadyRunning ? '已经在运行' : '已发起启动（PID ' + (r.pid || '') + '），稍等几秒') + '</span>' : '<span class="err">' + esc(r.error) + '</span>';
+      qm.innerHTML = r.ok ? '<span class="ok">' + (r.alreadyRunning ? '已经在运行' : '已确认启动（PID ' + (r.pid || '') + '，端口已监听）') + '</span>' : '<span class="err">' + esc(r.error) + '</span>';
       setTimeout(load, 2500);
     };
     $('#cfStop').onclick = async () => {
@@ -1432,7 +1452,12 @@ async function subQrLogin(body) {
     if (!sr.ok) { qlMsg.innerHTML = '<span class="err">' + esc(sr.error) + '</span>'; return; }
     qlMsg.innerHTML = '<span class="hint">已保存账号，正在启动…</span>';
     const r = await invoke(C.PROC_START, { napcat: c });
-    qlMsg.innerHTML = r.ok ? '<span class="ok">已发起登录启动（PID ' + (r.pids || []).join(',') + (r.note ? '；' + esc(r.note) : '') + '）</span>' : '<span class="err">' + esc(r.error || '启动失败') + '</span>';
+    if (r.ok) {
+      qlMsg.innerHTML = '<span class="ok">已确认登录启动（PID ' + (r.pids || []).join(',') + (r.note ? '；' + esc(r.note) : '') + '）</span>';
+    } else {
+      const detail = (r.failed && r.failed.length) ? '：' + esc(r.failed.map((f) => f.id + ' ' + (f.error || '')).join('；')) : (r.error ? '：' + esc(r.error) : '');
+      qlMsg.innerHTML = '<span class="err">启动失败' + detail + '</span>';
+    }
     setTimeout(() => subQrLogin(body), 1500);
   };
   if (qlSave) qlSave.onclick = async () => {
@@ -1509,12 +1534,13 @@ async function subServices(body) {
     const out = $('#pvOut'); out.innerHTML = '<div class="hint">启动中…</div>';
     const r = await invoke(C.SERVICE_START_PRESET, { presetId });
     if (!r.ok) { out.innerHTML = '<div class="err">' + esc(r.error) + '</div>'; return; }
-    out.innerHTML = `<div class="card">
+    const anyFailed = (r.failed || []).length > 0;
+    out.innerHTML = `<div class="card${anyFailed ? ' card-warn' : ''}">
       <div class="k">启动结果</div>
       <div class="v">已启动 ${r.started.length} 个｜跳过 ${r.skipped.length} 个｜失败 ${r.failed.length} 个</div>
       <div class="hint">${esc(r.started.map((x) => x.id + '(PID ' + x.pid + ')').join('、') || '—')}</div>
       ${r.skipped.length ? '<div class="hint">跳过：' + esc(r.skipped.map((x) => x.id + '：' + (x.reason === 'already_running' ? '端口已被占用' : x.reason)).join('、')) + '</div>' : ''}
-      ${r.failed.length ? '<div class="err">失败：' + esc(r.failed.map((x) => x.id + '：' + x.error).join('；')) + '</div>' : ''}
+      ${anyFailed ? '<div class="warn" style="margin-top:8px">⚠ 有 ' + r.failed.length + ' 个服务启动失败（进程已退出或端口未在时限内监听）：</div><div class="err">' + esc(r.failed.map((x) => x.id + '：' + x.error).join('；')) + '</div>' : ''}
     </div>`;
   };
 
@@ -2011,6 +2037,11 @@ async function pageConsole() {
   const logFilter = $('#logFilter');
   const monGrid = $('#monGrid');
   const monUpd = $('#monUpd');
+  // 状态动画风格来自主题（breathe/pulse/flow/min），默认呼吸
+  try {
+    const mfx = (themeState && themeState.theme && themeState.theme.monFx) || 'breathe';
+    monGrid.setAttribute('data-mon-fx', mfx);
+  } catch (_) { monGrid.setAttribute('data-mon-fx', 'breathe'); }
   let logPaused = false;
   const history = [];
   let histIdx = -1;

@@ -24,6 +24,7 @@ const THEME_FILE = 'theme.json';
 
 const COLOR_RE = /^#[0-9a-f]{6}$/i;
 const FX_VALUES = ['none', 'bubbles', 'aurora', 'waves'];
+const MON_FX_VALUES = ['breathe', 'pulse', 'flow', 'min'];
 const DANGEROUS_KEYS = ['__proto__', 'constructor', 'prototype'];
 
 const LIMITS = {
@@ -32,10 +33,11 @@ const LIMITS = {
   blur: { min: 0, max: 30, def: 14 },
 };
 
-/** 默认主题（深海 / bubbles / spd 1 / rad 16 / blr 14）。 */
+/** 默认主题（深海 / bubbles / spd 1 / rad 16 / blr 14 / 监控呼吸动画 / 鼠标视差开）。 */
 const DEFAULT_THEME = Object.freeze({
   bg: '#0b1d2a', a: '#ff8a5c', b: '#4fd1c5',
   fx: 'bubbles', speed: 1, radius: 16, blur: 14,
+  monFx: 'breathe', mouseParallax: true,
 });
 
 /** 内置 6 套配色方案预设。bg=背景，a=主强调色，b=辅助强调色。 */
@@ -231,7 +233,16 @@ function validateTheme(input) {
   const radius = clampNum(input.radius != null ? input.radius : LIMITS.radius.def, LIMITS.radius);
   const blur = clampNum(input.blur != null ? input.blur : LIMITS.blur.def, LIMITS.blur);
 
-  const known = ['bg', 'a', 'b', 'fx', 'speed', 'radius', 'blur'];
+  let monFx = DEFAULT_THEME.monFx;
+  if (input.monFx !== undefined) {
+    if (typeof input.monFx !== 'string' || !MON_FX_VALUES.includes(input.monFx)) {
+      errors.push('monFx 必须是 ' + MON_FX_VALUES.join('/') + ' 之一');
+    } else monFx = input.monFx;
+  }
+  // 鼠标视差：布尔开关，缺省为开（默认 true）
+  const mouseParallax = input.mouseParallax === undefined ? DEFAULT_THEME.mouseParallax : !!input.mouseParallax;
+
+  const known = ['bg', 'a', 'b', 'fx', 'speed', 'radius', 'blur', 'monFx', 'mouseParallax'];
   for (const k of Object.keys(input)) {
     if (!known.includes(k)) warnings.push('已忽略未知字段: ' + k);
   }
@@ -244,6 +255,7 @@ function validateTheme(input) {
     b: String(input.b).trim().toLowerCase(),
     fx,
     speed, radius, blur,
+    monFx, mouseParallax,
   };
   return { valid: true, errors, warnings, theme };
 }
@@ -409,6 +421,7 @@ function exportTheme(userDataDir, deps) {
     theme: {
       bg: r.theme.bg, a: r.theme.a, b: r.theme.b,
       fx: r.theme.fx, speed: r.theme.speed, radius: r.theme.radius, blur: r.theme.blur,
+      monFx: r.theme.monFx, mouseParallax: r.theme.mouseParallax,
     },
   };
   return { ok: true, json: JSON.stringify(obj, null, 2), theme: r.theme, derived: r.derived };
@@ -452,6 +465,7 @@ module.exports = {
   THEME_FILE,
   COLOR_RE,
   FX_VALUES,
+  MON_FX_VALUES,
   LIMITS,
   DEFAULT_THEME,
   PRESETS,
