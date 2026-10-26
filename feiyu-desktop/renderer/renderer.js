@@ -1351,7 +1351,8 @@ async function subQrLogin(body) {
         <label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="qlPlain" checked /> 我填的是明文密码（自动转 MD5）</label>
       </div>
       <div class="row" style="margin-top:8px">
-        <button class="btn" id="qlGo">一键登录并启动机器人</button>
+        <button class="btn" id="qlNap">只启动 NapCat（登录 QQ，推荐）</button>
+        <button class="btn alt" id="qlGo">登录并启动完整机器人</button>
         <button class="btn sec" id="qlSave">只保存账号</button>
       </div>
       <div class="hint" id="qlMsg"></div>
@@ -1435,7 +1436,7 @@ async function subQrLogin(body) {
   };
 
   // —— 一键快捷登录（普通玩家主路径）——
-  const qlGo = $('#qlGo'), qlSave = $('#qlSave'), qlMsg = $('#qlMsg');
+  const qlGo = $('#qlGo'), qlNap = $('#qlNap'), qlSave = $('#qlSave'), qlMsg = $('#qlMsg');
   function qlResolve() {
     const acc = $('#qlAcc').value.trim();
     const pwd = $('#qlPwd').value;
@@ -1457,6 +1458,20 @@ async function subQrLogin(body) {
     } else {
       const detail = (r.failed && r.failed.length) ? '：' + esc(r.failed.map((f) => f.id + ' ' + (f.error || '')).join('；')) : (r.error ? '：' + esc(r.error) : '');
       qlMsg.innerHTML = '<span class="err">启动失败' + detail + '</span>';
+    }
+    setTimeout(() => subQrLogin(body), 1500);
+  };
+  if (qlNap) qlNap.onclick = async () => {
+    const c = qlResolve(); if (!c) return;
+    const sr = await invoke(C.SETTINGS_SET, { napcat: { account: c.account, passwordMd5: c.passwordMd5 } });
+    if (!sr.ok) { qlMsg.innerHTML = '<span class="err">' + esc(sr.error) + '</span>'; return; }
+    qlMsg.innerHTML = '<span class="hint">正在启动 NapCat 并校验端口 3000…</span>';
+    const r = await invoke(C.PROC_START, { only: 'napcat', napcat: c });
+    if (r.ok) {
+      qlMsg.innerHTML = '<span class="ok">' + esc(r.note || 'NapCat 已启动') + '（PID ' + ((r.pids || [])[0] || r.pid || '') + '）</span>';
+    } else {
+      const detail = (r.failed && r.failed.length) ? '：' + esc(r.failed.map((f) => f.id + ' ' + (f.error || '')).join('；')) : (r.error ? '：' + esc(r.error) : '');
+      qlMsg.innerHTML = '<span class="err">NapCat 启动失败' + detail + '（可改用下方扫码登录）</span>';
     }
     setTimeout(() => subQrLogin(body), 1500);
   };

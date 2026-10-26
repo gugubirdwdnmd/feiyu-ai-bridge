@@ -272,10 +272,13 @@ function createProcessManager(opts = {}) {
     const nodeBin = resolveNodeBin(botDir, opts.settings);
     const timeoutMs = opts.timeoutMs || 15000;
     const results = { bridge: null, napcat: null };
-    results.bridge = await launchAndVerify(
-      { command: nodeBin, args: ['ai_bridge.js'], cwd: botDir, env: cleanEnv(process.env) },
-      { port: PORTS.bridge, timeoutMs },
-    );
+    // 只启动 NapCat（QQ 登录）时可跳过 AI 桥，避免「没配 API Key → 桥失败 → 整次登录显示失败」
+    if (!opts.onlyNapcat) {
+      results.bridge = await launchAndVerify(
+        { command: nodeBin, args: ['ai_bridge.js'], cwd: botDir, env: cleanEnv(process.env) },
+        { port: PORTS.bridge, timeoutMs },
+      );
+    }
     if (opts.napcat && opts.napcat.account) {
       const nenv = Object.assign({}, cleanEnv(process.env), {
         NAPCAT_QUICK_ACCOUNT: String(opts.napcat.account),

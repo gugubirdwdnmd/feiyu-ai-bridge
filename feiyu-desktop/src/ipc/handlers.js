@@ -246,11 +246,25 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
   ipcMain.handle(CHANNELS.PROC_STATUS, async () => ({ ok: true, status: await pm.getStatus() }));
   ipcMain.handle(CHANNELS.PROC_START, async (e, args) => {
     const v = validate(CHANNELS.PROC_START, args); if (!v.ok) return { ok: false, error: v.error };
-    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录' };
-    const pre = await pm.preCheck();
-    if (pre.alreadyRunning && !(args && args.force)) return { ok: false, alreadyRunning: true, status: pre.status, error: '机器人已在运行，避免重复启动' };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录（请先在「机器人运行」选择机器人目录）' };
     const settings = getSettings();
     const napcat = (args && args.napcat) || settings.napcat || null;
+    const onlyNapcat = !!(args && args.only === 'napcat');
+
+    // —— 只启动 NapCat（QQ 登录）：不依赖 AI 桥 / API Key，最适合新手 ——
+    if (onlyNapcat) {
+      if (!napcat || !napcat.account) return { ok: false, error: '请先填写 QQ 号（NapCat 登录需要）' };
+      const owner = await pm.findPortOwner(pm.PORTS.napcat);
+      if (owner) return { ok: true, alreadyRunning: true, pid: owner, onlyNapcat: true, note: 'NapCat 已在运行（端口 3000）' };
+      const rn = await pm.startBotVerified(d, { napcat, settings, onlyNapcat: true, timeoutMs: 20000 });
+      return {
+        ok: rn.ok, started: rn.started, pids: rn.pids, failed: rn.failed, onlyNapcat: true,
+        note: rn.ok ? 'NapCat 已启动并监听端口 3000（正在登录 QQ，稍候在实例里看状态）' : 'NapCat 启动失败，见 failed 的真实原因',
+      };
+    }
+
+    const pre = await pm.preCheck();
+    if (pre.alreadyRunning && !(args && args.force)) return { ok: false, alreadyRunning: true, status: pre.status, error: '机器人已在运行，避免重复启动' };
     const r = await pm.startBotVerified(d, { napcat, settings });
     return {
       ok: r.ok,
