@@ -565,17 +565,44 @@ function launchSpec(root, opts = {}) {
   if (!r || !looksLikeComfyDir(r)) return { ok: false, error: '未找到 ComfyUI 安装目录（需含 main.py）' };
   const port = opts.port || DEFAULT_PORT;
   const py = resolvePython(r);
-  // 便携版自带 python_embeded 时，按官方启动方式加 -s 与 --windows-standalone-build，
-  // 避免用户 site-packages 干扰、并启用便携版预期的相对路径行为。
-  const args = isEmbeddedPython(py)
-    ? ['-s', 'main.py', '--windows-standalone-build', '--port', String(port), '--listen', '127.0.0.1']
-    : ['main.py', '--port', String(port), '--listen', '127.0.0.1'];
+  const embedded = isEmbeddedPython(py);
+  // 安装基目录：<ComfyUI_windows_portable>/ComfyUI 时基目录是父级；否则就是自身
+  const base = path.basename(r).toLowerCase() === 'comfyui' ? path.dirname(r) : r;
+  const dirOf = (name) => {
+    // 优先安装基目录（与本机启动脚本一致），便携版再回落到 ComfyUI 子目录
+    try { if (base !== r && fs.existsSync(path.join(base, name))) return path.join(base, name); } catch (_) {}
+    try { if (fs.existsSync(path.join(r, name))) return path.join(r, name); } catch (_) {}
+    try { if (fs.existsSync(path.join(base, name))) return path.join(base, name); } catch (_) {}
+    return null;
+  };
+  // 不传 --listen：ComfyUI 默认只绑 127.0.0.1（与本机启动脚本一致，避免暴露到局域网）
+  const args = [];
+  if (embedded) args.push('-s');
+  args.push('main.py', '--port', String(port), '--disable-auto-launch');
+  if (embedded) args.push('--windows-standalone-build');
+  const outDir = dirOf('output'); if (outDir) args.push('--output-directory', outDir);
+  const inDir = dirOf('input'); if (inDir) args.push('--input-directory', inDir);
+  const tmpDir = dirOf('temp'); if (tmpDir) args.push('--temp-directory', tmpDir);
+
+  // 环境：屏蔽用户 PYTHONPATH；临时文件与模型缓存尽量落在安装盘（C 盘受限时必需）
+  const env = { PYTHONPATH: '' };
+  if (tmpDir) { env.TMP = tmpDir; env.TEMP = tmpDir; }
+  const cache = path.join(base, 'cache');
+  try {
+    if (fs.existsSync(cache)) {
+      env.HF_HOME = path.join(cache, 'huggingface');
+      env.TORCH_HOME = path.join(cache, 'torch');
+      env.TORCH_EXTENSIONS_DIR = path.join(cache, 'torch_extensions');
+      env.CUDA_CACHE_PATH = path.join(cache, 'cuda');
+    }
+  } catch (_) {}
   return {
     ok: true,
     spec: {
       command: py,
       args,
       cwd: r,
+      env,
     },
   };
 }
