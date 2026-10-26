@@ -26,6 +26,7 @@ const themeService = require('../services/themeService');
 const botDirResolver = require('../services/botDirResolver');
 // —— 全量升级新增模块（A–J）——
 const napcatLoginService = require('../services/napcatLoginService');
+const napcatWebuiService = require('../services/napcatWebuiService');
 const serviceRegistry = require('../services/serviceRegistry');
 const envDetector = require('../services/envDetector');
 const mcpService = require('../services/mcpService');
@@ -48,7 +49,8 @@ function maskSecret(v) {
   return s.slice(0, 3) + '*'.repeat(Math.max(4, s.length - 6)) + s.slice(-3);
 }
 
-function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) {
+function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send, webuiService }) {
+  const webui = webuiService || napcatWebuiService;
   const emit = (channel, payload) => { try { if (typeof send === 'function') send(channel, payload); } catch (_) {} };
 
   // 模块 K：终端与实时日志流（输出经 emit 推回渲染进程；未连窗口时 send 为空，自动跳过）
@@ -702,7 +704,29 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
       qrSessions.set(session.id, session);
       return { ok: true, session: napcatLoginService.publicSession(session, { withQr: true }) };
     }
-    // 2) 配置了接口 → 主动取一次二维码（用户显式点击触发）
+    // 2) 优先走 NapCat WebUI 官方扫码接口（OneBot 端口没有 get_qrcode 这个 action）
+    const webuiCfg = webui.readWebuiConfig(resolveNapcatDir());
+    if (webuiCfg.token) {
+      const q = await webui.fetchQrcode(webuiCfg);
+      if (q.ok) {
+        session.state = q.state || 'pending';
+        session.message = q.message;
+        session.qrImage = q.qrImage;
+        session.qrUrl = q.qrUrl;
+        session.webui = { host: webuiCfg.host, port: webuiCfg.port };
+        qrSessions.set(session.id, session);
+        return { ok: true, session: napcatLoginService.publicSession(session, { withQr: true }) };
+      }
+      session.state = q.state || 'failed';
+      session.message = q.error || q.message;
+      qrSessions.set(session.id, session);
+      // 「已是登录状态」不是错误，如实返回成功状态让界面用绿色提示
+      if (session.state === 'ok') {
+        return { ok: true, alreadyLoggedIn: true, session: napcatLoginService.publicSession(session) };
+      }
+      return { ok: false, error: session.message, session: napcatLoginService.publicSession(session) };
+    }
+    // 3) 用户手填了接口 → 主动取一次二维码（用户显式点击触发）
     if (endpoint) {
       const r = await fetchJson(endpoint);
       if (!r.ok) {
@@ -715,9 +739,9 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
       qrSessions.set(session.id, session);
       return { ok: true, session: napcatLoginService.publicSession(session, { withQr: true }) };
     }
-    // 3) 都没配 → 明确告知，不伪造二维码
+    // 4) 都没配 → 明确告知，不伪造二维码
     session.state = 'needs_endpoint';
-    session.message = '尚未配置 NapCat 二维码接口地址。可填入接口地址后重试，或直接把接口返回的 JSON 作为 qrPayload 传入。';
+    session.message = '未找到 NapCat WebUI（扫码登录走 WebUI 的 6099 端口），也未配置接口地址。可在「机器人运行」页指定 NapCat 目录，或手填接口地址后重试。';
     qrSessions.set(session.id, session);
     return { ok: true, needsEndpoint: true, session: napcatLoginService.publicSession(session) };
   });
@@ -726,6 +750,26 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     const v = validate(CHANNELS.NAPCAT_QR_POLL, args); if (!v.ok) return { ok: false, error: v.error };
     const session = qrSessions.get(args.sessionId);
     if (!session) return { ok: false, error: '登录会话不存在或已失效，请重新获取二维码' };
+    // WebUI 会话：直接查 NapCat 官方登录状态接口
+    if (session.webui) {
+      const cfg = webui.readWebuiConfig(resolveNapcatDir());
+      const st = await webui.fetchStatus(cfg);
+      if (!st.ok) {
+        session.state = 'failed';
+        session.message = st.error || st.message;
+        return { ok: false, error: session.message, session: napcatLoginService.publicSession(session) };
+      }
+      session.state = st.state;
+      session.message = st.message;
+      if (st.state === 'ok') {
+        const d = needBotDir();
+        if (d) napcatLoginService.markLoggedIn(d, session.instanceId);
+        pushNote({ title: 'QQ 登录成功', message: '实例 ' + session.instanceId + ' 已完成扫码登录', level: 'success', source: 'napcat' });
+        qrSessions.delete(session.id);
+      }
+      if (session.state === 'expired' || session.state === 'failed') qrSessions.delete(session.id);
+      return { ok: true, session: napcatLoginService.publicSession(session, { withQr: session.state === 'pending' || session.state === 'scanned' }) };
+    }
     let payload = args.payload || null;
     if (!payload && session.endpoint) {
       const r = await fetchJson(session.endpoint);

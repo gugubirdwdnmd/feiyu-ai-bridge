@@ -1440,12 +1440,17 @@ async function subQrLogin(body) {
       <h3>二维码登录（备选）</h3>
       <div class="hint">${(p.steps || []).map((s, i) => (i + 1) + '. ' + esc(s)).join('<br>')}</div>
       <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
-        <label>NapCat 二维码接口地址</label>
-        <input id="qrEp" value="http://127.0.0.1:3000/get_qrcode" placeholder="http://127.0.0.1:3000/get_qrcode" style="min-width:360px" />
-        <button class="btn" id="qrGet">获取二维码</button>
+        <button class="btn" id="qrGet">获取二维码（自动连接本机 NapCat）</button>
+        <span class="hint" style="margin-top:0">扫码登录走 NapCat 自带的 WebUI（默认 6099 端口），无需手填地址；下面地址仅供自定义接口使用。</span>
       </div>
-      <div class="hint">怎么填：就是「NapCat 的 HTTP 服务地址 + 二维码接口路径」。默认 <code>http://127.0.0.1:3000/get_qrcode</code> 适用于大多数 NapCat，其中 3000 是 NapCat 的端口；若你改过端口就换成对应端口。拿不准就直接点「获取二维码」用默认值试。</div>
-      <div class="hint">候选路径（不同 NapCat 版本可能不同）：${esc((p.candidateEndpoints || []).join(' / '))}</div>
+      <details class="adv" style="margin-top:10px">
+        <summary>高级：自定义二维码接口地址</summary>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
+          <label style="flex:1 1 260px;min-width:0">接口地址</label>
+          <input id="qrEp" value="http://127.0.0.1:3000/get_qrcode" placeholder="http://127.0.0.1:3000/get_qrcode" style="flex:1 1 320px;min-width:0;width:auto" />
+        </div>
+        <div class="hint">怎么填：NapCat 的 HTTP 服务地址 + 二维码接口路径。注意 OneBot 端口<b>没有</b> get_qrcode 这个接口，扫码请用上方默认方式；此输入框只在你用自建接口时使用。</div>
+      </details>
       <div id="qrBox" style="margin-top:12px"></div>
       <div class="hint" style="margin-top:8px">安全提示：${(p.securityNotes || []).map((s) => esc(s)).join('；')}</div>
     </div>
@@ -1494,13 +1499,19 @@ async function subQrLogin(body) {
   };
 
   $('#qrGet').onclick = async () => {
-    const endpoint = $('#qrEp').value.trim();
-    box.innerHTML = '<div class="hint">正在请求 NapCat 二维码接口…</div>';
-    const r = await invoke(C.NAPCAT_QR_START, endpoint ? { endpoint } : {});
+    const el = $('#qrEp');
+    const typed = el ? el.value.trim() : '';
+    // 只有用户真的改了默认值才当自定义接口用；否则走 NapCat WebUI 自动通道
+    const custom = typed && typed !== 'http://127.0.0.1:3000/get_qrcode' ? typed : '';
+    box.innerHTML = '<div class="hint">正在向本机 NapCat 请求二维码…</div>';
+    const r = await invoke(C.NAPCAT_QR_START, custom ? { endpoint: custom } : {});
     if (r && r.session) {
       if (r.session.qrImage || r.session.qrUrl) drawQr(r.session);
+      else if (r.session.state === 'ok') box.innerHTML = '<div class="ok" style="padding:8px">' + esc(r.session.message || '当前 QQ 已是登录状态') + '</div>';
       else box.innerHTML = '<div class="warn" style="padding:8px">' + esc(r.session.message || r.error || '未取得二维码') + '</div>';
-    } else if (r && r.error) box.innerHTML = '<div class="err">' + esc(r.error) + '</div>';
+    } else if (r && r.error) {
+      box.innerHTML = '<div class="err" style="padding:8px">' + esc(r.error) + '</div>';
+    }
   };
 
   $('#iSave').onclick = async () => {

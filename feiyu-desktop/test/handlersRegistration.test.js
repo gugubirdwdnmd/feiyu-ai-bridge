@@ -53,7 +53,13 @@ function buildHarness(userDataDir) {
     spawnDetached: () => ({ ok: false, error: '测试环境不启动进程' }),
     PORTS: { bridge: 3001, napcat: 3000 },
   };
-  registerHandlers({ ipcMain, getUserDataDir: () => userDataDir, getAppVersion: () => '1.1.0', pm });
+  // 注入扫码登录服务桩：测试环境不连真实 NapCat WebUI
+  const webuiStub = {
+    readWebuiConfig: () => ({ host: '127.0.0.1', port: 6099, token: '', source: '', dir: '' }),
+    fetchQrcode: async () => ({ ok: false, state: 'failed', error: '桩：不提供二维码', message: '桩' }),
+    fetchStatus: async () => ({ ok: false, state: 'failed', error: '桩', message: '桩' }),
+  };
+  registerHandlers({ ipcMain, getUserDataDir: () => userDataDir, getAppVersion: () => '1.1.0', pm, webuiService: webuiStub });
   return { handlers, pm };
 }
 
@@ -146,7 +152,7 @@ test('二维码登录：未配置接口时明确返回 needsEndpoint，不伪造
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.needsEndpoint, true);
     assert.strictEqual(r.session.qrImage, undefined);
-    assert.ok(r.session.message.includes('尚未配置'));
+    assert.ok(r.session.message.includes('未找到 NapCat WebUI'), r.session.message);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
