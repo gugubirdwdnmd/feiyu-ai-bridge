@@ -61,6 +61,18 @@ function createProcessManager(opts = {}) {
     };
   }
 
+  /** 解析 NapCat 用的 node：优先 NapCat 目录自带的 node.exe（与官方启动脚本一致）。 */
+  function resolveNapcatNode(napcatDir, settings) {
+    const dir = napcatDir || '';
+    try {
+      const win = path.join(dir, 'node.exe');
+      if (fs.existsSync(win)) return win;
+      const nix = path.join(dir, 'node');
+      if (fs.existsSync(nix)) return nix;
+    } catch (_) {}
+    return resolveNodeBin(dir, settings);
+  }
+
   /** 解析 node 二进制：显式设置 > botDir/node.exe > 系统 node。 */
   function resolveNodeBin(botDir, settings) {
     if (settings && settings.nodeBin && fs.existsSync(settings.nodeBin)) return settings.nodeBin;
@@ -94,15 +106,17 @@ function createProcessManager(opts = {}) {
       cwd: botDir, detached: true, stdio: 'ignore', env: process.env,
     });
     if (bridge.pid) { bridge.unref(); pids.push(bridge.pid); }
-    // NapCat（可选）
+    // NapCat（可选）：默认在独立 NapCat 目录启动（该目录含 index.js 与 node.exe）
     let napcatPid = null;
     if (opts.napcat && opts.napcat.account) {
+      const napcatDir = opts.napcatDir || settings.napcatDir || botDir;
+      const ncNode = resolveNapcatNode(napcatDir, settings);
       const env = Object.assign({}, process.env, {
         NAPCAT_QUICK_ACCOUNT: String(opts.napcat.account),
         NAPCAT_QUICK_PASSWORD_MD5: String(opts.napcat.passwordMd5 || ''),
       });
-      const nc = deps.spawn(nodeBin, [napcatEntry, '-q', String(opts.napcat.account)], {
-        cwd: botDir, detached: true, stdio: 'ignore', env,
+      const nc = deps.spawn(ncNode, [napcatEntry, '-q', String(opts.napcat.account)], {
+        cwd: napcatDir, detached: true, stdio: 'ignore', env,
       });
       if (nc.pid) { nc.unref(); napcatPid = nc.pid; pids.push(nc.pid); }
     }
@@ -292,14 +306,22 @@ function createProcessManager(opts = {}) {
       );
     }
     if (opts.napcat && opts.napcat.account) {
-      const nenv = Object.assign({}, cleanEnv(process.env), {
-        NAPCAT_QUICK_ACCOUNT: String(opts.napcat.account),
-        NAPCAT_QUICK_PASSWORD_MD5: String(opts.napcat.passwordMd5 || ''),
-      });
-      results.napcat = await launchAndVerify(
-        { command: nodeBin, args: [napcatEntry, '-q', String(opts.napcat.account)], cwd: botDir, env: nenv },
-        { port: PORTS.napcat, timeoutMs },
-      );
+      const napcatDir = opts.napcatDir || settings.napcatDir || botDir;
+      let hasEntry = false;
+      try { hasEntry = fs.existsSync(path.join(napcatDir, napcatEntry)); } catch (_) {}
+      if (!hasEntry) {
+        results.napcat = { ok: false, pid: null, verified: false, error: 'NapCat 目录里没有 ' + napcatEntry + '（当前：' + napcatDir + '）。请在「机器人运行」页选择 NapCat 目录（需含 index.js 与 node.exe，例如 D:\\NapCat）。' };
+      } else {
+        const ncNode = resolveNapcatNode(napcatDir, settings);
+        const nenv = Object.assign({}, cleanEnv(process.env), {
+          NAPCAT_QUICK_ACCOUNT: String(opts.napcat.account),
+          NAPCAT_QUICK_PASSWORD_MD5: String(opts.napcat.passwordMd5 || ''),
+        });
+        results.napcat = await launchAndVerify(
+          { command: ncNode, args: [napcatEntry, '-q', String(opts.napcat.account)], cwd: napcatDir, env: nenv },
+          { port: PORTS.napcat, timeoutMs },
+        );
+      }
     }
     const pids = [];
     const failed = [];

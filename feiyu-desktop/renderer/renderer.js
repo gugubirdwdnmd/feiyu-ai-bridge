@@ -435,6 +435,12 @@ async function pageRun() {
     </div>
     <div class="section">
       <h3>NapCat 快速登录（推荐）</h3>
+      <div class="row" style="align-items:center;gap:8px">
+        <label>NapCat 目录</label>
+        <span class="hint" style="flex:1">${esc(set.napcatDir || '未设置（将自动探测 D:\\NapCat 等）')}</span>
+        <button class="btn sec" id="pickNcDir">选择 NapCat 目录…</button>
+      </div>
+      <div class="hint">NapCat 目录是含 <code>index.js</code> 和 <code>node.exe</code> 的那个文件夹（例如 <code>D:\\NapCat</code>），不是机器人代码仓库。</div>
       <label>QQ 号</label><input id="ncAcc" value="${esc(set.napcat && set.napcat.account || '')}" placeholder="你的 QQ 号" />
       <label>QQ 密码</label><input id="ncPwd" type="password" placeholder="填 QQ 密码（自动转 MD5，不保存明文）" />
       <div class="row" style="margin-top:8px"><button class="btn" id="ncStart">只启动 NapCat（登录 QQ）</button></div>
@@ -505,6 +511,19 @@ async function pageRun() {
     const s = await invoke(C.SETTINGS_SET, { botDir: pick.dir, botEntry: insp.suggestedEntry || 'ai_bridge.js', napcatEntry: insp.napcatEntry || 'index.js' });
     $('#impMsg').innerHTML = s.ok ? '<span class="ok">已导入：类型 ' + esc(insp.kind) + '，入口 ' + esc(insp.suggestedEntry || '—') + '</span>' : '<span class="err">' + esc(s.error) + '</span>';
     if (s.ok) setTimeout(pageRun, 800);
+  };
+
+  const pickNcDir = $('#pickNcDir');
+  if (pickNcDir) pickNcDir.onclick = async () => {
+    const pick = await invoke(C.DIALOG_PICKDIR);
+    if (!pick || !pick.ok || !pick.dir) return;
+    const insp = await invoke(C.BOT_INSPECT, { dir: pick.dir });
+    if (insp && insp.ok && !insp.entries.includes('index.js')) {
+      $('#runMsg').innerHTML = '<span class="warn">该目录没有 index.js，可能不是 NapCat 目录（NapCat 目录应含 index.js 与 node.exe）。</span>';
+    }
+    const s = await invoke(C.SETTINGS_SET, { napcatDir: pick.dir });
+    $('#runMsg').innerHTML = s.ok ? '<span class="ok">已设置 NapCat 目录：' + esc(pick.dir) + '</span>' : '<span class="err">' + esc(s.error) + '</span>';
+    if (s.ok) setTimeout(pageRun, 700);
   };
 
   $('#pickBtn').onclick = async () => { const d = await pickBotDir(); if (d) pageRun(); };

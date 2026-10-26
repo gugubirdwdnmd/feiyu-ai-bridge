@@ -64,6 +64,18 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
   const setPrice = (t) => priceService.setPrice(getUserDataDir(), t);
   const botDir = () => getSettings().botDir || '';
   const needBotDir = () => { const d = botDir(); return d && fs.existsSync(d) ? d : null; };
+  /** 解析 NapCat 目录：设置里的 napcatDir 优先；否则在 botDir / 常见位置找含 index.js(+node.exe) 的目录。 */
+  const resolveNapcatDir = () => {
+    const s = getSettings();
+    const cands = [s.napcatDir, s.botDir, 'D:\\NapCat', 'C:\\NapCat', path.join(os.homedir(), 'NapCat'), path.join(os.homedir(), 'napcat')].filter(Boolean);
+    for (const c of cands) {
+      try { if (fs.existsSync(path.join(c, 'index.js')) && fs.existsSync(path.join(c, 'node.exe'))) return c; } catch (_) {}
+    }
+    for (const c of cands) {
+      try { if (fs.existsSync(path.join(c, 'index.js'))) return c; } catch (_) {}
+    }
+    return '';
+  };
 
   ipcMain.handle(CHANNELS.APP_VERSION, () => ({ version: getAppVersion() }));
   ipcMain.handle(CHANNELS.SETTINGS_GET, () => ({ settings: getSettings() }));
@@ -248,11 +260,13 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
   ipcMain.handle(CHANNELS.BOT_INSPECT, (e, args) => {
     const v = validate(CHANNELS.BOT_INSPECT, args); if (!v.ok) return { ok: false, error: v.error };
     const dir = String(args.dir || '');
-    const res = { ok: true, dir, exists: false, entries: [], kind: 'unknown', compatible: false, suggestedEntry: null, napcatEntry: null, notes: [] };
+    const res = { ok: true, dir, exists: false, entries: [], kind: 'unknown', compatible: false, suggestedEntry: null, napcatEntry: null, notes: [], isNapcatDir: false, hasNode: false };
     try {
       res.exists = fs.existsSync(dir);
       if (!res.exists) { res.notes.push('目录不存在'); return res; }
       const has = (n) => { try { return fs.existsSync(path.join(dir, n)); } catch (_) { return false; } };
+      res.hasNode = has('node.exe') || has('node');
+      res.isNapcatDir = has('index.js') && (res.hasNode || has('napcat'));
       const entries = ['ai_bridge.js', 'index.js', 'app.js', 'main.js', 'bot.js', 'start.js'];
       res.entries = entries.filter(has);
       if (has('ai_bridge.js')) { res.kind = 'feiyu+ai'; res.compatible = true; res.suggestedEntry = 'ai_bridge.js'; res.napcatEntry = has('index.js') ? 'index.js' : null; }
@@ -278,18 +292,22 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) 
     // —— 只启动 NapCat（QQ 登录）：不依赖 AI 桥 / API Key，最适合新手 ——
     if (onlyNapcat) {
       if (!napcat || !napcat.account) return { ok: false, error: '请先填写 QQ 号（NapCat 登录需要）' };
+      const napcatDir = resolveNapcatDir();
+      if (!napcatDir) return { ok: false, error: '未找到 NapCat 目录（需含 index.js 与 node.exe，例如 D:\\NapCat）。请在「机器人运行」页点「选择 NapCat 目录…」指定。' };
+      if (napcatDir !== settings.napcatDir) { try { setSettings(Object.assign({}, settings, { napcatDir })); } catch (_) {} }
       const owner = await pm.findPortOwner(pm.PORTS.napcat);
-      if (owner) return { ok: true, alreadyRunning: true, pid: owner, onlyNapcat: true, note: 'NapCat 已在运行（端口 3000）' };
-      const rn = await pm.startBotVerified(d, { napcat, settings, onlyNapcat: true, timeoutMs: 20000 });
+      if (owner) return { ok: true, alreadyRunning: true, pid: owner, onlyNapcat: true, napcatDir, note: 'NapCat 已在运行（端口 3000）' };
+      const rn = await pm.startBotVerified(d, { napcat, settings, napcatDir, onlyNapcat: true, timeoutMs: 20000 });
       return {
-        ok: rn.ok, started: rn.started, pids: rn.pids, failed: rn.failed, onlyNapcat: true,
+        ok: rn.ok, started: rn.started, pids: rn.pids, failed: rn.failed, onlyNapcat: true, napcatDir,
         note: rn.ok ? 'NapCat 已启动并监听端口 3000（正在登录 QQ，稍候在实例里看状态）' : 'NapCat 启动失败，见 failed 的真实原因',
       };
     }
 
     const pre = await pm.preCheck();
     if (pre.alreadyRunning && !(args && args.force)) return { ok: false, alreadyRunning: true, status: pre.status, error: '机器人已在运行，避免重复启动' };
-    const r = await pm.startBotVerified(d, { napcat, settings });
+    const napcatDir = (napcat && napcat.account) ? resolveNapcatDir() : undefined;
+    const r = await pm.startBotVerified(d, { napcat, settings, napcatDir });
     return {
       ok: r.ok,
       started: r.started, pids: r.pids, failed: r.failed,

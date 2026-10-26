@@ -91,14 +91,27 @@ test('launchAndVerify 失败：端口始终不监听 → 超时报错', async ()
 });
 
 test('startBotVerified 成功：AI 桥与 NapCat 端口均监听', async () => {
-  const netstat = '  TCP    0.0.0.0:3001    0.0.0.0:0    LISTENING    111\n  TCP    0.0.0.0:3000    0.0.0.0:0    LISTENING    222\n';
-  const deps = { spawn: () => mockChild(999), execFile: (c, a, o, cb) => cb(null, netstat), sleep: async () => {}, platform: 'win32' };
+  const os = require('os'); const fs = require('fs'); const path = require('path');
+  const ncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'napcat-'));
+  fs.writeFileSync(path.join(ncDir, 'index.js'), '');
+  try {
+    const netstat = '  TCP    0.0.0.0:3001    0.0.0.0:0    LISTENING    111\n  TCP    0.0.0.0:3000    0.0.0.0:0    LISTENING    222\n';
+    const deps = { spawn: () => mockChild(999), execFile: (c, a, o, cb) => cb(null, netstat), sleep: async () => {}, platform: 'win32' };
+    const pm = ps.createProcessManager({ deps });
+    const r = await pm.startBotVerified(process.cwd(), { napcat: { account: '123', passwordMd5: 'abc' }, napcatDir: ncDir, timeoutMs: 2000 });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.failed.length, 0);
+    assert.strictEqual(r.started.bridge.ok, true);
+    assert.strictEqual(r.started.napcat.ok, true);
+  } finally { fs.rmSync(ncDir, { recursive: true, force: true }); }
+});
+
+test('startBotVerified：NapCat 目录缺少 index.js → 明确失败', async () => {
+  const deps = { spawn: () => mockChild(777), execFile: (c, a, o, cb) => cb(null, ''), sleep: async () => {}, platform: 'win32' };
   const pm = ps.createProcessManager({ deps });
-  const r = await pm.startBotVerified(process.cwd(), { napcat: { account: '123', passwordMd5: 'abc' }, timeoutMs: 2000 });
-  assert.strictEqual(r.ok, true);
-  assert.strictEqual(r.failed.length, 0);
-  assert.strictEqual(r.started.bridge.ok, true);
-  assert.strictEqual(r.started.napcat.ok, true);
+  const r = await pm.startBotVerified(process.cwd(), { napcat: { account: '123', passwordMd5: 'x' }, napcatDir: process.cwd(), onlyNapcat: true, timeoutMs: 200 });
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.failed.find((f) => f.id === 'napcat' && /index\.js/.test(f.error)));
 });
 
 test('startBotVerified 失败：端口始终不监听 → failed 记录 bridge', async () => {
