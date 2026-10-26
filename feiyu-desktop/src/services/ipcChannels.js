@@ -67,6 +67,8 @@ const CHANNELS = {
   COMFY_RELEASE: 'comfy:release',
   COMFY_INSTALL: 'comfy:install',
   COMFY_PICKDIR: 'comfy:pickDir',
+  COMFY_START: 'comfy:start',
+  COMFY_STOP: 'comfy:stop',
   // 主题工坊（主题只存 userData/theme.json，与机器人目录完全分离）
   THEME_GET: 'theme:get',
   THEME_SAVE: 'theme:save',
@@ -297,6 +299,14 @@ function validate(channel, args) {
       if (!isObject(args) || typeof args.dir !== 'string' || !args.dir.trim()) return { ok: false, error: '需要 {dir: string}' };
       if (args.variant != null && !['nvidia', 'amd', 'intel', 'nvidia_arm64', 'nvidia_cu126'].includes(args.variant)) {
         return { ok: false, error: 'variant 必须是 nvidia/amd/intel/nvidia_arm64/nvidia_cu126' };
+      }
+      return { ok: true };
+    case CHANNELS.COMFY_START:
+      if (args != null && args.dir != null && typeof args.dir !== 'string') return { ok: false, error: 'dir 必须是 string' };
+      return { ok: true };
+    case CHANNELS.COMFY_STOP:
+      if (args != null && args.port != null && (!Number.isInteger(args.port) || args.port <= 0 || args.port > 65535)) {
+        return { ok: false, error: 'port 必须是 1–65535 的整数' };
       }
       return { ok: true };
     // —— 主题工坊 ——

@@ -525,6 +525,45 @@ function freeSpace(dir) {
   return null;
 }
 
+/**
+ * 解析 ComfyUI 用的 Python 解释器路径。
+ * Windows 便携版自带 python_embeded；找不到则回落 PATH 上的 python。
+ * 纯函数（不依赖进程管理），便于单测。
+ */
+function resolvePython(root) {
+  const r = resolveComfyRoot(root) || root;
+  if (r) {
+    const parent = path.dirname(r);
+    const embedded = [
+      path.join(parent, 'python_embeded', 'python.exe'),
+      path.join(r, 'python_embeded', 'python.exe'),
+    ];
+    for (const c of embedded) {
+      try { if (fs.existsSync(c)) return c; } catch (_) {}
+    }
+  }
+  return 'python';
+}
+
+/**
+ * 构造 ComfyUI 一键启动参数（供 processService.spawnDetached 使用）。
+ * 纯函数：只算参数，不真正拉起进程。返回 {ok:true, spec} 或 {ok:false, error}。
+ */
+function launchSpec(root, opts = {}) {
+  const r = resolveComfyRoot(root) || root;
+  if (!r || !looksLikeComfyDir(r)) return { ok: false, error: '未找到 ComfyUI 安装目录（需含 main.py）' };
+  const port = opts.port || DEFAULT_PORT;
+  const py = resolvePython(r);
+  return {
+    ok: true,
+    spec: {
+      command: py,
+      args: ['main.py', '--port', String(port), '--listen', '127.0.0.1'],
+      cwd: r,
+    },
+  };
+}
+
 module.exports = {
   DEFAULT_PORT,
   DEFAULT_ENDPOINT,
@@ -548,4 +587,6 @@ module.exports = {
   installComfyUI,
   extractArchive,
   freeSpace,
+  resolvePython,
+  launchSpec,
 };

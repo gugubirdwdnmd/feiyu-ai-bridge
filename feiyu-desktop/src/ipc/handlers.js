@@ -501,6 +501,27 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
       return { ok: true, dir: d, root: root, valid: !!root };
     } catch (e) { return { ok: false, error: e.message }; }
   });
+  ipcMain.handle(CHANNELS.COMFY_START, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_START, args); if (!v.ok) return { ok: false, error: v.error };
+    const det = comfyService.detect({ dir: args && args.dir, endpoint: args && args.endpoint });
+    if (!det.found) return { ok: false, error: '本机未检测到 ComfyUI，请先「安装 ComfyUI」或在「ComfyUI 环境」里指定目录' };
+    // 已在运行则给出提示，不重复拉起
+    const conn = await comfyService.testConnection(det.endpoint);
+    if (conn.ok && conn.running) return { ok: true, alreadyRunning: true, pid: null, endpoint: det.endpoint };
+    const spec = comfyService.launchSpec(det.root, { port: det.port });
+    if (!spec.ok) return { ok: false, error: spec.error };
+    const r = pm.spawnDetached(spec.spec);
+    if (!r.ok) return { ok: false, error: '启动失败：' + (r.error || '') };
+    return { ok: true, pid: r.pid, command: spec.spec.command, port: det.port, endpoint: det.endpoint, note: '已发起启动，稍等几秒后在「运行」里看端口' };
+  });
+  ipcMain.handle(CHANNELS.COMFY_STOP, async (e, args) => {
+    const v = validate(CHANNELS.COMFY_STOP, args); if (!v.ok) return { ok: false, error: v.error };
+    const port = (args && args.port) || comfyService.DEFAULT_PORT;
+    const owner = await pm.findPortOwner(port);
+    if (!owner || !owner.pid) return { ok: true, stopped: false, reason: 'not_running' };
+    await pm.stopByPids([owner.pid], { timeoutMs: 5000 });
+    return { ok: true, stopped: true, pid: owner.pid };
+  });
 
   // ================= 主题工坊 =================
   // 主题只存 userData/theme.json：与 ai_config.json / secrets.json / 机器人目录完全分离。

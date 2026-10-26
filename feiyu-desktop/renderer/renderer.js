@@ -16,6 +16,68 @@ let usagePrice = null;                           // 当前价格表
 let themeState = null;                           // 当前主题（{theme, derived, presets}）
 
 function shortUrl(u) { if (!u) return '—'; try { const x = new URL(u); return x.host + x.pathname; } catch (_) { return u; } }
+
+/* 内置 MD5（普通玩家只记得明文密码，这里在本地算出 MD5 再提交，明文绝不离开本机）。 */
+function md5hex(s) {
+  function add32(a, b) { return (a + b) & 0xffffffff; }
+  function rol(n, c) { return (n << c) | (n >>> (32 - c)); }
+  function cm(q, a, b, x, s, t) { a = add32(add32(a, q), add32(x, t)); return add32(rol(a, s), b); }
+  function ff(a, b, c, d, x, s, t) { return cm((b & c) | (~b & d), a, b, x, s, t); }
+  function gg(a, b, c, d, x, s, t) { return cm((b & d) | (c & ~d), a, b, x, s, t); }
+  function hh(a, b, c, d, x, s, t) { return cm(b ^ c ^ d, a, b, x, s, t); }
+  function ii(a, b, c, d, x, s, t) { return cm(c ^ (b | ~d), a, b, x, s, t); }
+  function toBytes(str) {
+    const out = [];
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) { out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); }
+      else { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+    }
+    return out;
+  }
+  const x = toBytes(s); const len = x.length;
+  x.push(0x80); while (x.length % 64 !== 56) x.push(0);
+  const bits = len * 8;
+  x.push(bits & 0xff, (bits >>> 8) & 0xff, (bits >>> 16) & 0xff, (bits >>> 24) & 0xff, 0, 0, 0, 0);
+  let a = 0x67452301, b = 0xefcdab89, c = 0x98badcfe, d = 0x10325476;
+  for (let i = 0; i < x.length; i += 64) {
+    const w = [];
+    for (let j = 0; j < 16; j++) w[j] = (x[i + j * 4]) | (x[i + j * 4 + 1] << 8) | (x[i + j * 4 + 2] << 16) | (x[i + j * 4 + 3] << 24);
+    let oa = a, ob = b, oc = c, od = d;
+    a = ff(a, b, c, d, w[0], 7, 0xd76aa478); d = ff(d, a, b, c, w[1], 12, 0xe8c7b756); c = ff(c, d, a, b, w[2], 17, 0x242070db); b = ff(b, c, d, a, w[3], 22, 0xc1bdceee);
+    a = ff(a, b, c, d, w[4], 7, 0xf57c0faf); d = ff(d, a, b, c, w[5], 12, 0x4787c62a); c = ff(c, d, a, b, w[6], 17, 0xa8304613); b = ff(b, c, d, a, w[7], 22, 0xfd469501);
+    a = ff(a, b, c, d, w[8], 7, 0x698098d8); d = ff(d, a, b, c, w[9], 12, 0x8b44f7af); c = ff(c, d, a, b, w[10], 17, 0xffff5bb1); b = ff(b, c, d, a, w[11], 22, 0x895cd7be);
+    a = ff(a, b, c, d, w[12], 7, 0x6b901122); d = ff(d, a, b, c, w[13], 12, 0xfd987193); c = ff(c, d, a, b, w[14], 17, 0xa679438e); b = ff(b, c, d, a, w[15], 22, 0x49b40821);
+    a = gg(a, b, c, d, w[1], 5, 0xf61e2562); d = gg(d, a, b, c, w[6], 9, 0xc040b340); c = gg(c, d, a, b, w[11], 14, 0x265e5a51); b = gg(b, c, d, a, w[0], 20, 0xe9b6c7aa);
+    a = gg(a, b, c, d, w[5], 5, 0xd62f105d); d = gg(d, a, b, c, w[10], 9, 0x02441453); c = gg(c, d, a, b, w[15], 14, 0xd8a1e681); b = gg(b, c, d, a, w[4], 20, 0xe7d3fbc8);
+    a = gg(a, b, c, d, w[9], 5, 0x21e1cde6); d = gg(d, a, b, c, w[14], 9, 0xc33707d6); c = gg(c, d, a, b, w[3], 14, 0xf4d50d87); b = gg(b, c, d, a, w[8], 20, 0x455a14ed);
+    a = gg(a, b, c, d, w[13], 5, 0xa9e3e905); d = gg(d, a, b, c, w[2], 9, 0xfcefa3f8); c = gg(c, d, a, b, w[7], 14, 0x676f02d9); b = gg(b, c, d, a, w[12], 20, 0x8d2a4c8a);
+    a = hh(a, b, c, d, w[5], 4, 0xfffa3942); d = hh(d, a, b, c, w[8], 11, 0x8771f681); c = hh(c, d, a, b, w[11], 16, 0x6d9d6122); b = hh(b, c, d, a, w[14], 23, 0xfde5380c);
+    a = hh(a, b, c, d, w[1], 4, 0xa4beea44); d = hh(d, a, b, c, w[4], 11, 0x4bdecfa9); c = hh(c, d, a, b, w[7], 16, 0xf6bb4b60); b = hh(b, c, d, a, w[10], 23, 0xbebfbc70);
+    a = hh(a, b, c, d, w[13], 4, 0x289b7ec6); d = hh(d, a, b, c, w[0], 11, 0xeaa127fa); c = hh(c, d, a, b, w[3], 16, 0xd4ef3085); b = hh(b, c, d, a, w[6], 23, 0x04881d05);
+    a = hh(a, b, c, d, w[9], 4, 0xd9d4d039); d = hh(d, a, b, c, w[12], 11, 0xe6db99e5); c = hh(c, d, a, b, w[15], 16, 0x1fa27cf8); b = hh(b, c, d, a, w[2], 23, 0xc4ac5665);
+    a = ii(a, b, c, d, w[0], 6, 0xf4292244); d = ii(d, a, b, c, w[7], 10, 0x432aff97); c = ii(c, d, a, b, w[14], 15, 0xab9423a7); b = ii(b, c, d, a, w[5], 21, 0xfc93a039);
+    a = ii(a, b, c, d, w[12], 6, 0x655b59c3); d = ii(d, a, b, c, w[3], 10, 0x8f0ccc92); c = ii(c, d, a, b, w[10], 15, 0xffeff47d); b = ii(b, c, d, a, w[1], 21, 0x85845dd1);
+    a = ii(a, b, c, d, w[8], 6, 0x6fa87e4f); d = ii(d, a, b, c, w[15], 10, 0xfe2ce6e0); c = ii(c, d, a, b, w[6], 15, 0xa3014314); b = ii(b, c, d, a, w[13], 21, 0x4e0811a1);
+    a = ii(a, b, c, d, w[4], 6, 0xf7537e82); d = ii(d, a, b, c, w[11], 10, 0xbd3af235); c = ii(c, d, a, b, w[2], 15, 0x2ad7d2bb); b = ii(b, c, d, a, w[9], 21, 0xeb86d391);
+    a = add32(a, oa); b = add32(b, ob); c = add32(c, oc); d = add32(d, od);
+  }
+  const hex = (n) => (n & 0xff).toString(16).padStart(2, '0') + ((n >>> 8) & 0xff).toString(16).padStart(2, '0') + ((n >>> 16) & 0xff).toString(16).padStart(2, '0') + ((n >>> 24) & 0xff).toString(16).padStart(2, '0');
+  return hex(a) + hex(b) + hex(c) + hex(d);
+}
+
+/* 常见大模型服务商预设：普通玩家选一个，只填 API Key 即可，Base URL/模型自动填好。 */
+const PROVIDER_PRESETS = [
+  { id: 'deepseek', name: 'DeepSeek', base: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', reasoning: 'deepseek-reasoner' },
+  { id: 'openai', name: 'OpenAI', base: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o-mini', reasoning: 'gpt-4o' },
+  { id: 'dashscope', name: '阿里云百炼', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus', reasoning: 'qwen-max' },
+  { id: 'zhipu', name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-plus', reasoning: '' },
+  { id: 'moonshot', name: 'Moonshot Kimi', base: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k', reasoning: '' },
+  { id: 'siliconflow', name: '硅基流动', base: 'https://api.siliconflow.cn/v1/chat/completions', model: 'deepseek-ai/DeepSeek-V3', reasoning: '' },
+  { id: 'ollama', name: 'Ollama 本地', base: 'http://127.0.0.1:11434/v1/chat/completions', model: 'llama3.2', reasoning: '' },
+  { id: 'custom', name: '自定义 / 其他', base: '', model: '', reasoning: '' },
+];
 function csvCell(v) { const s = v == null ? '' : String(v); if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'; return s; }
 function downloadCSV(reqs) {
   const cols = ['time', 'status', 'kind', 'provider', 'model', 'prompt_tokens', 'completion_tokens', 'reasoning_tokens', 'cache_hit_tokens', 'cache_miss_tokens', 'total_tokens', 'durationMs', 'errorCategory'];
@@ -395,15 +457,25 @@ async function pageApi() {
       ${pl.migrated ? '<div class="ok">已从现有配置兼容迁移生成默认 Provider。</div>' : ''}
     </div>
     <div class="section">
-      <h3 id="pFormTitle">新增 Provider</h3>
-      <label>名称</label><input id="pName" placeholder="如 DeepSeek / 我的中转" />
+      <h3 id="pFormTitle">接入大模型（三步）</h3>
+      <div class="row" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
+        <label>① 选服务商</label>
+        <select id="pPreset" style="min-width:200px">
+          <option value="">自定义 / 其他…</option>
+          ${PROVIDER_PRESETS.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="hint">选好服务商后，下面的地址和模型会自动填好，你只把 API Key 粘进来就行。</div>
+      <label>名称</label><input id="pName" placeholder="如 DeepSeek" />
       <label>Base URL（OpenAI 兼容 /chat/completions）</label><input id="pBase" placeholder="https://api.deepseek.com/v1/chat/completions" />
       <label>主模型</label><input id="pModel" placeholder="deepseek-chat" />
-      <label>推理模型（可选）</label><input id="pRModel" placeholder="deepseek-reasoner" />
-      <label>超时(ms)</label><input id="pTimeout" type="number" value="30000" />
-      <label>重试次数</label><input id="pRetry" type="number" value="2" />
-      <label>API Key（仅存本机密钥文件，不进注册表明文）</label><input id="pKey" type="password" placeholder="sk-..." />
-      <div class="row"><button class="btn" id="pSave">保存 Provider</button><button class="btn sec" id="pCancel" style="display:none">取消编辑</button></div>
+      <label>API Key（只存你本机，不进配置明文）</label><input id="pKey" type="password" placeholder="sk-..." />
+      <details class="adv"><summary>高级选项（一般用不到）</summary>
+        <label>推理模型（可选）</label><input id="pRModel" placeholder="deepseek-reasoner" />
+        <label>超时(ms)</label><input id="pTimeout" type="number" value="30000" />
+        <label>重试次数</label><input id="pRetry" type="number" value="2" />
+      </details>
+      <div class="row"><button class="btn" id="pSave">保存并应用</button><button class="btn sec" id="pCancel" style="display:none">取消编辑</button></div>
       <div class="hint" id="pMsg"></div>
     </div>
     <div class="section">
@@ -462,17 +534,31 @@ async function pageApi() {
     else if (act === 'test') await testProvider(id);
   });
   $('#pCancel').onclick = () => { editPid = null; pageApi(); };
+  const presetSel = $('#pPreset');
+  if (presetSel) presetSel.onchange = () => {
+    const p = PROVIDER_PRESETS.find((x) => x.id === presetSel.value);
+    if (!p) return;
+    $('#pName').value = p.name; $('#pBase').value = p.base; $('#pModel').value = p.model; $('#pRModel').value = p.reasoning || '';
+    if (!p.base) $('#pBase').focus();
+  };
   $('#pSave').onclick = async () => {
     const provider = {
       name: $('#pName').value.trim(), baseUrl: $('#pBase').value.trim(), model: $('#pModel').value.trim(),
       reasoningModel: $('#pRModel').value.trim(), timeoutMs: Number($('#pTimeout').value), maxRetries: Number($('#pRetry').value),
     };
     const key = $('#pKey').value;
+    if (!provider.name || !provider.baseUrl || !provider.model) {
+      $('#pMsg').innerHTML = '<span class="err">请至少填好名称、Base URL、主模型（选服务商可自动填）</span>';
+      return;
+    }
     if (key) provider.key = key;
     if (editPid) provider.id = editPid;
     const r = await invoke(C.PROVIDER_SAVE, { provider });
-    $('#pMsg').innerHTML = r.ok ? '<span class="ok">已保存' + (r.complete ? '' : '（配置不完整：请补全 baseUrl/model/密钥）') + '</span>' : '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>';
-    if (r.ok) { editPid = null; pageApi(); }
+    if (!r.ok) { $('#pMsg').innerHTML = '<span class="err">' + esc((r.errors || []).join('；') || r.error) + '</span>'; return; }
+    // 普通玩家路径：保存后自动应用为当前使用的模型，少点一次
+    const ap = await invoke(C.PROVIDER_APPLY, { id: r.id });
+    $('#pMsg').innerHTML = (ap.ok ? '<span class="ok">已保存并设为当前模型' : '<span class="ok">已保存</span><br><span class="hint">应用失败，可在列表中手动「应用」：' + esc(ap.error || '')) + '</span>';
+    editPid = null; pageApi();
   };
   const mig = $('#credMigrate');
   if (mig) mig.onclick = async () => {
@@ -957,14 +1043,15 @@ async function pageSkills() {
 }
 
 /* ---------- ComfyUI 生图 ---------- */
+let comfyExplicitDir = null;                  // 用户在「选择安装目录」里指定的 ComfyUI 根
 async function pageComfy() {
   content.innerHTML = '<h2>ComfyUI 生图</h2><div id="cf"></div>';
   const box = $('#cf');
   box.innerHTML = '<div class="hint">加载中…</div>';
 
   const load = async () => {
-    const st = await invoke(C.COMFY_STATUS);
-    const pr = await invoke(C.COMFY_PREREQ);
+    const st = await invoke(C.COMFY_STATUS, { dir: comfyExplicitDir });
+    const pr = await invoke(C.COMFY_PREREQ, { dir: comfyExplicitDir });
     const wf = await invoke(C.COMFY_WORKFLOWS);
     const det = (st && st.detect) || {};
     const conn = (st && st.connection) || {};
@@ -994,6 +1081,16 @@ async function pageComfy() {
       </tr>`).join('');
 
     box.innerHTML = `
+      <div class="section quick-login">
+        <h3>🚀 ComfyUI 一键启动</h3>
+        <div class="hint">当前状态：<b>${conn.running ? '运行中' + (conn.version ? ' v' + esc(conn.version) : '') : '未运行'}</b>${det.root ? ' ｜ 目录：<code>' + esc(det.root) + '</code>' : ' ｜ 本机未检测到安装（点「安装」可自动下载）'}</div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="cfStart">${conn.running ? '重新启动' : '一键启动'}</button>
+          <button class="btn danger" id="cfStop" ${conn.running ? '' : 'disabled'}>停止</button>
+          <button class="btn sec" id="cfPick2">选择安装目录</button>
+        </div>
+        <div class="hint" id="cfQuickMsg"></div>
+      </div>
       <div class="section">
         <h3>前置条件</h3>
         <div class="hint">画图链路需要<b>先接入大模型</b>：机器人侧 LLM（提示词翻译/扩写）+ ComfyUI 侧文本编码器，缺一则画图会空转。</div>
@@ -1030,6 +1127,25 @@ async function pageComfy() {
       </div>`;
 
     $('#cfDetect').onclick = load;
+    $('#cfStart').onclick = async () => {
+      const qm = $('#cfQuickMsg'); qm.innerHTML = '<span class="hint">启动中…</span>';
+      const r = await invoke(C.COMFY_START, { dir: comfyExplicitDir });
+      qm.innerHTML = r.ok ? '<span class="ok">' + (r.alreadyRunning ? '已经在运行' : '已发起启动（PID ' + (r.pid || '') + '），稍等几秒') + '</span>' : '<span class="err">' + esc(r.error) + '</span>';
+      setTimeout(load, 2500);
+    };
+    $('#cfStop').onclick = async () => {
+      const qm = $('#cfQuickMsg'); qm.innerHTML = '<span class="hint">停止中…</span>';
+      const r = await invoke(C.COMFY_STOP, {});
+      qm.innerHTML = r.ok ? (r.stopped ? '<span class="ok">已停止</span>' : '<span class="hint">本就未运行</span>') : '<span class="err">' + esc(r.error) + '</span>';
+      setTimeout(load, 1500);
+    };
+    $('#cfPick2').onclick = async () => {
+      const r = await invoke(C.COMFY_PICKDIR);
+      if (!r || !r.ok || !r.dir) return;
+      comfyExplicitDir = r.root || r.dir;
+      $('#cfQuickMsg').innerHTML = '<span class="ok">已选择：' + esc(comfyExplicitDir) + '</span>';
+      await load();
+    };
     $('#cfPick').onclick = async () => {
       const r = await invoke(C.COMFY_PICKDIR);
       if (!r || !r.ok || !r.dir) return;
@@ -1189,12 +1305,29 @@ let qrImageSrc = null;
 
 async function subQrLogin(body) {
   body.innerHTML = '<div class="hint">加载中…</div>';
-  const [plan, inst] = await Promise.all([invoke(C.NAPCAT_QR_PLAN), invoke(C.NAPCAT_INSTANCE_LIST)]);
+  const [plan, inst, sset] = await Promise.all([invoke(C.NAPCAT_QR_PLAN), invoke(C.NAPCAT_INSTANCE_LIST), invoke(C.SETTINGS_GET)]);
+  const set = (sset && sset.settings) || {};
   const p = (plan && plan.ok) ? plan : { steps: [], securityNotes: [], candidateEndpoints: [] };
   const list = (inst && inst.instances) || [];
   body.innerHTML = `
+    <div class="section quick-login">
+      <h3>🚀 一键快捷登录（推荐，不用扫码）</h3>
+      <div class="hint">用你电脑上已经有的 QQ 号和密码，点一下就登录。密码只在你本机算成 MD5 再发给登录器，<b>绝不保存明文</b>。</div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <label>QQ 号</label><input id="qlAcc" value="${esc((set.napcat && set.napcat.account) || '')}" placeholder="你的 QQ 号" style="width:170px" />
+        <label>QQ 密码</label><input id="qlPwd" type="password" placeholder="填 QQ 密码（不是 MD5）" style="width:260px" />
+      </div>
+      <div class="row" style="gap:6px">
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="qlPlain" checked /> 我填的是明文密码（自动转 MD5）</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="qlGo">一键登录并启动机器人</button>
+        <button class="btn sec" id="qlSave">只保存账号</button>
+      </div>
+      <div class="hint" id="qlMsg"></div>
+    </div>
     <div class="section">
-      <h3>二维码登录</h3>
+      <h3>二维码登录（备选）</h3>
       <div class="hint">${(p.steps || []).map((s, i) => (i + 1) + '. ' + esc(s)).join('<br>')}</div>
       <div class="row" style="margin-top:10px">
         <label>NapCat 二维码接口地址</label>
@@ -1269,6 +1402,33 @@ async function subQrLogin(body) {
     const r = await invoke(C.NAPCAT_INSTANCE_SAVE, { instance });
     $('#iMsg').innerHTML = r.ok ? '<span class="ok">已保存</span>' : '<span class="err">' + esc(r.error) + '</span>';
     if (r.ok) setTimeout(() => subQrLogin(body), 400);
+  };
+
+  // —— 一键快捷登录（普通玩家主路径）——
+  const qlGo = $('#qlGo'), qlSave = $('#qlSave'), qlMsg = $('#qlMsg');
+  function qlResolve() {
+    const acc = $('#qlAcc').value.trim();
+    const pwd = $('#qlPwd').value;
+    if (!acc) { qlMsg.innerHTML = '<span class="err">请填写 QQ 号</span>'; return null; }
+    if (!pwd) { qlMsg.innerHTML = '<span class="err">请填写密码</span>'; return null; }
+    const plain = $('#qlPlain').checked;
+    const md5 = plain ? md5hex(pwd) : pwd.trim();
+    if (!plain && !/^[0-9a-fA-F]{32}$/.test(md5)) { qlMsg.innerHTML = '<span class="err">未勾选「明文密码」时，这里必须是 32 位 MD5</span>'; return null; }
+    return { account: acc, passwordMd5: md5.toLowerCase() };
+  }
+  if (qlGo) qlGo.onclick = async () => {
+    const c = qlResolve(); if (!c) return;
+    const sr = await invoke(C.SETTINGS_SET, { napcat: { account: c.account, passwordMd5: c.passwordMd5 } });
+    if (!sr.ok) { qlMsg.innerHTML = '<span class="err">' + esc(sr.error) + '</span>'; return; }
+    qlMsg.innerHTML = '<span class="hint">已保存账号，正在启动…</span>';
+    const r = await invoke(C.PROC_START, { napcat: c });
+    qlMsg.innerHTML = r.ok ? '<span class="ok">已发起登录启动（PID ' + (r.pids || []).join(',') + (r.note ? '；' + esc(r.note) : '') + '）</span>' : '<span class="err">' + esc(r.error || '启动失败') + '</span>';
+    setTimeout(() => subQrLogin(body), 1500);
+  };
+  if (qlSave) qlSave.onclick = async () => {
+    const c = qlResolve(); if (!c) return;
+    const sr = await invoke(C.SETTINGS_SET, { napcat: { account: c.account, passwordMd5: c.passwordMd5 } });
+    qlMsg.innerHTML = sr.ok ? '<span class="ok">已保存账号，下次可直接一键登录</span>' : '<span class="err">' + esc(sr.error) + '</span>';
   };
 
   document.querySelectorAll('#instList [data-del]').forEach((b) => b.onclick = async () => {
