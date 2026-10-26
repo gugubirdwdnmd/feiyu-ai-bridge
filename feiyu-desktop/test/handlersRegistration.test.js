@@ -31,7 +31,7 @@ Module._load = function (request, parent, isMain) {
   return originalLoad.apply(this, arguments);
 };
 
-const { CHANNELS } = require('../src/services/ipcChannels');
+const { CHANNELS, EVENT_CHANNELS } = require('../src/services/ipcChannels');
 const { registerHandlers } = require('../src/ipc/handlers');
 Module._load = originalLoad;
 
@@ -65,7 +65,8 @@ test('CHANNELS 里每个通道都注册了处理器', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feiyu-reg-'));
   try {
     const { handlers } = buildHarness(dir);
-    const missing = Object.values(CHANNELS).filter((ch) => !handlers.has(ch));
+    // 单向推送通道（主→渲染事件）不需要 handler；其余每个通道都必须注册
+    const missing = Object.values(CHANNELS).filter((ch) => !handlers.has(ch) && !EVENT_CHANNELS.includes(ch));
     assert.deepStrictEqual(missing, [], '以下通道没有注册处理器: ' + missing.join(', '));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

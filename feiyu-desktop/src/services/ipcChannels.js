@@ -143,7 +143,36 @@ const CHANNELS = {
   NOTIFY_LIST: 'notify:list',
   NOTIFY_MARK_READ: 'notify:markRead',
   NOTIFY_CLEAR: 'notify:clear',
+
+  // ===== 模块 K：终端 / 实时状态监控 / 实时日志流 =====
+  // 终端：渲染进程只发「打开 / 输入 / 关闭」三类受控指令，真正的 Shell 在 Main 进程执行，
+  // 输出经事件推回（绝不把 shell 能力泄漏给渲染进程）。
+  TERMINAL_OPEN: 'terminal:open',
+  TERMINAL_INPUT: 'terminal:input',
+  TERMINAL_CLOSE: 'terminal:close',
+  // 以下为主 → 渲染事件（渲染进程只订阅，不反向调用）
+  TERMINAL_OUTPUT: 'terminal:output',
+  TERMINAL_EXIT: 'terminal:exit',
+  TERMINAL_CLEAR: 'terminal:clear',
+  // 实时状态监控（请求/响应）
+  MONITOR_STATUS: 'monitor:status',
+  // 实时日志流（请求开启/关闭，新行经事件推送）
+  LOG_STREAM_START: 'logstream:start',
+  LOG_STREAM_STOP: 'logstream:stop',
+  LOG_STREAM_LINE: 'logstream:line',
 };
+
+/**
+ * 纯事件通道（主 → 渲染，单向推送）：渲染进程只订阅、不反向 invoke，
+ * 因此没有对应 handler，也不应在 validate 里被当作「未知通道」拒绝。
+ */
+const EVENT_CHANNELS = [
+  CHANNELS.TERMINAL_OUTPUT,
+  CHANNELS.TERMINAL_EXIT,
+  CHANNELS.TERMINAL_CLEAR,
+  CHANNELS.LOG_STREAM_LINE,
+];
+function isEventChannel(channel) { return EVENT_CHANNELS.includes(channel); }
 
 const ALLOWED_RANGE = ['today', 'yesterday', '7d', 'month', 'all'];
 
@@ -160,6 +189,7 @@ function inSet(v, set) { return set.includes(v); }
 
 /** 通用校验：返回 {ok, error}。失败时不执行任何操作。 */
 function validate(channel, args) {
+  if (isEventChannel(channel)) return { ok: true }; // 单向推送通道，渲染进程从不 invoke
   switch (channel) {
     case CHANNELS.CONFIG_APPLY:
       if (!isObject(args) || !isObject(args.partial)) return { ok: false, error: '需要 {partial: object}' };
@@ -469,9 +499,29 @@ function validate(channel, args) {
       if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
       return { ok: true };
 
+    // —————————— 模块 K：终端 / 监控 / 日志流 ——————————
+    case CHANNELS.TERMINAL_OPEN:
+      if (args != null && args.cwd != null && !isString(args.cwd)) return { ok: false, error: 'cwd 必须是 string' };
+      return { ok: true };
+    case CHANNELS.TERMINAL_INPUT:
+      if (!isObject(args) || !isString(args.sessionId)) return { ok: false, error: '需要 {sessionId: string}' };
+      if (typeof args.line !== 'string') return { ok: false, error: 'line 必须是 string' };
+      if (args.line.length > 8000) return { ok: false, error: '单条命令过长（≤8000 字符）' };
+      return { ok: true };
+    case CHANNELS.TERMINAL_CLOSE:
+      if (!isObject(args) || !isString(args.sessionId)) return { ok: false, error: '需要 {sessionId: string}' };
+      return { ok: true };
+    case CHANNELS.MONITOR_STATUS:
+      return { ok: true };
+    case CHANNELS.LOG_STREAM_START:
+      if (args != null && args.lines != null && (!Number.isInteger(args.lines) || args.lines < 1 || args.lines > 5000)) return { ok: false, error: 'lines 必须 1-5000' };
+      return { ok: true };
+    case CHANNELS.LOG_STREAM_STOP:
+      return { ok: true };
+
     default:
       return { ok: false, error: '未知通道: ' + channel };
   }
 }
 
-module.exports = { CHANNELS, ALLOWED_RANGE, ALLOWED_SECRET_KEYS, validate, isObject, isString };
+module.exports = { CHANNELS, ALLOWED_RANGE, ALLOWED_SECRET_KEYS, validate, isObject, isString, EVENT_CHANNELS, isEventChannel };

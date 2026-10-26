@@ -134,3 +134,58 @@ code { background: var(--bg); padding: 1px 6px; border-radius: 5px; border: 1px 
 details.adv { margin: 6px 0 10px; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 8px; }
 details.adv summary { cursor: pointer; color: var(--muted); user-select: none; }
 details.adv summary:hover { color: var(--text); }
+
+/* ---------- 模块 K：终端 / 实时状态监控 / 实时日志流 ---------- */
+@keyframes feiyu-spin { to { transform: rotate(360deg); } }
+@keyframes feiyu-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
+@keyframes feiyu-blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+@keyframes feiyu-shimmer { 0% { background-position: -240px 0; } 100% { background-position: 240px 0; } }
+@keyframes feiyu-fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* 实时状态监控卡片 */
+.monitor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.mon-card { position: relative; background: var(--surface2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; transition: border-color .4s, box-shadow .4s, background .4s; overflow: hidden; }
+.mon-card .mon-dot { position: absolute; top: 14px; right: 14px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: background .4s, box-shadow .4s; }
+.mon-card .mon-name { font-weight: 700; font-size: 15px; }
+.mon-card .mon-state { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.mon-card .mon-meta { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: Consolas, monospace; word-break: break-all; }
+.mon-card.running { border-color: var(--ok); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 30%, transparent), 0 0 18px color-mix(in srgb, var(--ok) 22%, transparent); }
+.mon-card.running .mon-dot { background: var(--ok); box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 70%, transparent); animation: feiyu-pulse 1.4s ease-in-out infinite; }
+.mon-card.running .mon-state { color: var(--ok); }
+.mon-card.stopped { opacity: .72; }
+.mon-card.stopped .mon-dot { background: var(--line); }
+.mon-card.loading { border-color: var(--accent); }
+.mon-card.loading .mon-dot { background: var(--accent); animation: feiyu-blink 1s steps(2, jump-none) infinite; }
+.mon-card.loading .mon-state { color: var(--accent); }
+/* 加载态：骨架微光扫过 */
+.mon-card.loading::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 16%, transparent), transparent); background-size: 480px 100%; animation: feiyu-shimmer 1.2s linear infinite; pointer-events: none; }
+.monitor-grid.refreshing { animation: feiyu-pulse .5s ease-in-out; }
+
+/* 实时日志徽标 */
+.live-badge { display: inline-block; margin-left: 8px; font-size: 11px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 999px; padding: 1px 9px; animation: feiyu-blink 1.4s ease-in-out infinite; }
+.live-badge.paused { color: var(--muted); border-color: var(--muted); animation: none; }
+
+/* 终端与日志框体 */
+.term-out, .term-log { background: #06141c; border: 1px solid var(--line); border-radius: calc(var(--radius) * 0.5); padding: 10px; font-family: "Cascadia Code", Consolas, "Courier New", monospace; font-size: 12.5px; line-height: 1.5; color: #d7f5ee; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.term-log { max-height: 260px; color: #cfe6f2; }
+.log-line { animation: feiyu-fadein .25s ease-out; }
+.log-line.sys { color: var(--muted); font-style: italic; }
+
+/* 终端输出行（逐行淡入） */
+.term-line { animation: feiyu-fadein .2s ease-out; }
+.term-line.out { color: #d7f5ee; }
+.term-line.sys { color: #7fd6c9; }
+.term-line.err { color: #ff9a9a; }
+.term-line.cmd { color: #ffd9a8; }
+.term-prompt-inline { color: var(--accent); font-weight: 700; margin-right: 6px; }
+
+/* 终端输入行 + 命令指示 */
+.term-input-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; background: #06141c; border: 1px solid var(--line); border-radius: calc(var(--radius) * 0.5); padding: 8px 10px; }
+.term-prompt { color: var(--accent); font-weight: 700; font-family: Consolas, monospace; }
+.term-input { background: transparent; border: none; color: #d7f5ee; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; padding: 0; }
+.term-input:focus { outline: none; }
+.term-input::placeholder { color: #4f7a72; }
+.cmd-badge { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 9px; border: 1px solid var(--line); color: var(--muted); }
+.cmd-badge.ready { color: var(--ok); border-color: var(--ok); }
+.cmd-badge.running { color: var(--accent); border-color: var(--accent); }
+.cmd-badge.running::before { content: ''; display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: feiyu-spin .7s linear infinite; }

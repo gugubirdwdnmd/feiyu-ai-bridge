@@ -37,6 +37,8 @@ const costService = require('../services/costService');
 const diagnosticService = require('../services/diagnosticService');
 const { redactText } = require('../services/redact');
 const { dialog } = require('electron');
+const { createTerminalManager } = require('../services/terminalService');
+const { createLogTailer } = require('../services/logTailService');
 
 /** 生成不可逆的展示用掩码：仅暴露首尾少量字符，绝不回传完整密钥。 */
 function maskSecret(v) {
@@ -46,7 +48,13 @@ function maskSecret(v) {
   return s.slice(0, 3) + '*'.repeat(Math.max(4, s.length - 6)) + s.slice(-3);
 }
 
-function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
+function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send }) {
+  const emit = (channel, payload) => { try { if (typeof send === 'function') send(channel, payload); } catch (_) {} };
+
+  // 模块 K：终端与实时日志流（输出经 emit 推回渲染进程；未连窗口时 send 为空，自动跳过）
+  const terminal = createTerminalManager({ emit });
+  const logTail = createLogTailer({ emit });
+
   const settingsFile = path.join(getUserDataDir(), 'feiyu-settings.json');
   const priceFile = path.join(getUserDataDir(), 'price.json');
 
@@ -1020,6 +1028,152 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm }) {
     return diagnosticService.markRead(getUserDataDir(), args.id);
   });
   ipcMain.handle(CHANNELS.NOTIFY_CLEAR, () => diagnosticService.clearNotifications(getUserDataDir()));
+
+  // ==================== K. 终端 / 实时状态监控 / 实时日志流 ====================
+  const HELP_TEXT = [
+    '肥鱼本地终端 —— 命令在本机执行，软件会如实执行你输入的每一条指令。',
+    '内置命令（其余按系统 Shell 执行）：',
+    '  help              显示本帮助',
+    '  version           显示软件版本',
+    '  status            查看 AI 桥 / NapCat / ComfyUI 实时状态',
+    '  start [bot|comfy] 启动机器人（默认）或 ComfyUI',
+    '  stop  [bot|comfy] 停止机器人（默认）或 ComfyUI',
+    '  restart [bot]     重启机器人',
+    '  clear             清屏',
+    '示例：dir / ls / npm -v / python -V / start comfy',
+  ].join('\r\n') + '\r\n';
+
+  /** 控制命令分发：命中返回 true（不再交给 Shell）。输出经 emit 推回终端。 */
+  async function runControlCommand(line, sessionId) {
+    const t = String(line || '').trim();
+    const lc = t.toLowerCase();
+    const out = (stream, text) => emit('TERMINAL_OUTPUT', { sessionId, stream, text });
+    if (lc === 'help' || lc === '?') { out('system', HELP_TEXT); return true; }
+    if (lc === 'clear') { emit('TERMINAL_CLEAR', { sessionId }); return true; }
+    if (lc === 'version') { out('system', '肥鱼桌面控制中心 v' + getAppVersion() + '\r\n'); return true; }
+    if (lc === 'status') {
+      const status = await pm.getStatus();
+      const det = comfyService.detect({});
+      const conn = await comfyService.testConnection(det.endpoint);
+      const fmtS = (s) => (s.running ? ('运行中 (PID ' + s.pid + ')') : '已停止');
+      out('system', [
+        'AI 桥(Bridge): ' + fmtS(status.bridge) + '  端口 ' + status.bridge.port,
+        'NapCat:        ' + fmtS(status.napcat) + '  端口 ' + status.napcat.port,
+        'ComfyUI:       ' + ((conn.ok && conn.running) ? ('运行中 ' + det.endpoint) : (det.found ? '已停止' : '未检测到')),
+        '机器人目录:     ' + (botDir() || '（未配置）'),
+      ].join('\r\n') + '\r\n');
+      return true;
+    }
+    const m = lc.match(/^(start|stop|restart)(?:\s+(bot|comfy))?$/);
+    if (m) {
+      const op = m[1];          // start | stop | restart
+      const target = m[2] || 'bot';
+      if (target === 'comfy') return await runComfyCtrl(op, sessionId, out);
+      return await runBotCtrl(op, sessionId, out);
+    }
+    return false;
+  }
+
+  async function runBotCtrl(op, sessionId, out) {
+    const d = needBotDir();
+    if (!d) { out('system', '未配置机器人目录，无法启动/停止机器人。请先在「机器人运行」选择目录。\r\n'); return true; }
+    if (op === 'stop' || op === 'restart') {
+      const s = await pm.getStatus();
+      const pids = [s.bridge.pid, s.napcat.pid].filter(Boolean);
+      if (!pids.length) out('system', '机器人未在运行。\r\n');
+      else {
+        out('system', '正在停止机器人 (PID ' + pids.join(', ') + ')…\r\n');
+        const r = await pm.stopByPids(pids, { timeoutMs: 5000 });
+        out('system', r.ok ? '已停止。\r\n' : '停止失败: ' + (r.error || '未知') + '\r\n');
+      }
+      if (op === 'stop') return true;
+    }
+    // start / restart
+    const pre = await pm.preCheck();
+    if (pre.alreadyRunning && op !== 'restart') { out('system', '机器人已在运行，无需重复启动。\r\n'); return true; }
+    const settings = getSettings();
+    const napcat = settings.napcat || null;
+    out('system', '正在启动机器人…\r\n');
+    const r = pm.startBot(d, { napcat, settings });
+    if (r && (r.started.bridge || r.started.napcat)) {
+      out('system', '已启动 (bridge PID ' + (r.started.bridge || '-') + (r.started.napcat ? ', napcat PID ' + r.started.napcat : '') + ')。\r\n');
+    } else {
+      out('system', '启动未返回 PID，请查看日志。\r\n');
+    }
+    return true;
+  }
+
+  async function runComfyCtrl(op, sessionId, out) {
+    const det = comfyService.detect({});
+    if (!det.found) { out('system', '本机未检测到 ComfyUI，请先在「ComfyUI 生图」安装或指定目录。\r\n'); return true; }
+    if (op === 'stop') {
+      const owner = await pm.findPortOwner(det.port);
+      if (!owner || !owner.pid) { out('system', 'ComfyUI 未在运行。\r\n'); return true; }
+      out('system', '正在停止 ComfyUI (PID ' + owner.pid + ')…\r\n');
+      await pm.stopByPids([owner.pid], { timeoutMs: 5000 });
+      out('system', '已停止。\r\n');
+      return true;
+    }
+    // start / restart
+    if (op === 'restart') {
+      const owner = await pm.findPortOwner(det.port);
+      if (owner && owner.pid) await pm.stopByPids([owner.pid], { timeoutMs: 5000 });
+    } else {
+      const conn = await comfyService.testConnection(det.endpoint);
+      if (conn.ok && conn.running) { out('system', 'ComfyUI 已在运行 (' + det.endpoint + ')。\r\n'); return true; }
+    }
+    const spec = comfyService.launchSpec(det.root, { port: det.port });
+    if (!spec.ok) { out('system', '启动失败: ' + spec.error + '\r\n'); return true; }
+    out('system', '正在启动 ComfyUI (端口 ' + det.port + ')…\r\n');
+    const r = pm.spawnDetached(spec.spec);
+    out('system', r.ok ? ('已启动 (PID ' + r.pid + ')，稍候在「status」查看。\r\n') : ('启动失败: ' + (r.error || '') + '\r\n'));
+    return true;
+  }
+
+  ipcMain.handle(CHANNELS.TERMINAL_OPEN, (e, args) => {
+    const v = validate(CHANNELS.TERMINAL_OPEN, args); if (!v.ok) return { ok: false, error: v.error };
+    // 工作目录：优先用户配置的机器人目录，否则本应用 userData（绝不在开发机硬编码路径）
+    const cwd = (args && args.cwd) || botDir() || getUserDataDir();
+    return terminal.open({ cwd });
+  });
+  ipcMain.handle(CHANNELS.TERMINAL_INPUT, async (e, args) => {
+    const v = validate(CHANNELS.TERMINAL_INPUT, args); if (!v.ok) return { ok: false, error: v.error };
+    const line = (args && args.line || '').replace(/\r?\n$/, '');
+    const sessionId = args.sessionId;
+    if (!line.trim()) return { ok: true, handled: false };
+    if (await runControlCommand(line, sessionId)) return { ok: true, handled: true };
+    const r = terminal.write(sessionId, line + '\n');
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, handled: false };
+  });
+  ipcMain.handle(CHANNELS.TERMINAL_CLOSE, (e, args) => {
+    const v = validate(CHANNELS.TERMINAL_CLOSE, args); if (!v.ok) return { ok: false, error: v.error };
+    return terminal.close(args.sessionId);
+  });
+
+  ipcMain.handle(CHANNELS.MONITOR_STATUS, async () => {
+    const status = await pm.getStatus();
+    const det = comfyService.detect({});
+    const conn = await comfyService.testConnection(det.endpoint);
+    return {
+      ok: true,
+      monitor: {
+        bridge: { running: status.bridge.running, pid: status.bridge.pid, port: status.bridge.port },
+        napcat: { running: status.napcat.running, pid: status.napcat.pid, port: status.napcat.port },
+        comfy: { running: !!(conn.ok && conn.running), endpoint: det.endpoint, port: det.port, found: det.found, version: conn.version || null },
+        botDirConfigured: !!botDir(),
+        time: Date.now(),
+      },
+    };
+  });
+
+  ipcMain.handle(CHANNELS.LOG_STREAM_START, (e, args) => {
+    const v = validate(CHANNELS.LOG_STREAM_START, args); if (!v.ok) return { ok: false, error: v.error };
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', lines: [] };
+    const r = logTail.start(d, { lines: (args && args.lines) || 200, interval: 1000 });
+    return { ok: true, lines: r.recent, path: r.path, exists: r.exists };
+  });
+  ipcMain.handle(CHANNELS.LOG_STREAM_STOP, () => { logTail.stop(); return { ok: true }; });
 }
 
 module.exports = { registerHandlers };

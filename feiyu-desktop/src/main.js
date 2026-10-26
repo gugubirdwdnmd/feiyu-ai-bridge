@@ -126,7 +126,11 @@ function createWindow() {
 app.whenReady().then(async () => {
   await initCredentialCodecAsync();
   ensureBotDirDefault();
-  registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm });
+  /** 向渲染进程推送事件（终端输出 / 日志流等）。窗口尚未创建时静默跳过。 */
+  const send = (channel, payload) => {
+    try { if (win && win.webContents && !win.isDestroyed()) win.webContents.send(channel, payload); } catch (_) {}
+  };
+  registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send });
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

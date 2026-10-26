@@ -8,6 +8,13 @@ const content = $('#content');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmt = (n) => (n == null ? 0 : n).toLocaleString('zh-CN');
 const invoke = (ch, args) => f.invoke(ch, args);
+/** 订阅主进程事件，返回取消订阅函数（用于离开页面时清理）。 */
+const fOn = (ch, cb) => (typeof f.on === 'function' ? f.on(ch, cb) : () => {});
+
+// 页面切换时统一清理上一页的定时器 / 事件订阅 / 终端会话，避免残留监听导致内存泄漏或错页渲染
+const pageCleanups = [];
+function addCleanup(fn) { if (typeof fn === 'function') pageCleanups.push(fn); }
+function runCleanups() { while (pageCleanups.length) { const fn = pageCleanups.shift(); try { fn(); } catch (_) {} } }
 
 let editPid = null;                              // 正在编辑的 Provider id
 let usageFilter = { provider: '', model: '', status: '' };
@@ -137,10 +144,13 @@ async function refreshBotDirLabel() {
 }
 
 function render(page) {
+  runCleanups();
   refreshBotDirLabel();
   const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, theme: pageTheme, logs: pageLogs, importexport: pageImportExport, about: pageAbout,
     // 新增聚合页（模块 A–J）
-    loginservices: pageLoginServices, extensions: pageExtensions, ops: pageOps };
+    loginservices: pageLoginServices, extensions: pageExtensions, ops: pageOps,
+    // 模块 K：终端 / 实时状态监控 / 实时日志流
+    console: pageConsole };
   (map[page] || pageOverview)();
 }
 
@@ -1954,6 +1964,209 @@ async function subDiag(body) {
   };
   $('#ntRead').onclick = async () => { const x = await invoke(C.NOTIFY_MARK_READ, { id: 'all' }); if (x.ok) subDiag(body); };
   $('#ntClear').onclick = async () => { if (!confirm('清空所有通知？')) return; const x = await invoke(C.NOTIFY_CLEAR); if (x.ok) subDiag(body); };
+}
+
+/* ==================================================================================
+ * 模块 K：终端 / 实时状态监控 / 实时日志流
+ *  - 终端：经固定 IPC 通道发「打开/输入/关闭」，Shell 在 Main 执行，输出流式回推。
+ *  - 监控：轮询 MONITOR_STATUS，卡片用加载/运行/停止三态动画。
+ *  - 日志：LOG_STREAM_START 取最近行，新行经 LOG_STREAM_LINE 实时追加（带淡入动画）。
+ * ================================================================================== */
+async function pageConsole() {
+  content.innerHTML = `
+    <h2>终端与监控</h2>
+    <div class="hint">本地终端：命令在本机「机器人目录」下执行，软件会如实执行你输入的每一条指令。内置命令：<code>help</code> <code>status</code> <code>start comfy</code> <code>stop comfy</code> <code>start bot</code> <code>stop bot</code> <code>clear</code> <code>version</code>；其余按系统 Shell 执行。</div>
+
+    <div class="section">
+      <h3>实时状态监控</h3>
+      <div class="monitor-grid" id="monGrid">
+        <div class="mon-card loading" data-svc="bridge"><span class="mon-dot"></span><div class="mon-name">AI 桥</div><div class="mon-state">加载中…</div><div class="mon-meta"></div></div>
+        <div class="mon-card loading" data-svc="napcat"><span class="mon-dot"></span><div class="mon-name">NapCat</div><div class="mon-state">加载中…</div><div class="mon-meta"></div></div>
+        <div class="mon-card loading" data-svc="comfy"><span class="mon-dot"></span><div class="mon-name">ComfyUI</div><div class="mon-state">加载中…</div><div class="mon-meta"></div></div>
+      </div>
+      <div class="hint" id="monUpd">就绪</div>
+    </div>
+
+    <div class="section">
+      <h3>实时日志 <span class="live-badge" id="liveBadge">● LIVE</span></h3>
+      <div class="row"><input id="logFilter" placeholder="过滤关键字（实时）" /><button class="btn sm sec" id="logPause">暂停</button><button class="btn sm sec" id="logClear">清屏</button></div>
+      <div class="term-log" id="liveLog"></div>
+    </div>
+
+    <div class="section">
+      <h3>终端 <span class="cmd-badge ready" id="cmdBadge">就绪</span></h3>
+      <div class="term-out" id="termOut"></div>
+      <div class="term-input-row">
+        <span class="term-prompt" id="termPrompt">$</span>
+        <input id="termInput" class="term-input" placeholder="输入命令后回车…（输入 help 查看内置命令）" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="hint">支持上下方向键调出历史命令；命令指示会在执行时变为「执行中…」动画。</div>
+    </div>`;
+
+  const out = $('#termOut');
+  const input = $('#termInput');
+  const cmdBadge = $('#cmdBadge');
+  const liveLog = $('#liveLog');
+  const liveBadge = $('#liveBadge');
+  const logFilter = $('#logFilter');
+  const monGrid = $('#monGrid');
+  const monUpd = $('#monUpd');
+  let logPaused = false;
+  const history = [];
+  let histIdx = -1;
+
+  // ---------- 终端：本地输出辅助 ----------
+  function printSys(text, cls) {
+    const div = document.createElement('div');
+    div.className = 'term-line ' + (cls || 'sys');
+    div.textContent = text;
+    out.appendChild(div);
+    out.scrollTop = out.scrollHeight;
+  }
+  printSys('肥鱼本地终端已就绪。输入 help 查看内置命令，其余命令按本机 Shell 执行。', 'sys');
+
+  // ---------- 实时状态监控 ----------
+  function setCard(svc, state, stateText, meta) {
+    const card = monGrid.querySelector('[data-svc="' + svc + '"]');
+    if (!card) return;
+    card.className = 'mon-card ' + state;
+    card.querySelector('.mon-state').textContent = stateText;
+    card.querySelector('.mon-meta').textContent = meta || '';
+  }
+  async function refreshMonitor() {
+    monGrid.classList.add('refreshing');
+    try {
+      const r = await invoke(C.MONITOR_STATUS);
+      const m = r && r.monitor;
+      if (!m) return;
+      const map = { bridge: m.bridge, napcat: m.napcat, comfy: m.comfy };
+      for (const svc of ['bridge', 'napcat', 'comfy']) {
+        const s = map[svc];
+        if (!s) continue;
+        const running = !!s.running;
+        let meta = '';
+        if (svc === 'comfy') meta = s.found ? ('端口 ' + s.port + (s.version ? ' · v' + s.version : '')) : '未检测到';
+        else meta = '端口 ' + s.port + (running && s.pid ? ' · PID ' + s.pid : '');
+        setCard(svc, running ? 'running' : 'stopped', running ? '运行中' : '已停止', meta);
+      }
+      monUpd.textContent = '更新于 ' + new Date(m.time || Date.now()).toLocaleTimeString('zh-CN');
+    } catch (_) {
+      monUpd.textContent = '状态获取失败';
+    } finally {
+      setTimeout(() => monGrid.classList.remove('refreshing'), 400);
+    }
+  }
+  await refreshMonitor();
+  const monTimer = setInterval(refreshMonitor, 2000);
+  addCleanup(() => clearInterval(monTimer));
+
+  // ---------- 实时日志流 ----------
+  function appendLog(line) {
+    if (logPaused) return;
+    const kw = (logFilter.value || '').trim().toLowerCase();
+    if (kw && !String(line).toLowerCase().includes(kw)) return;
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.textContent = line;
+    liveLog.appendChild(div);
+    while (liveLog.childElementCount > 2000) liveLog.removeChild(liveLog.firstChild);
+    liveLog.scrollTop = liveLog.scrollHeight;
+  }
+  function printLogSys(text) {
+    const div = document.createElement('div');
+    div.className = 'log-line sys';
+    div.textContent = text;
+    liveLog.appendChild(div);
+  }
+  const offLine = fOn(C.LOG_STREAM_LINE, (p) => appendLog(p.line));
+  addCleanup(offLine);
+  $('#logPause').onclick = () => {
+    logPaused = !logPaused;
+    $('#logPause').textContent = logPaused ? '继续' : '暂停';
+    liveBadge.classList.toggle('paused', logPaused);
+    liveBadge.textContent = logPaused ? '⏸ 已暂停' : '● LIVE';
+  };
+  $('#logClear').onclick = () => { liveLog.innerHTML = ''; };
+  try {
+    const r = await invoke(C.LOG_STREAM_START, { lines: 200 });
+    if (r && r.ok) {
+      (r.lines || []).forEach((l) => appendLog(l));
+      if (!r.exists) printLogSys('（未检测到 ai_bridge.log，配置机器人目录后将开始实时追踪）');
+    } else if (r && r.error) {
+      printLogSys('日志流未开启: ' + r.error);
+    }
+  } catch (_) {}
+  addCleanup(() => { try { invoke(C.LOG_STREAM_STOP); } catch (_) {} });
+
+  // ---------- 终端会话 ----------
+  let sessionId = null;
+  const offOut = fOn(C.TERMINAL_OUTPUT, (p) => {
+    if (sessionId && p.sessionId !== sessionId) return;
+    const text = String(p.text || '');
+    const parts = text.split('\n');
+    for (let i = 0; i < parts.length; i++) {
+      const div = document.createElement('div');
+      div.className = 'term-line ' + (p.stream === 'stderr' ? 'err' : (p.stream === 'system' ? 'sys' : 'out'));
+      div.textContent = parts[i].replace(/\r$/, '');
+      out.appendChild(div);
+    }
+    while (out.childElementCount > 3000) out.removeChild(out.firstChild);
+    out.scrollTop = out.scrollHeight;
+  });
+  const offExit = fOn(C.TERMINAL_EXIT, (p) => { if (!sessionId || p.sessionId === sessionId) setCmdBadge('ready'); });
+  const offClear = fOn(C.TERMINAL_CLEAR, (p) => { if (!sessionId || p.sessionId === sessionId) out.innerHTML = ''; });
+  addCleanup(() => { offOut(); offExit(); offClear(); });
+
+  function setCmdBadge(state) {
+    cmdBadge.className = 'cmd-badge ' + state;
+    cmdBadge.textContent = state === 'running' ? '执行中…' : '就绪';
+  }
+
+  try {
+    const r = await invoke(C.TERMINAL_OPEN);
+    if (r && r.ok) {
+      sessionId = r.sessionId;
+      printSys('工作目录: ' + r.cwd, 'sys');
+    } else {
+      printSys('终端打开失败: ' + (r && r.error || '未知'), 'err');
+    }
+  } catch (_) {}
+
+  async function sendLine() {
+    const line = input.value;
+    if (!sessionId) { printSys('终端未连接。', 'err'); return; }
+    const echo = document.createElement('div');
+    echo.className = 'term-line cmd';
+    echo.innerHTML = '<span class="term-prompt-inline">$</span> ' + esc(line);
+    out.appendChild(echo);
+    out.scrollTop = out.scrollHeight;
+    if (line.trim()) { history.push(line); if (history.length > 200) history.shift(); }
+    histIdx = history.length;
+    input.value = '';
+    setCmdBadge('running');
+    try {
+      const r = await invoke(C.TERMINAL_INPUT, { sessionId, line });
+      if (!r || !r.ok) printSys('错误: ' + (r && r.error || '未知'), 'err');
+    } catch (e) {
+      printSys('发送失败: ' + (e && e.message || e), 'err');
+    }
+    // 命令指示动画：1.5s 后回到就绪（Shell 为常驻会话，不靠退出判定）
+    setTimeout(() => setCmdBadge('ready'), 1500);
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); sendLine(); }
+    else if (e.key === 'ArrowUp') {
+      if (history.length && histIdx > 0) { histIdx--; input.value = history[histIdx]; e.preventDefault(); }
+    } else if (e.key === 'ArrowDown') {
+      if (histIdx < history.length - 1) { histIdx++; input.value = history[histIdx]; }
+      else { histIdx = history.length; input.value = ''; }
+      e.preventDefault();
+    }
+  });
+
+  addCleanup(() => { if (sessionId) { try { invoke(C.TERMINAL_CLOSE, { sessionId }); } catch (_) {} } });
+  setTimeout(() => input.focus(), 0);
 }
 
 // 启动：先加载主题（写 CSS 变量 + 启动背景动画），再渲染首页。
