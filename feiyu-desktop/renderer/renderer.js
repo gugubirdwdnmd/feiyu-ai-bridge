@@ -1,5 +1,5 @@
 'use strict';
-/* renderer.js —— 肥鱼桌面控制中心 UI 逻辑。仅通过 window.feiyu.invoke 与 Main 通信。 */
+/* renderer.js —— 玄枢 XUANSHU UI 逻辑。仅通过 window.feiyu.invoke 与 Main 通信。 */
 const f = window.feiyu;
 const C = f.channels;
 const $ = (s, r = document) => r.querySelector(s);
@@ -148,7 +148,7 @@ function render(page) {
   refreshBotDirLabel();
   const map = { overview: pageOverview, run: pageRun, api: pageApi, usage: pageUsage, personality: pagePersonality, skills: pageSkills, comfy: pageComfy, theme: pageTheme, logs: pageLogs, importexport: pageImportExport, about: pageAbout,
     // 新增聚合页（模块 A–J）
-    loginservices: pageLoginServices, extensions: pageExtensions, ops: pageOps,
+    loginservices: pageLoginServices, extensions: pageExtensions, extensionHub: pageExtensionHub, ops: pageOps,
     // 模块 K：终端 / 实时状态监控 / 实时日志流
     console: pageConsole,
     // QQ 接入后端统一管理（NapCat / SnowLuma）
@@ -1367,7 +1367,7 @@ async function pageAbout() {
       <h3>机器人目录</h3><div class="hint">${esc(set.botDir || '未配置（在「机器人运行」或设置中指定）')}</div>
       <div class="row"><button class="btn sec" id="pickBtn2">选择机器人目录…</button></div>
       <h3>说明</h3>
-    <div class="hint">肥鱼桌面控制中心：基于现有 NapCat + OneBot QQ AI 机器人核心，增加图形化管理（配置 / 启动停止 / 人格 / 用量 / 日志 / 导入导出）。不重写机器人业务逻辑，只读/写其真实配置文件。</div>
+    <div class="hint">玄枢 XUANSHU：基于现有 NapCat + OneBot QQ AI 机器人核心，增加图形化管理（配置 / 启动停止 / 人格 / 用量 / 日志 / 导入导出）。不重写机器人业务逻辑，只读/写其真实配置文件。</div>
     <div class="hint">用量数据来自机器人真实记录（memory/usage/*.jsonl 或运行中的 /api/usage），不做任何伪造。</div>
   </div>`;
   $('#pickBtn2').onclick = async () => { const d = await pickBotDir(); if (d) pageAbout(); };
@@ -1385,6 +1385,7 @@ async function pageAbout() {
 const SUBTABS = {
   loginservices: { active: 'qr', tabs: [['qr', 'QQ 登录中心'], ['svc', '服务编排']] },
   extensions: { active: 'tree', tabs: [['tree', '技能树'], ['mcp', 'MCP 导入'], ['market', '市场接入']] },
+  extensionHub: { active: 'center', tabs: [['center', '扩展中心'], ['detail', '扩展详情'], ['manage', '扩展管理'], ['permission', '权限中心'], ['dev', '开发者工具']] },
   ops: { active: 'wf', tabs: [['wf', '自动化工作流'], ['bak', '备份与恢复'], ['cost', '成本与预算'], ['diag', '诊断与通知']] },
 };
 
@@ -1673,6 +1674,321 @@ async function subServices(body) {
 async function pageExtensions() {
   content.innerHTML = '<h2>技能与扩展</h2>';
   mountGroup('extensions', { tree: subSkillTree, mcp: subMcp, market: subMarket });
+}
+
+/* ==================================================================================
+ * 1.4 扩展中心（Extension Hub）—— 统一扩展生态
+ *   子页：扩展中心 / 扩展详情 / 扩展管理 / 权限中心 / 开发者工具
+ *   只通过 EXT_* IPC 与主进程通信；渲染进程不直接碰 fs / shell。
+ * ================================================================================== */
+
+let extDetailId = '';                       // 从列表点「详情」时记住的扩展 id
+const extRenderers = {
+  center: subExtCenter, detail: subExtDetail, manage: subExtManage,
+  permission: subExtPermission, dev: subExtDev,
+};
+function mountExtHub() { mountGroup('extensionHub', extRenderers); }
+
+/** 扩展卡片上的状态徽标（安装来源 / 状态 / 类型 / 风险）。 */
+function extBadges(e) {
+  const tags = [];
+  tags.push(`<span class="badge ${e.owned === false ? 'off' : 'on'}">${e.owned === false ? '已有配置' : '已安装'}</span>`);
+  const st = e.status || (e.owned === false ? 'discovered' : 'installed');
+  tags.push(`<span class="badge ${st === 'enabled' || st === 'installed' ? 'on' : 'off'}">${esc(st)}</span>`);
+  if (e.type) tags.push(`<span class="badge on">${esc(e.type)}</span>`);
+  if (e.risk === 'high') tags.push('<span class="badge off">高危</span>');
+  return tags.join(' ');
+}
+
+/** 从「清单 JSON + 文件 JSON」两个编辑框解析出 {manifest, files}。 */
+function parseManifestFiles(body) {
+  const mtxt = ($('#hubManifest') || {}).value;
+  const ftxt = ($('#hubFiles') || {}).value;
+  let manifest, files = [];
+  try { manifest = JSON.parse(mtxt); } catch (e) { return { err: '清单 JSON 语法错误：' + e.message }; }
+  if (ftxt && ftxt.trim()) {
+    try { files = JSON.parse(ftxt); } catch (e) { return { err: '文件 JSON 语法错误：' + e.message }; }
+    if (!Array.isArray(files)) return { err: '文件必须是 [{path, content}] 数组' };
+  }
+  return { manifest, files };
+}
+function hubMsg(body, kind, text) {
+  const el = $('#hubMsg'); if (!el) return;
+  el.className = 'hint ' + (kind === 'ok' ? 'ok' : kind === 'err' ? 'err' : 'warn');
+  el.innerHTML = esc(text);
+}
+
+async function pageExtensionHub() {
+  content.innerHTML = '<h2>扩展中心</h2>';
+  mountExtHub();
+}
+
+/* ---------------- 扩展中心（列表 + 安装） ---------------- */
+async function subExtCenter(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.EXT_INDEX);
+  if (!r.ok) { body.innerHTML = '<div class="err">' + esc(r.error) + '</div>'; return; }
+  const list = r.extensions || [];
+  const appVer = r.appVersion || '?';
+  body.innerHTML = `
+    <div class="row" style="flex-wrap:wrap;gap:8px;margin-bottom:10px">
+      <span class="badge on">扩展 ${list.length}</span>
+      <span class="badge on">已安装 ${list.filter((e) => e.owned !== false).length}</span>
+      <span class="badge off">已有配置 ${list.filter((e) => e.owned === false).length}</span>
+      <span class="badge on">应用版本 ${esc(appVer)}</span>
+    </div>
+    <div class="section">
+      <h3>安装扩展（粘贴统一清单）</h3>
+      <div class="hint">支持 skill / mcp / workflow / theme / prompt 类型的统一扩展清单。校验与依赖解析全部在主进程完成；文件内容以 UTF-8 文本内联（二进制请用市场下载通道）。</div>
+      <textarea id="hubManifest" rows="9" placeholder='{"schemaVersion":1,"id":"ext:demo","name":"示例","version":"1.0.0","type":"skill","entry":{"ref":{"id":"s_demo","name":"示例","trigger":{"mode":"always"},"prompt":"x","tools":[]}},"files":[{"path":"main.js","size":1}]}' style="width:100%;font-family:monospace"></textarea>
+      <div class="hint" style="margin-top:4px">扩展文件（可留空，JSON 数组 <code>[{path, content}]</code>；content 为 UTF-8 文本）</div>
+      <textarea id="hubFiles" rows="4" placeholder='[{"path":"main.js","content":"console.log(1)"}]' style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn sec" id="hubCheck">校验清单</button>
+        <button class="btn sec" id="hubResolve">解析依赖</button>
+        <button class="btn" id="hubInstall">安装</button>
+      </div>
+      <div class="hint" id="hubMsg"></div>
+    </div>
+    <div class="section"><h3>全部扩展</h3>
+      ${list.length ? list.map((e) => `
+        <div class="card" style="margin-top:8px">
+          <div class="k">${esc(e.name || e.id)} <small>${esc(e.id)}</small></div>
+          <div class="hint">版本 ${esc(e.version || '?')}｜来源 ${esc(e.source || (e.owned === false ? '已有配置' : '—'))}</div>
+          <div class="row" style="gap:6px;flex-wrap:wrap;margin:4px 0">${extBadges(e)}</div>
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <button class="btn sec" data-ed="${esc(e.id)}">详情</button>
+            ${e.owned !== false ? `
+              <button class="btn sec" data-e-toggle="${esc(e.id)}" data-on="${e.status === 'enabled' ? '0' : '1'}">${e.status === 'enabled' ? '禁用' : '启用'}</button>
+              <button class="btn sec" data-e-del="${esc(e.id)}">卸载</button>` : '<span class="hint">由对应模块管理</span>'}
+          </div>
+        </div>`).join('') : '<div class="hint">还没有扩展。粘贴上面的清单即可安装。</div>'}
+    </div>`;
+
+  $('#hubCheck').onclick = async () => {
+    const p = parseManifestFiles(body); if (p.err) return hubMsg(body, 'err', p.err);
+    const res = await invoke(C.EXT_VALIDATE_MANIFEST, { payload: p.manifest });
+    if (res.ok) hubMsg(body, 'ok', '清单合法：' + (res.manifest && res.manifest.id));
+    else hubMsg(body, 'err', '校验失败：' + (res.errors || []).join('；'));
+  };
+  $('#hubResolve').onclick = async () => {
+    const p = parseManifestFiles(body); if (p.err) return hubMsg(body, 'err', p.err);
+    const res = await invoke(C.EXT_RESOLVE, { manifest: p.manifest });
+    if (res.ok) hubMsg(body, 'ok', '依赖/兼容通过：缺失 ' + (res.missing || []).length + '，冲突 ' + (res.conflicts || []).length + '，警告 ' + (res.warnings || []).length);
+    else hubMsg(body, 'err', '解析未通过：' + (res.errors || []).join('；'));
+  };
+  $('#hubInstall').onclick = async () => {
+    const p = parseManifestFiles(body); if (p.err) return hubMsg(body, 'err', p.err);
+    const v = await invoke(C.EXT_VALIDATE_MANIFEST, { payload: p.manifest });
+    if (!v.ok) return hubMsg(body, 'err', '清单校验失败：' + (v.errors || []).join('；'));
+    const rs = await invoke(C.EXT_RESOLVE, { manifest: p.manifest });
+    if (!rs.ok) return hubMsg(body, 'err', '依赖/兼容未通过：' + (rs.errors || []).join('；'));
+    const ir = await invoke(C.EXT_INSTALL, { manifest: p.manifest, files: p.files || [] });
+    if (!ir.ok) return hubMsg(body, 'err', '安装失败：' + esc(ir.error || ''));
+    hubMsg(body, 'ok', '安装成功：' + esc(p.manifest.id));
+    subExtCenter(body);
+  };
+  body.querySelectorAll('[data-ed]').forEach((b) => b.onclick = () => { extDetailId = b.dataset.ed; SUBTABS.extensionHub.active = 'detail'; mountExtHub(); });
+  body.querySelectorAll('[data-e-toggle]').forEach((b) => b.onclick = async () => {
+    const r = await invoke(b.dataset.on === '1' ? C.EXT_ENABLE : C.EXT_DISABLE, { id: b.dataset.eToggle });
+    if (r.ok) subExtCenter(body); else alert(r.error);
+  });
+  body.querySelectorAll('[data-e-del]').forEach((b) => b.onclick = async () => {
+    if (!confirm('卸载扩展 ' + b.dataset.eDel + '？仅删除本扩展拥有的文件。')) return;
+    const r = await invoke(C.EXT_UNINSTALL, { id: b.dataset.eDel });
+    if (r.ok) subExtCenter(body); else alert(r.error);
+  });
+}
+
+/* ---------------- 扩展详情 ---------------- */
+async function subExtDetail(body) {
+  body.innerHTML = `
+    <div class="row" style="gap:8px;margin-bottom:10px">
+      <input id="extId" placeholder="扩展 id，如 ext:demo" style="min-width:240px" value="${esc(extDetailId)}" />
+      <button class="btn" id="extQuery">查询</button>
+    </div>
+    <div id="extBody"><div class="hint">输入扩展 id 后点「查询」。</div></div>`;
+  const q = async () => {
+    const id = $('#extId').value.trim(); if (!id) return;
+    const r = await invoke(C.EXT_DETAIL, { id });
+    if (!r.ok) { $('#extBody').innerHTML = '<div class="err">' + esc(r.error) + '</div>'; return; }
+    const e = r.entry || r.detail || {};
+    const m = e.manifest || {};
+    $('#extBody').innerHTML = `
+      <div class="card">
+        <div class="k">${esc(e.name || e.id)} <small>${esc(e.id)}</small></div>
+        <div class="hint">版本 ${esc(e.version || '?')}｜类型 ${esc(e.type || '?')}｜状态 ${esc(e.status || '?')}｜来源 ${esc(e.source || '—')}</div>
+        ${extBadges(e)}
+        ${e.permissions && e.permissions.length ? '<div class="hint">权限：' + e.permissions.map((p) => esc(typeof p === 'string' ? p : p.id)).join('、') + '</div>' : ''}
+        ${e.dependencies && e.dependencies.length ? '<div class="hint">依赖：' + e.dependencies.map((d) => esc(d.id + '@' + (d.version || '*'))).join('、') + '</div>' : ''}
+        ${e.previousVersions && e.previousVersions.length ? '<div class="hint">历史版本：' + esc(e.previousVersions.join('、')) + '</div>' : ''}
+        <div class="hint" style="margin-top:6px">Feiyu 兼容：${esc(e.feiyuCompatibility || m.feiyuCompatibility || '—')}｜API 兼容：${esc(e.apiCompatibility || m.apiCompatibility || '—')}</div>
+      </div>
+      <div class="section"><h3>清单（原始）</h3><pre style="white-space:pre-wrap;word-break:break-all">${esc(JSON.stringify(m, null, 2))}</pre></div>`;
+  };
+  $('#extQuery').onclick = q;
+  if (extDetailId) q();
+}
+
+/* ---------------- 扩展管理（启用/禁用/卸载/升级/回滚/计划移除） ---------------- */
+async function subExtManage(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const r = await invoke(C.EXT_INDEX);
+  if (!r.ok) { body.innerHTML = '<div class="err">' + esc(r.error) + '</div>'; return; }
+  const installed = (r.extensions || []).filter((e) => e.owned !== false);
+  body.innerHTML = `
+    <div class="section"><h3>已安装扩展（${installed.length}）</h3>
+      ${installed.length ? installed.map((e) => `
+        <div class="card" style="margin-top:8px">
+          <div class="k">${esc(e.name || e.id)} <small>${esc(e.id)}</small></div>
+          <div class="row" style="gap:6px;flex-wrap:wrap;margin:4px 0">${extBadges(e)}</div>
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <button class="btn sec" data-m-toggle="${esc(e.id)}" data-on="${e.status === 'enabled' ? '0' : '1'}">${e.status === 'enabled' ? '禁用' : '启用'}</button>
+            <button class="btn sec" data-m-del="${esc(e.id)}">卸载</button>
+            <button class="btn sec" data-m-plan="${esc(e.id)}">计划移除预览</button>
+            <button class="btn sec" data-m-rollback="${esc(e.id)}" ${e.previousVersions && e.previousVersions.length ? '' : 'disabled'}>回滚</button>
+          </div>
+          <div class="hint" id="mPlan_${esc(e.id)}"></div>
+          <details style="margin-top:6px"><summary>升级（粘贴新版本清单）</summary>
+            <textarea id="up_${esc(e.id)}" rows="5" placeholder='{"schemaVersion":1,"id":"' + esc(e.id) + '","name":"...","version":"2.0.0","type":"' + esc(e.type) + '","entry":{"ref":{...}},"files":[]}' style="width:100%;font-family:monospace"></textarea>
+            <div class="row" style="margin-top:6px"><button class="btn" data-m-up="${esc(e.id)}">升级此扩展</button></div>
+          </details>
+        </div>`).join('') : '<div class="hint">还没有已安装扩展。</div>'}
+    </div>`;
+
+  body.querySelectorAll('[data-m-toggle]').forEach((b) => b.onclick = async () => {
+    const rr = await invoke(b.dataset.on === '1' ? C.EXT_ENABLE : C.EXT_DISABLE, { id: b.dataset.mToggle });
+    if (rr.ok) subExtManage(body); else alert(rr.error);
+  });
+  body.querySelectorAll('[data-m-del]').forEach((b) => b.onclick = async () => {
+    if (!confirm('卸载 ' + b.dataset.mDel + '？仅删除本扩展拥有的文件。')) return;
+    const rr = await invoke(C.EXT_UNINSTALL, { id: b.dataset.mDel });
+    if (rr.ok) subExtManage(body); else alert(rr.error);
+  });
+  body.querySelectorAll('[data-m-plan]').forEach((b) => b.onclick = async () => {
+    const rr = await invoke(C.EXT_PLANNED_REMOVAL, { id: b.dataset.mPlan });
+    const el = $('#mPlan_' + b.dataset.mPlan);
+    if (rr.ok) el.innerHTML = '<span class="ok">将移除目录 ' + esc(rr.dir || '') + ' 与文件：' + (rr.files || []).map((f) => esc(f)).join('、') + '</span>';
+    else el.innerHTML = '<span class="err">' + esc(rr.error) + '</span>';
+  });
+  body.querySelectorAll('[data-m-rollback]').forEach((b) => b.onclick = async () => {
+    if (!confirm('回滚 ' + b.dataset.mRollback + ' 到上一版本？')) return;
+    const rr = await invoke(C.EXT_ROLLBACK, { id: b.dataset.mRollback });
+    if (rr.ok) subExtManage(body); else alert(rr.error);
+  });
+  body.querySelectorAll('[data-m-up]').forEach((b) => b.onclick = async () => {
+    const id = b.dataset.mUp;
+    let manifest; try { manifest = JSON.parse($('#up_' + id).value); } catch (e) { alert('新清单 JSON 错误：' + e.message); return; }
+    const rr = await invoke(C.EXT_UPGRADE, { id, manifest, files: [] });
+    if (rr.ok) subExtManage(body); else alert(rr.error);
+  });
+}
+
+/* ---------------- 权限中心（目录 + 授权状态 + 拦截日志） ---------------- */
+async function subExtPermission(body) {
+  body.innerHTML = '<div class="hint">加载中…</div>';
+  const [cat, st] = await Promise.all([invoke(C.EXT_PERMISSIONS), invoke(C.EXT_PERMISSION_STATE)]);
+  const catalog = (cat && cat.catalog) || [];
+  const grants = (st && st.grants) || [];
+  const grantedIds = new Set(grants.map((g) => g.id));
+  const blocked = (st && st.blocked) || [];
+  const calls = (st && st.calls) || [];
+  body.innerHTML = `
+    <div class="section"><h3>权限目录与授权</h3>
+      <div class="hint">最小权限原则：扩展只在被显式授权的作用域内才能调用对应能力；未授权调用在运行时被拦截并记录（本机无 OS 级沙箱，拦截靠进程内强制校验）。</div>
+      ${catalog.map((p) => `
+        <div class="card" style="margin-top:8px">
+          <div class="k">${esc(p.id)} <span class="badge ${p.risk === 'high' ? 'off' : 'on'}">风险 ${esc(p.risk || 'low')}</span></div>
+          <div class="hint">${esc(p.description || '')}</div>
+          <div class="row" style="gap:6px;margin-top:6px">
+            <button class="btn ${grantedIds.has(p.id) ? 'sec' : ''}" data-p-grant="${esc(p.id)}">${grantedIds.has(p.id) ? '已授权（点击撤销）' : '授权'}</button>
+            ${grantedIds.has(p.id) ? `<button class="btn sec" data-p-rev="${esc(p.id)}">撤销</button>` : ''}
+          </div>
+        </div>`).join('')}
+    </div>
+    <div class="section"><h3>运行时拦截记录（${blocked.length}）</h3>
+      ${blocked.length ? blocked.slice(-20).reverse().map((c) => `<div class="err" style="padding:3px 0">${esc(c.ts || '')} ${esc(c.id)}${c.scope ? '(' + esc(c.scope) + ')' : ''}：${esc(c.detail || '已拦截')}</div>`).join('') : '<div class="ok">暂无拦截。</div>'}
+    </div>
+    <div class="section"><h3>近期调用（${calls.length}）</h3>
+      ${calls.length ? calls.slice(-20).reverse().map((c) => `<div class="hint" style="padding:2px 0">${esc(c.ts || '')} ${esc(c.id)} ${c.allowed ? '✅' : '⛔'} ${esc(c.detail || '')}</div>`).join('') : '<div class="hint">暂无调用。</div>'}
+    </div>`;
+
+  body.querySelectorAll('[data-p-grant]').forEach((b) => b.onclick = async () => {
+    const rr = await invoke(C.EXT_PERMISSION_GRANT, { id: b.dataset.pGrant, source: 'user' });
+    if (rr.ok) subExtPermission(body); else alert(rr.error);
+  });
+  body.querySelectorAll('[data-p-rev]').forEach((b) => b.onclick = async () => {
+    const rr = await invoke(C.EXT_PERMISSION_REVOKE, { id: b.dataset.pRev });
+    if (rr.ok) subExtPermission(body); else alert(rr.error);
+  });
+}
+
+/* ---------------- 开发者工具（静态检查 / Dry Run / MCP 受控运行） ---------------- */
+async function subExtDev(body) {
+  body.innerHTML = `
+    <div class="section">
+      <h3>静态检查（不执行任何脚本）</h3>
+      <textarea id="devStatic" rows="6" placeholder='粘贴扩展清单 JSON' style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="margin-top:6px"><button class="btn" id="devStaticRun">运行静态检查</button></div>
+      <div id="devStaticOut"></div>
+    </div>
+    <div class="section">
+      <h3>Dry Run（按类型模拟执行）</h3>
+      <textarea id="devDry" rows="6" placeholder='粘贴扩展清单 JSON' style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="margin-top:6px"><button class="btn" id="devDryRun">运行 Dry Run</button></div>
+      <div id="devDryOut"></div>
+    </div>
+    <div class="section">
+      <h3>MCP 受控运行（stdio / 远程，需授权）</h3>
+      <div id="devMcpList"></div>
+      <div class="hint" style="margin-top:6px">启动一个 MCP 服务（JSON：<code>{"name":"...","server":{...}}</code>）。命令以结构化参数启动，绝不做 shell 拼接；shell 解释器与高危模式会被拒绝。</div>
+      <textarea id="devMcpStart" rows="5" placeholder='{"name":"demo","server":{"transport":"stdio","command":"npx","argv":["-y","demo-mcp"]}}' style="width:100%;font-family:monospace"></textarea>
+      <div class="row" style="margin-top:6px"><label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="devMcpAck" /> 我已确认该服务为可信来源（高危模式需勾选）</label></div>
+      <div class="row" style="margin-top:6px"><button class="btn" id="devMcpStartBtn">启动</button></div>
+      <div id="devMcpMsg"></div>
+    </div>`;
+
+  const renderMcp = async () => {
+    const lr = await invoke(C.EXT_MCP_LIST);
+    const running = (lr && lr.running) || [];
+    $('#devMcpList').innerHTML = running.length ? running.map((s) => `
+      <div class="card" style="margin-top:6px">
+        <div class="k">${esc(s.name)} <small>${esc(s.id)}</small></div>
+        <div class="hint">状态 ${esc(s.status)}｜传输 ${esc(s.transport || '?')}｜健康 ${esc(s.health || '?')}${s.risk === 'high' ? '｜⚠ 高危' : ''}</div>
+        <div class="row" style="gap:6px;margin-top:6px">
+          <button class="btn sec" data-mcp-stop="${esc(s.id)}">停止</button>
+          <button class="btn sec" data-mcp-health="${esc(s.id)}">健康检查</button>
+        </div>
+      </div>`).join('') : '<div class="hint">当前没有运行中的 MCP 服务。</div>';
+    $('#devMcpList').querySelectorAll('[data-mcp-stop]').forEach((b) => b.onclick = async () => {
+      await invoke(C.EXT_MCP_STOP, { id: b.dataset.mcpStop }); renderMcp();
+    });
+    $('#devMcpList').querySelectorAll('[data-mcp-health]').forEach((b) => b.onclick = async () => {
+      const hr = await invoke(C.EXT_MCP_HEALTH, { id: b.dataset.mcpHealth });
+      alert((hr && hr.ok ? '健康：' : '不健康：') + (hr && (hr.detail || hr.error || '')));
+    });
+  };
+  await renderMcp();
+
+  $('#devStaticRun').onclick = async () => {
+    let m; try { m = JSON.parse($('#devStatic').value); } catch (e) { $('#devStaticOut').innerHTML = '<div class="err">JSON 错误：' + esc(e.message) + '</div>'; return; }
+    const rr = await invoke(C.EXT_TEST_STATIC, { manifest: m });
+    const rep = (rr && rr.report) || {};
+    const items = rep.items || [];
+    $('#devStaticOut').innerHTML = items.length ? items.map((i) => `<div class="${i.status === 'fail' ? 'err' : i.status === 'warn' ? 'warn' : 'ok'}" style="padding:2px 0">[${esc(i.status)}] ${esc(i.name)} ${esc(i.detail || '')}</div>`).join('') : '<div class="hint">无结果。</div>';
+  };
+  $('#devDryRun').onclick = async () => {
+    let m; try { m = JSON.parse($('#devDry').value); } catch (e) { $('#devDryOut').innerHTML = '<div class="err">JSON 错误：' + esc(e.message) + '</div>'; return; }
+    const rr = await invoke(C.EXT_TEST_DRYRUN, { manifest: m });
+    const items = (rr && rr.items) || [];
+    $('#devDryOut').innerHTML = items.length ? items.map((i) => `<div class="${i.status === 'fail' ? 'err' : i.status === 'warn' ? 'warn' : 'ok'}" style="padding:2px 0">[${esc(i.status)}] ${esc(i.name)} ${esc(i.detail || '')}</div>`).join('') : '<div class="hint">无结果。</div>';
+  };
+  $('#devMcpStartBtn').onclick = async () => {
+    let payload; try { payload = JSON.parse($('#devMcpStart').value); } catch (e) { $('#devMcpMsg').innerHTML = '<div class="err">JSON 错误：' + esc(e.message) + '</div>'; return; }
+    const rr = await invoke(C.EXT_MCP_START, { name: payload.name, server: payload.server, ackHighRisk: $('#devMcpAck').checked });
+    if (rr.ok) { $('#devMcpMsg').innerHTML = '<span class="ok">已启动：' + esc(payload.name) + '</span>'; renderMcp(); }
+    else $('#devMcpMsg').innerHTML = '<span class="err">' + esc(rr.error || '启动失败') + '</span>';
+  };
 }
 
 /* ---------------- E. 技能树（分类 + 冲突） ---------------- */
@@ -2173,7 +2489,7 @@ async function pageConsole() {
     out.appendChild(div);
     out.scrollTop = out.scrollHeight;
   }
-  printSys('肥鱼本地终端已就绪。输入 help 查看内置命令，其余命令按本机 Shell 执行。', 'sys');
+  printSys('玄枢本地终端已就绪。输入 help 查看内置命令，其余命令按本机 Shell 执行。', 'sys');
 
   // ---------- 实时状态监控 ----------
   function setCard(svc, state, stateText, meta) {

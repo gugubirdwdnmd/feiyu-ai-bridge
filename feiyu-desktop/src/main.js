@@ -110,7 +110,7 @@ function createWindow() {
   const icon = resolveWindowIcon();
   win = new BrowserWindow({
     width: 1120, height: 740, minWidth: 920, minHeight: 600,
-    title: '肥鱼桌面控制中心',
+    title: '玄枢 XUANSHU',
     icon: icon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

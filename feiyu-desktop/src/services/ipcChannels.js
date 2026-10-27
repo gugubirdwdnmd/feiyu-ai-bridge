@@ -171,6 +171,30 @@ const CHANNELS = {
   QQ_BACKEND_HEALTH: 'qqbackend:health',
   QQ_BACKEND_LOGS: 'qqbackend:logs',
   SNOWLUMA_DETECT: 'snowluma:detect',
+
+  // ===== 模块 1.4：Feiyu Extension Hub（统一扩展管理） =====
+  EXT_INDEX: 'ext:index',
+  EXT_DETAIL: 'ext:detail',
+  EXT_DISCOVER: 'ext:discover',
+  EXT_VALIDATE_MANIFEST: 'ext:validateManifest',
+  EXT_RESOLVE: 'ext:resolve',
+  EXT_INSTALL: 'ext:install',
+  EXT_ENABLE: 'ext:enable',
+  EXT_DISABLE: 'ext:disable',
+  EXT_UPGRADE: 'ext:upgrade',
+  EXT_UNINSTALL: 'ext:uninstall',
+  EXT_ROLLBACK: 'ext:rollback',
+  EXT_PLANNED_REMOVAL: 'ext:plannedRemoval',
+  EXT_PERMISSIONS: 'ext:permissions',
+  EXT_PERMISSION_GRANT: 'ext:permissionGrant',
+  EXT_PERMISSION_REVOKE: 'ext:permissionRevoke',
+  EXT_PERMISSION_STATE: 'ext:permissionState',
+  EXT_TEST_STATIC: 'ext:testStatic',
+  EXT_TEST_DRYRUN: 'ext:testDryrun',
+  EXT_MCP_LIST: 'ext:mcp:list',
+  EXT_MCP_START: 'ext:mcp:start',
+  EXT_MCP_STOP: 'ext:mcp:stop',
+  EXT_MCP_HEALTH: 'ext:mcp:health',
 };
 
 /**
@@ -556,6 +580,54 @@ function validate(channel, args) {
       return { ok: true };
     case CHANNELS.SNOWLUMA_DETECT:
       if (args != null && args.dir != null && !isString(args.dir)) return { ok: false, error: 'dir 必须是 string' };
+      return { ok: true };
+
+    // —————————— 模块 1.4：Extension Hub ——————————
+    case CHANNELS.EXT_INDEX:
+    case CHANNELS.EXT_DISCOVER:
+    case CHANNELS.EXT_PERMISSIONS:
+    case CHANNELS.EXT_PERMISSION_STATE:
+    case CHANNELS.EXT_MCP_LIST:
+      return { ok: true };
+    case CHANNELS.EXT_DETAIL:
+    case CHANNELS.EXT_ENABLE:
+    case CHANNELS.EXT_DISABLE:
+    case CHANNELS.EXT_UNINSTALL:
+    case CHANNELS.EXT_ROLLBACK:
+    case CHANNELS.EXT_PLANNED_REMOVAL:
+    case CHANNELS.EXT_MCP_STOP:
+    case CHANNELS.EXT_MCP_HEALTH:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      return { ok: true };
+    case CHANNELS.EXT_VALIDATE_MANIFEST:
+      if (!isObject(args)) return { ok: false, error: '需要 {payload}' };
+      if (typeof args.payload !== 'string' && !isObject(args.payload)) return { ok: false, error: 'payload 必须是对象或 JSON 字符串' };
+      return { ok: true };
+    case CHANNELS.EXT_RESOLVE:
+      if (!isObject(args) || !isObject(args.manifest)) return { ok: false, error: '需要 {manifest: object}' };
+      return { ok: true };
+    case CHANNELS.EXT_INSTALL:
+      if (!isObject(args) || !isObject(args.manifest)) return { ok: false, error: '需要 {manifest: object}' };
+      if (args.files != null && !Array.isArray(args.files)) return { ok: false, error: 'files 必须是数组' };
+      return { ok: true };
+    case CHANNELS.EXT_UPGRADE:
+      if (!isObject(args) || !isString(args.id) || !isObject(args.manifest)) return { ok: false, error: '需要 {id: string, manifest: object}' };
+      if (args.files != null && !Array.isArray(args.files)) return { ok: false, error: 'files 必须是数组' };
+      return { ok: true };
+    case CHANNELS.EXT_PERMISSION_GRANT:
+    case CHANNELS.EXT_PERMISSION_REVOKE:
+      if (!isObject(args) || !isString(args.id)) return { ok: false, error: '需要 {id: string}' };
+      if (args.scope != null && !isString(args.scope)) return { ok: false, error: 'scope 必须是 string' };
+      return { ok: true };
+    case CHANNELS.EXT_TEST_STATIC:
+      if (!isObject(args) || !isObject(args.manifest)) return { ok: false, error: '需要 {manifest: object}' };
+      return { ok: true };
+    case CHANNELS.EXT_TEST_DRYRUN:
+      if (!isObject(args) || !isObject(args.manifest)) return { ok: false, error: '需要 {manifest: object}' };
+      return { ok: true };
+    case CHANNELS.EXT_MCP_START:
+      if (!isObject(args) || !isString(args.name) || !isObject(args.server)) return { ok: false, error: '需要 {name: string, server: object}' };
+      if (args.ackHighRisk != null && typeof args.ackHighRisk !== 'boolean') return { ok: false, error: 'ackHighRisk 必须是 boolean' };
       return { ok: true };
 
     default:

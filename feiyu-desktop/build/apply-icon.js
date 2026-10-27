@@ -58,7 +58,7 @@ function main() {
   ok('rcedit: ' + rcedit);
 
   const targets = [
-    ['安装版主程序', path.join(DIST, 'win-unpacked', '肥鱼桌面控制中心.exe')],
+    ['安装版主程序', path.join(DIST, 'win-unpacked', '玄枢 XUANSHU.exe')],
   ];
   for (const [name, file] of targets) {
     if (!fs.existsSync(file)) { bad(name + ' 不存在: ' + file); continue; }

@@ -41,6 +41,14 @@ const { redactText } = require('../services/redact');
 const { dialog, app } = require('electron');
 const { createTerminalManager } = require('../services/terminalService');
 const { createLogTailer } = require('../services/logTailService');
+// —— Feiyu 1.4：Extension Hub（统一扩展管理）——
+const extensionManifest = require('../services/extensionManifest');
+const extensionRegistry = require('../services/extensionRegistry');
+const dependencyResolver = require('../services/dependencyResolver');
+const permissionService = require('../services/permissionService');
+const extensionTestService = require('../services/extensionTestService');
+const extensionLifecycle = require('../services/extensionLifecycle');
+const extensionMcpRuntime = require('../services/extensionMcpRuntime');
 
 /** 生成不可逆的展示用掩码：仅暴露首尾少量字符，绝不回传完整密钥。 */
 function maskSecret(v) {
@@ -1101,6 +1109,8 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send, we
     let mcpCount = 0;
     let workflowCount = 0;
     let isCheckout = false;
+    let extCount = 0;
+    let extEnabled = 0;
     if (d) {
       try { providerCount = providerService.list(d, configService.readRaw(d).data).providers.length; } catch (_) {}
       try { skillsCount = skillService.list(d).skills.length; } catch (_) {}
@@ -1108,6 +1118,8 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send, we
       try { workflowCount = workflowService.list(d).workflows.length; } catch (_) {}
       try { isCheckout = botDirResolver.isSourceCheckout(d); } catch (_) {}
     }
+    // 1.4 扩展中心：扩展注册表位于 userData（与 botDir 分离），独立统计
+    try { const reg = loadReg(); extCount = reg.extensions.length; extEnabled = reg.extensions.filter((e) => e.status === 'enabled').length; } catch (_) {}
     return diagnosticService.collectDiagnostics({
       appVersion: getAppVersion(),
       electronVersion: (process.versions && process.versions.electron) || '',
@@ -1124,6 +1136,8 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send, we
       skillsCount,
       mcpCount,
       workflowCount,
+      extCount,
+      extEnabled,
       logs: (() => { try { return logService.readTail(d, 50).lines.map((l) => ({ level: 'info', message: l })); } catch (_) { return []; } })(),
     });
   };
@@ -1453,6 +1467,188 @@ function registerHandlers({ ipcMain, getUserDataDir, getAppVersion, pm, send, we
         + '本工具不打包、不内嵌、不自动再分发其源码或二进制，仅使用你指定的本地安装目录。',
     };
   });
+
+  // ==================== 1.4 Extension Hub（统一扩展管理） ====================
+  const extRegistryFile = () => path.join(getUserDataDir(), extensionRegistry.REGISTRY_FILE);
+  const extPermFile = () => path.join(getUserDataDir(), permissionService.STATE_FILE);
+  const loadReg = () => extensionRegistry.loadRegistry(extRegistryFile());
+  const saveReg = (reg) => extensionRegistry.saveRegistry(extRegistryFile(), reg);
+  const loadPerm = () => permissionService.loadState(extPermFile());
+  const savePerm = (st) => permissionService.saveState(extPermFile(), st);
+  // 扩展操作统一落到 userData 通知中心（与 botDir 分离；绝不写机器人日志）
+  const extNote = (title, message, level) => pushNote({ title, message, level: level || 'info', source: 'extension-hub' });
+  const mcpRuntime = extensionMcpRuntime.createMcpRuntime({ permissionService, now: () => Date.now() });
+  const legacyAdapters = extensionLifecycle.defaultLegacyAdapters();
+  const appVer = () => getAppVersion();
+
+  ipcMain.handle(CHANNELS.EXT_INDEX, () => {
+    const reg = loadReg();
+    const d = needBotDir();
+    const discovered = d ? extensionRegistry.discover(d) : [];
+    return { ok: true, extensions: extensionRegistry.listAll(reg, discovered), appVersion: appVer() };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_DISCOVER, () => {
+    const d = needBotDir(); if (!d) return { ok: false, error: '未配置机器人目录', discovered: [] };
+    return { ok: true, discovered: extensionRegistry.discover(d) };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_DETAIL, (e, args) => {
+    const v = validate(CHANNELS.EXT_DETAIL, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    const e2 = extensionRegistry.getEntry(reg, args.id);
+    if (e2) return { ok: true, extension: e2 };
+    const d = needBotDir();
+    const disc = d ? extensionRegistry.discover(d).find((x) => x.id === args.id) : null;
+    return disc ? { ok: true, extension: disc } : { ok: false, error: '未找到扩展: ' + args.id };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_VALIDATE_MANIFEST, (e, args) => {
+    const v = validate(CHANNELS.EXT_VALIDATE_MANIFEST, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = extensionManifest.validateManifest(args.payload, { expectedAppVersion: appVer() });
+    return { ok: r.ok, errors: r.errors, warnings: r.warnings, manifest: r.manifest || null };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_RESOLVE, (e, args) => {
+    const v = validate(CHANNELS.EXT_RESOLVE, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    const d = needBotDir();
+    const discovered = d ? extensionRegistry.discover(d) : [];
+    const index = extensionRegistry.buildIndex(reg, discovered);
+    return dependencyResolver.resolve(args.manifest, index, { expectedAppVersion: appVer() });
+  });
+
+  ipcMain.handle(CHANNELS.EXT_INSTALL, async (e, args) => {
+    const v = validate(CHANNELS.EXT_INSTALL, args); if (!v.ok) return { ok: false, error: v.error };
+    const vm = extensionManifest.validateManifest(args.manifest, { expectedAppVersion: appVer() });
+    if (!vm.ok) return { ok: false, error: '清单校验失败: ' + vm.errors.join('；'), errors: vm.errors };
+    const reg = loadReg();
+    const d = needBotDir();
+    const discovered = d ? extensionRegistry.discover(d) : [];
+    const index = extensionRegistry.buildIndex(reg, discovered);
+    const pre = dependencyResolver.resolve(vm.manifest, index, { expectedAppVersion: appVer() });
+    if (!pre.ok) return { ok: false, error: '依赖/兼容检查未通过: ' + pre.errors.join('；'), resolve: pre };
+    const buffers = new Map();
+    for (const f of (args.files || [])) buffers.set(f.path, f.content != null ? f.content : '');
+    const r = await extensionLifecycle.install({
+      registry: reg, registryFile: extRegistryFile(), manifest: vm.manifest,
+      fileBuffers: buffers, userDataDir: getUserDataDir(), botDir: d, legacyAdapters,
+    });
+    if (r.ok) extNote('扩展已安装', vm.manifest.id + ' v' + vm.manifest.version, 'ok');
+    else extNote('扩展安装失败', vm.manifest.id + '：' + (r.error || ''), 'error');
+    return r;
+  });
+
+  ipcMain.handle(CHANNELS.EXT_ENABLE, (e, args) => {
+    const v = validate(CHANNELS.EXT_ENABLE, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    const r = extensionLifecycle.setEnabled({ registry: reg, registryFile: extRegistryFile(), id: args.id, enabled: true, botDir: needBotDir(), legacyAdapters });
+    if (r.ok) extNote('扩展已启用', args.id, 'info');
+    return r;
+  });
+  ipcMain.handle(CHANNELS.EXT_DISABLE, (e, args) => {
+    const v = validate(CHANNELS.EXT_DISABLE, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    const r = extensionLifecycle.setEnabled({ registry: reg, registryFile: extRegistryFile(), id: args.id, enabled: false, botDir: needBotDir(), legacyAdapters });
+    if (r.ok) extNote('扩展已禁用', args.id, 'info');
+    return r;
+  });
+
+  ipcMain.handle(CHANNELS.EXT_UPGRADE, async (e, args) => {
+    const v = validate(CHANNELS.EXT_UPGRADE, args); if (!v.ok) return { ok: false, error: v.error };
+    const vm = extensionManifest.validateManifest(args.manifest, { expectedAppVersion: appVer() });
+    if (!vm.ok) return { ok: false, error: '清单校验失败: ' + vm.errors.join('；') };
+    const reg = loadReg();
+    const buffers = new Map();
+    for (const f of (args.files || [])) buffers.set(f.path, f.content != null ? f.content : '');
+    const r = await extensionLifecycle.upgrade({ registry: reg, registryFile: extRegistryFile(), id: args.id, manifest: vm.manifest, fileBuffers: buffers, userDataDir: getUserDataDir(), botDir: needBotDir(), legacyAdapters });
+    if (r.ok) extNote('扩展已升级', args.id + ' → v' + vm.manifest.version, 'ok');
+    else extNote('扩展升级失败', args.id + '：' + (r.error || ''), 'error');
+    return r;
+  });
+
+  ipcMain.handle(CHANNELS.EXT_UNINSTALL, async (e, args) => {
+    const v = validate(CHANNELS.EXT_UNINSTALL, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    const r = await extensionLifecycle.uninstall({ registry: reg, registryFile: extRegistryFile(), id: args.id, userDataDir: getUserDataDir(), botDir: needBotDir(), legacyAdapters });
+    if (r.ok) extNote('扩展已卸载', args.id, 'info');
+    else extNote('扩展卸载失败', args.id + '：' + (r.error || ''), 'error');
+    return r;
+  });
+
+  ipcMain.handle(CHANNELS.EXT_ROLLBACK, async (e, args) => {
+    const v = validate(CHANNELS.EXT_ROLLBACK, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    const r = await extensionLifecycle.rollback({ registry: reg, registryFile: extRegistryFile(), id: args.id, userDataDir: getUserDataDir(), botDir: needBotDir(), legacyAdapters });
+    if (r.ok) extNote('扩展已回滚', args.id + (r.version ? ' → v' + r.version : ''), 'info');
+    else extNote('扩展回滚失败', args.id + '：' + (r.error || ''), 'error');
+    return r;
+  });
+
+  ipcMain.handle(CHANNELS.EXT_PLANNED_REMOVAL, (e, args) => {
+    const v = validate(CHANNELS.EXT_PLANNED_REMOVAL, args); if (!v.ok) return { ok: false, error: v.error };
+    const reg = loadReg();
+    return extensionLifecycle.plannedRemoval({ registry: reg, id: args.id, userDataDir: getUserDataDir() });
+  });
+
+  ipcMain.handle(CHANNELS.EXT_PERMISSIONS, () => ({ ok: true, catalog: permissionService.getCatalog() }));
+
+  ipcMain.handle(CHANNELS.EXT_PERMISSION_GRANT, (e, args) => {
+    const v = validate(CHANNELS.EXT_PERMISSION_GRANT, args); if (!v.ok) return { ok: false, error: v.error };
+    const st = loadPerm();
+    const r = permissionService.grant(st, args.id, args.scope, args.source || 'user');
+    if (!r.ok) return r;
+    const w = savePerm(r.state); if (!w.ok) return { ok: false, error: w.error };
+    extNote('扩展权限已授权', args.id + (args.scope ? '（' + args.scope + '）' : '（全部）'), 'info');
+    return { ok: true, grants: permissionService.listGrants(r.state) };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_PERMISSION_REVOKE, (e, args) => {
+    const v = validate(CHANNELS.EXT_PERMISSION_REVOKE, args); if (!v.ok) return { ok: false, error: v.error };
+    const st = loadPerm();
+    const r = permissionService.revoke(st, args.id, args.scope);
+    const w = savePerm(r.state); if (!w.ok) return { ok: false, error: w.error };
+    extNote('扩展权限已撤销', args.id + (args.scope ? '（' + args.scope + '）' : '（全部）'), 'info');
+    return { ok: true, grants: permissionService.listGrants(r.state) };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_PERMISSION_STATE, () => {
+    const st = loadPerm();
+    return { ok: true, grants: permissionService.listGrants(st), blocked: permissionService.blockedCalls(st), calls: st.calls.slice(-50) };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_TEST_STATIC, (e, args) => {
+    const v = validate(CHANNELS.EXT_TEST_STATIC, args); if (!v.ok) return { ok: false, error: v.error };
+    return { ok: true, report: extensionTestService.staticCheck(args.manifest) };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_TEST_DRYRUN, async (e, args) => {
+    const v = validate(CHANNELS.EXT_TEST_DRYRUN, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = await extensionTestService.dryRun(args.manifest, { botDir: needBotDir(), fsImpl: fs });
+    return { ok: true, result: r };
+  });
+
+  ipcMain.handle(CHANNELS.EXT_MCP_LIST, () => ({ ok: true, running: mcpRuntime.list() }));
+  ipcMain.handle(CHANNELS.EXT_MCP_START, async (e, args) => {
+    const v = validate(CHANNELS.EXT_MCP_START, args); if (!v.ok) return { ok: false, error: v.error };
+    const permState = loadPerm();
+    const r = await mcpRuntime.start(args.name, args.server, { permissionState: permState, ackHighRisk: !!args.ackHighRisk });
+    if (r.ok) extNote('MCP 服务已启动', args.name, 'ok'); else extNote('MCP 启动被拒', args.name + '：' + (r.error || ''), 'error');
+    return r;
+  });
+  ipcMain.handle(CHANNELS.EXT_MCP_STOP, (e, args) => {
+    const v = validate(CHANNELS.EXT_MCP_STOP, args); if (!v.ok) return { ok: false, error: v.error };
+    const r = mcpRuntime.stop(args.id);
+    if (r.ok) extNote('MCP 服务已停止', args.id, 'info');
+    return r;
+  });
+  ipcMain.handle(CHANNELS.EXT_MCP_HEALTH, (e, args) => {
+    const v = validate(CHANNELS.EXT_MCP_HEALTH, args); if (!v.ok) return { ok: false, error: v.error };
+    return mcpRuntime.health(args.id);
+  });
+
+  // 应用退出时清理受控运行的 MCP 进程
+  if (app && typeof app.on === 'function') { app.on('before-quit', () => { try { mcpRuntime.stopAll(); } catch (_) {} }); }
 }
 
 module.exports = { registerHandlers };

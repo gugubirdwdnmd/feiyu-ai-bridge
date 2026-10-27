@@ -45,7 +45,7 @@ module.exports = async function afterPackIcon(context) {
     return;
   }
   // 主程序 exe：与 package.json 的 productName 一致
-  const exeName = '肥鱼桌面控制中心.exe';
+  const exeName = '玄枢 XUANSHU.exe';
   const exe = path.join(appOutDir, exeName);
   if (!fs.existsSync(exe)) {
     console.warn('  ! afterPack: 未找到 ' + exeName + '，跳过图标注入');

@@ -64,7 +64,7 @@ function runInstaller(targetDir) {
 
 /** 静默卸载。 */
 function runUninstaller(targetDir) {
-  const un = path.join(targetDir, 'Uninstall 肥鱼桌面控制中心.exe');
+  const un = path.join(targetDir, 'Uninstall 玄枢 XUANSHU.exe');
   if (!fs.existsSync(un)) {
     // 退回到目录内任意 Uninstall*.exe
     const items = fs.readdirSync(targetDir).filter((f) => /^uninstall/i.test(f));
@@ -98,9 +98,9 @@ function main() {
   console.log('\n[1] 静默安装');
   const ins = runInstaller(APP_DIR);
   info('安装进程退出码: ' + (ins.status === null ? 'null' : ins.status));
-  const exe = path.join(APP_DIR, '肥鱼桌面控制中心.exe');
+  const exe = path.join(APP_DIR, '玄枢 XUANSHU.exe');
   if (!fs.existsSync(exe)) { bad('安装后未找到主程序: ' + exe); return; }
-  ok('主程序已安装: 肥鱼桌面控制中心.exe');
+  ok('主程序已安装: 玄枢 XUANSHU.exe');
   const fileCount = countFiles(APP_DIR);
   ok('安装目录文件数: ' + fileCount);
 

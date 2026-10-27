@@ -15,6 +15,8 @@ const { safeFetch } = require('./safe_http');
 
 // V13.5：聊天记录解析 + 多模态混合理解（独立模块，零依赖）
 const chatRecordParser = require('./chat_record_parser');
+// V16：被引用消息（引用图片/文本）抽取 —— 纯函数，便于单测（修复「群聊引用图片未正确回复」）
+const quotedMedia = require('./tools/quoted_media');
 
 // V14：Agent 调度层（独立模块；ai_bridge 只做「消息接收 / 安全边界 / Agent 入口 / 结果发送」）
 const agent = require('./agent');
@@ -2673,21 +2675,16 @@ function rememberNote(sessionId, content) {
 function buildSystemPrompt(sessionId) {
   let sys = loadPrompt();
 
-  // 「性格根据群聊改变」：群会话按群号注入群身份/语气/风格覆盖
+  // 群聊与私聊共用同一份人格文件（ai_prompt.txt + 全局 CFG.personality），不做群号级别的性格分流：
+  // 只补充「当前在哪个群」的中性上下文，绝不覆盖语气/风格/主动度等人格设定，确保群聊与私聊人格完全一致。
   const gMatch = /^group_(.+)$/.exec(String(sessionId || ''));
   if (gMatch) {
     const gid = gMatch[1];
     const base = CFG.personality || {};
-    const ov = (base.groups && base.groups[gid]) || {};
-    const name = ov.name || base.name || 'AI 助手';
     const grpName = groupNameCache.get(gid) || '';
-    let pg = '\n\n【当前群聊身份与语气】\n';
-    pg += `你正在 QQ 群「${grpName || gid}」(群号 ${gid}) 里聊天，请自然融入这个群的聊天氛围，语气跟着群友走（群友正经你就正经，群友爱玩梗你就跟着玩）。`;
-    if (ov.style) pg += '\n该群的风格要求：' + ov.style;
-    const humor = ov.humor != null ? ov.humor : base.humor;
-    pg += '\n语气风格：' + (humor ? '轻松活泼、可以开玩笑、偶尔玩梗。' : '稳重克制。');
-    const proactive = ov.proactive != null ? ov.proactive : base.proactive;
-    if (proactive) pg += '\n态度：主动接话、积极互动，不必等被点名才说话。';
+    const name = base.name || 'AI 助手';
+    let pg = '\n\n【当前群聊上下文】\n';
+    pg += `你正在 QQ 群「${grpName || gid}」(群号 ${gid}) 里聊天。`;
     pg += `\n本群中你的名字叫「${name}」。`;
     sys += pg;
   }
@@ -3722,6 +3719,32 @@ function findBufferedMsg(groupId, messageId) {
   return null;
 }
 
+// —— 解析被引用消息的图片与文本（修复「群聊引用图片未正确回复」）——
+// 优先级：① 本地缓冲命中的被引用条目（更快、更可信，已含 imgSegs）
+//         ② 缓冲未命中 → 调 get_msg 拉回被引用消息（取回图片段 + 文本）
+// 返回 { imgSegs:[...], text, fetched }：fetched=true 表示走了 get_msg（用于提示「没拿到图」）。
+// 失败/拉不到都返回空，绝不编造内容。
+async function resolveQuotedMedia(ev, replyId, rpTarget) {
+  let buffered = null;
+  let fetched = null;
+  if (rpTarget) {
+    buffered = rpTarget;
+  } else if (replyId) {
+    try {
+      const r = await napcatCall('get_msg', { message_id: Number(replyId) });
+      if (r && r.data) fetched = r;
+      else log('[引用] get_msg 未返回 data（id=' + replyId + '），按无引用处理');
+    } catch (e) {
+      log('[引用] get_msg 失败（id=' + replyId + '）：' + (e && e.message));
+    }
+  }
+  const imgSegs = quotedMedia.coalesceQuotedImages({ buffered, fetched, maxImages: MAX_IMAGES });
+  let text = '';
+  if (buffered) text = String(buffered.text || '');
+  else if (fetched && fetched.data) text = quotedMedia.textOf(fetched.data.message || fetched.data);
+  return { imgSegs, text, fetched: !!fetched };
+}
+
 // —— 本地规则预筛：全程 0 次 API 调用 ——
 // 返回 { reply, needsJudge, reason, bypassCooldown }
 //   reply=true           → 确定要回（确定性命中，不经 Judge）
@@ -4222,6 +4245,22 @@ async function processReply(ev, o) {
   const videoSegs = segments(ev.message).filter((s) => s && s.type === 'video');
   const crRefs = chatRecordMediaRefs(ev);   // 待处理聊天记录里的图片/视频引用（可能为 null）
 
+  // —— 群聊/私聊「引用图片」修复：解析被引用消息，把它并入视觉与提示 ——
+  // 仅当本条确实引用了某条消息（replyId 存在）才解析；缓冲命中优先，未命中再 get_msg 拉回。
+  // 不去重当前图（base 在前），被引用图在后，保证「图生图 source=1」等既有语义不变。
+  let quoted = { imgSegs: [], text: '', fetched: false };
+  if (o.replyId || o.rpTarget) {
+    try {
+      quoted = await resolveQuotedMedia(ev, o.replyId, o.rpTarget);
+      if (quoted.imgSegs.length) {
+        o.imgSegs = quotedMedia.mergeVisionSegs(o.imgSegs, quoted.imgSegs, MAX_IMAGES);
+        log('[引用] 并入 ' + quoted.imgSegs.length + ' 张被引用图片（fetched=' + quoted.fetched + '）');
+      }
+    } catch (e) {
+      log('[引用] 解析异常（已忽略）: ' + (e && e.message));
+    }
+  }
+
   // —— 内容顺序（保证前缀稳定）：图片 → 群上下文 → 当前文本 → 提示 ——
   const parts = [];
   let imgOK = 0;
@@ -4389,8 +4428,9 @@ async function processReply(ev, o) {
   if (genDoneByAgent) {
     hints.push('图已经画好并发出去了。只用一两句自然的话接一下就行，绝对不要再调用 generate_image 重复画一张，也不要复述画面内容');
   }
-  if (o.rpTarget) {
-    hints.push(`本条是回复「${o.rpTarget.isBot ? '你自己(AI)' : (o.rpTarget.name || '对方')}：${String(o.rpTarget.text).slice(0, 60)}」，按这个语境理解`);
+  if (quoted && quoted.text) {
+    const qName = (o.rpTarget && o.rpTarget.isBot) ? '你自己(AI)' : ((o.rpTarget && o.rpTarget.name) || '对方');
+    hints.push(`本条是回复「${qName}：${quoted.text.slice(0, 60)}」，按这个语境理解`);
   } else if (o.replyId) {
     hints.push('本条引用了某条消息，但引用原文没取到，不确定就别硬猜');
   }
@@ -5387,6 +5427,7 @@ async function handleMessage(ev) {
       id: mid, uid: String(userId), name: senderName(ev),
       text: text || (imgSegs.length ? '[图片]' : ''), time: Date.now(),
       atMe, isBot: false, replyTo: rp ? rp.id : null,
+      imgSegs: imgSegs.slice(),   // 缓存图片段：被他人引用本条时可直接取回（修复「群聊引用图片未正确回复」）
     });
     maybeSummarize(ev.group_id);
     // 群消息按天归档（每日总结的数据源）。只归档群成员的真实文字消息，失败不影响聊天。
@@ -5591,10 +5632,14 @@ async function handleMessage(ev) {
   let privImgs = imgSegs.slice();
   if (!privImgs.length) privImgs = takePendingGroupImages(null, userId);
 
+  // 私聊引用图片修复：解析 reply 段拿 replyId（私聊无群缓冲，靠 get_msg 拉回被引用消息）
+  const rpP = extractReply(rawMsg);
+
   const chatId = genChatId('p' + userId);
   await processReply(ev, {
     sessionId: 'private_' + userId,
     text, imgSegs: privImgs, grpName: '',
+    rpTarget: null, replyId: rpP ? rpP.id : null,
     chatId,
   });
   finalizeChat(chatId, { type: 'private', scope: String(userId), preview: text });

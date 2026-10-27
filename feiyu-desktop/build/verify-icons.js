@@ -317,9 +317,9 @@ function main() {
 
   // 3) 三个产物的 PE 资源：解码内嵌图标，与源图逐像素比对
   const targets = [
-    ['安装版主程序', path.join(DIST, 'win-unpacked', '肥鱼桌面控制中心.exe')],
-    ['NSIS 安装包', path.join(DIST, '肥鱼桌面控制中心-1.1.0-win-x64.exe')],
-    ['便携版', path.join(DIST, '肥鱼桌面控制中心-1.1.0-portable.exe')],
+    ['安装版主程序', path.join(DIST, 'win-unpacked', '玄枢 XUANSHU.exe')],
+    ['NSIS 安装包', path.join(DIST, '玄枢 XUANSHU-1.1.0-win-x64.exe')],
+    ['便携版', path.join(DIST, '玄枢 XUANSHU-1.1.0-portable.exe')],
   ];
   for (const [name, file] of targets) {
     if (!fs.existsSync(file)) { bad(name + ' 文件不存在: ' + file); continue; }
