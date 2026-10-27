@@ -932,7 +932,7 @@ async function pageAbout() {
       <h3>机器人目录</h3><div class="hint">${esc(set.botDir || '未配置（在「机器人运行」或设置中指定）')}</div>
       <div class="row"><button class="btn sec" id="pickBtn2">选择机器人目录…</button></div>
       <h3>说明</h3>
-    <div class="hint">肥鱼桌面控制中心：基于现有 NapCat + OneBot QQ AI 机器人核心，增加图形化管理（配置 / 启动停止 / 人格 / 用量 / 日志 / 导入导出）。不重写机器人业务逻辑，只读/写其真实配置文件。</div>
+    <div class="hint">玄枢 XUANSHU：基于现有 NapCat + OneBot QQ AI 机器人核心，增加图形化管理（配置 / 启动停止 / 人格 / 用量 / 日志 / 导入导出）。不重写机器人业务逻辑，只读/写其真实配置文件。</div>
     <div class="hint">用量数据来自机器人真实记录（memory/usage/*.jsonl 或运行中的 /api/usage），不做任何伪造。</div>
   </div>`;
   $('#pickBtn2').onclick = async () => { const d = await pickBotDir(); if (d) pageAbout(); };

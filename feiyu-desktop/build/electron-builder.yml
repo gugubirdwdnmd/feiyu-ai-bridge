@@ -1,5 +1,5 @@
 appId: com.feiyu.desktop
-productName: 肥鱼桌面控制中心
+productName: 玄枢 XUANSHU
 files:
   - src/**/*
   - renderer/**/*
@@ -21,4 +21,4 @@ nsis:
   # 升级/卸载保留配置；机器人侧的 memory/日志/密钥本就不在安装目录内。
   deleteAppDataOnUninstall: false
 portable:
-  artifactName: 肥鱼桌面控制中心-${version}-portable.${ext}
+  artifactName: 玄枢 XUANSHU-${version}-portable.${ext}

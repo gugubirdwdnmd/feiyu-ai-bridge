@@ -10,6 +10,7 @@ const fs = require('fs');
 const { registerHandlers } = require('./ipc/handlers');
 const { createProcessManager } = require('./services/processService');
 const providerService = require('./services/providerService');
+const { resolveUserDataDir } = require('./services/userDataPath');
 const credentialStore = require('./services/credentialStore');
 const botDirResolver = require('./services/botDirResolver');
 
@@ -38,7 +39,9 @@ async function initCredentialCodecAsync() {
   } catch (_) { return initCredentialCodec(); }
 }
 
-function getUserDataDir() { return app.getPath('userData'); }
+// 显式固定用户数据目录（见 src/services/userDataPath.js）：不随显示名/品牌变化而迁移，
+// 保证 v1.0.0 → 玄枢 XUANSHU 升级时既有数据不丢。
+function getUserDataDir() { return resolveUserDataDir(app.getPath('appData')); }
 function getAppVersion() { return app.getVersion(); }
 
 function isBotDir(p) {
@@ -92,7 +95,7 @@ let win = null;
 function createWindow() {
   win = new BrowserWindow({
     width: 1120, height: 740, minWidth: 920, minHeight: 600,
-    title: '肥鱼桌面控制中心',
+    title: '玄枢 XUANSHU',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

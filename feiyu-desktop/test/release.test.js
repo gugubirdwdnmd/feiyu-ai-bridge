@@ -90,9 +90,11 @@ test('源码不含硬编码本机绝对路径', () => {
   }
 });
 
-test('用户数据与安装目录分离（设置写入 userData）', () => {
+test('用户数据与安装目录分离（设置写入固定 userData 目录，路径不随品牌变化）', () => {
   const main = read('src/main.js');
-  assert.ok(/getPath\('userData'\)/.test(main), '应使用 userData 目录');
+  // 显式固定 userData 路径：用 appData + 固定目录名，而非隐式依赖 productName 派生的 userData。
+  assert.ok(/resolveUserDataDir\(app\.getPath\('appData'\)\)/.test(main), '应使用显式固定 userData 路径');
+  assert.ok(/feiyu-settings\.json/.test(main), '设置应写入 userData/feiyu-settings.json');
   const h = read('src/ipc/handlers.js');
   assert.ok(/getUserDataDir\(\)/.test(h), 'handlers 应通过 userData 存设置/价格');
 });

@@ -1,4 +1,4 @@
-# 肥鱼桌面控制中心（feiyu-desktop）
+# 玄枢 XUANSHU（feiyu-desktop）
 
 基于现有 NapCat + OneBot QQ AI 机器人核心（`ai_bridge.js`）的**图形化管理桌面端**。
 不重写机器人业务逻辑，只做「读/写它的真实配置文件 + 启停进程 + 展示真实用量」。
@@ -71,9 +71,9 @@ npm run package-check   # 打包前静态检查
 
 | 产物 | 形态 | 说明 |
 | --- | --- | --- |
-| `dist/win-unpacked/` | **免安装目录** | 直接运行 `肥鱼桌面控制中心.exe`。 |
-| `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe` | **NSIS 安装包** | 标准安装程序，可选安装目录、可卸载。 |
-| `dist/肥鱼桌面控制中心-0.1.0-portable.exe` | **便携版单文件** | 免安装单文件。 |
+| `dist/win-unpacked/` | **免安装目录** | 直接运行 `玄枢 XUANSHU.exe`。 |
+| `dist/玄枢 XUANSHU-0.1.0-win-x64.exe` | **NSIS 安装包** | 标准安装程序，可选安装目录、可卸载。 |
+| `dist/玄枢 XUANSHU-0.1.0-portable.exe` | **便携版单文件** | 免安装单文件。 |
 
 > `win-unpacked` 与 NSIS 安装版是**两种不同产物**，不能互相替代：
 > 前者是解压即用的目录，后者是自解压安装程序（写注册表/开始菜单/卸载项）。
@@ -98,7 +98,7 @@ CSC_IDENTITY_AUTO_DISCOVERY=false \
 
 | 项 | 实测结果 |
 | --- | --- |
-| NSIS 安装包 | `dist/肥鱼桌面控制中心-0.1.0-win-x64.exe`，115,191,514 字节（≈110 MB），构建退出码 **0** |
+| NSIS 安装包 | `dist/玄枢 XUANSHU-0.1.0-win-x64.exe`，115,191,514 字节（≈110 MB），构建退出码 **0** |
 | 安装 | 静默安装退出码 **0**；安装目录含 exe / `resources/app.asar` / `Uninstall ….exe` / 桌面快捷方式 |
 | 安装后定位 | 自动识别到真实机器人目录（`botDir = D:\NapCat_publish`），无需手动选择 |
 | 卸载 | 退出码 **0**；程序文件全部删除（安装目录清空） |
