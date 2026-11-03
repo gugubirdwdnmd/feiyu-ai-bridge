@@ -1,0 +1,433 @@
+{
+  "_说明": "AI 桥配置模板。复制为 ai_config.json 后按需修改；删掉 ai_config.json 则全部走内置默认值。所有 *_Workflow 支持相对路径（相对本文件所在目录）。",
+  "_字段": "group.mode: 'smart'=智能预筛(推荐) | 'at'=仅被@才回 | 'all'=每条都回",
+  "accessControl": {
+    "_说明": "平台级访问控制（白名单/黑名单）：调模型前问桌面端能力网关。桌面端该实例未配置规则时放行；已配置则按白名单/黑名单裁决；网关不可达时放行（机器人可独立运行）。instanceId 要与桌面端「访问控制」里选的机器人实例一致。",
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:8720/v1/access/check",
+    "instanceId": "napcat",
+    "timeoutMs": 3000
+  },
+  "api": {
+    "baseUrl": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-chat",
+    "reasoningModel": "deepseek-reasoner",
+    "timeoutMs": 90000,
+    "maxRetries": 2
+  },
+  "vision": {
+    "_说明": "看图（多模态）后端，默认 DeepSeek 官方（deepseek-chat 支持图片输入，deepseek-reasoner 不支持）。Key 取 secrets.json 的 apiKey。",
+    "enabled": true,
+    "baseUrl": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-chat",
+    "apiKeyRef": "apiKey",
+    "timeoutMs": 90000
+  },
+  "group": {
+    "allow": true,
+    "mode": "at",
+    "requireAt": true,
+    "replyProbability": 100,
+    "ringSize": 30,
+    "contextSimple": 3,
+    "contextNormal": 8,
+    "contextComplex": 15,
+    "cooldownMs": 3000,
+    "userCooldownMs": 2000,
+    "aggregateMs": 2500,
+    "aiNames": [
+      "deepseek",
+      "小助手"
+    ],
+    "judgeWithAi": false,
+    "topicWindowMs": 120000
+  },
+  "atReply": {
+    "minContext": 8,
+    "moderateThinking": true
+  },
+  "replySplit": {
+    "enabled": true,
+    "maxParts": 3,
+    "minChars": 18,
+    "gapMs": 900
+  },
+  "dailySummary": {
+    "_说明": "群聊每日总结。默认全部关闭；要开自动总结需同时满足 auto=true 且 allowedGroups 非空。",
+    "auto": false,
+    "autoTime": "23:30",
+    "allowedGroups": [],
+    "maxMsgs": 160,
+    "maxChars": 7000,
+    "minUseful": 5,
+    "minUsefulLen": 4,
+    "dedupWindowMs": 90000,
+    "cooldownMs": 20000,
+    "maxOutputChars": 1500
+  },
+  "groupArchive": {
+    "enabled": true,
+    "maxPerDay": 400,
+    "retainDays": 7,
+    "maxBytes": 4194304,
+    "minTextLen": 2,
+    "maxTextLen": 300
+  },
+  "memoryStore": {
+    "_说明": "可管理的长期记忆。autoExtract=false 时只记录明确的指令式内容。",
+    "enabled": true,
+    "autoExtract": false,
+    "maxItems": 500,
+    "maxBytes": 1048576,
+    "defaultTtlDays": 180,
+    "maxTtlDays": 365,
+    "retrieveLimit": 6,
+    "retrieveChars": 900,
+    "minLen": 2,
+    "maxLen": 200
+  },
+  "groupProfile": {
+    "_说明": "V15.2 群友轻量画像（默认关闭）。扩展 memoryStore，不另建存储：以「群号+QQ号」为隔离键，不同群、不同成员绝不混用。只记低敏感且对聊天有帮助的信息（称呼/交流风格/明确兴趣/进行中项目/被纠正过的偏好）；区分「用户明确说过」(stated,高置信) 与「系统推测」(inferred,低置信且注入时标注「（推测）」)。年龄/性别/婚恋/健康/宗教/政治/收入/住址/证件等敏感属性一律拒收，不凭单条消息给成员贴标签。默认不向群内公开任何人的画像；可用 /画像、/画像状态、/画像清空确认 管理自己的画像。 另有 maxTotalBytes（画像总字节上限，默认256KB）：超限时优先淘汰「低置信度+最久未更新」的条目，只限条数不足以控制体积。",
+    "enabled": false,
+    "maxPerUser": 12,
+    "maxLen": 60,
+    "injectLimit": 3,
+    "injectChars": 200,
+    "minIntervalMs": 600000,
+    "minSamples": 3,
+    "ttlDays": 90,
+    "shareToGroup": false,
+    "maxTotalBytes": 262144
+  },
+  "groupDecision": {
+    "_说明": "V15.2 群聊发言决策复核（默认关闭）。复用现有群缓冲与既有判定结果，只做一次本地复核，不新增任何模型请求。@机器人 / 回复机器人 / 聊天记录 / 命令 / 明确提问 / 明确要求继续 一律保持原优先级不被降级；已经回答过的相同问题不再重复回答；未成句的消息建议交给聚合窗口等待后续，而不是抢答。",
+    "enabled": false,
+    "dedupWindow": 20,
+    "dedupWindowMs": 600000,
+    "minTopicLen": 6,
+    "deferMinChars": 4
+  },
+  "judge": {
+    "enabled": true,
+    "model": "deepseek-chat",
+    "confidenceThreshold": 0.6,
+    "maxContext": 5,
+    "maxTokens": 512
+  },
+  "model": {
+    "_说明": "全部模型均走 DeepSeek 官方（api.deepseek.com）。multimodal 必须用 deepseek-chat。",
+    "fast": "deepseek-chat",
+    "normal": "deepseek-chat",
+    "reasoning": "deepseek-reasoner",
+    "multimodal": "deepseek-chat",
+    "routing": true,
+    "autoSelect": true,
+    "fallback": "deepseek-chat"
+  },
+  "context": {
+    "short": 3,
+    "normal": 9,
+    "complex": 15
+  },
+  "summary": {
+    "enabled": true,
+    "triggerMsgs": 60,
+    "keepRecent": 12
+  },
+  "mode": {
+    "default": "enhanced"
+  },
+  "private": {
+    "allow": true,
+    "cooldownMs": 0
+  },
+  "memory": {
+    "enable": true,
+    "filterSensitive": true
+  },
+  "sticker": {
+    "enable": true
+  },
+  "voice": {
+    "_说明": "V15.4 语音识别（默认关闭）。把 QQ 语音消息转成文字再走正常对话流程。provider=mock 只产出占位文本、不联网；local=调用本机命令（需显式配 cmd，用数组参数不经 shell）；cloud=调用你自己的识别端点（host 必须在 allowHosts，且要过 SSRF 校验）。超过 maxDurationSec 不识别。识别失败一律降级为不识别，不影响聊天。本仓库未安装任何 ASR 引擎，真实识别【未验证 UNVERIFIED】。",
+    "enabled": false,
+    "provider": "mock",
+    "mockText": "[语音]",
+    "maxDurationSec": 120,
+    "maxBytes": 8388608,
+    "timeoutMs": 20000,
+    "cmd": [],
+    "endpoint": "",
+    "allowHosts": [],
+    "apiKeyRef": ""
+  },
+  "style": {
+    "_说明": "V15.4 发言风格优化（默认关闭）：去人机感 + 简化 + emoji。纯本地规则，不新增任何模型调用。去掉开头客套、AI 自我介绍、结尾『希望对你有帮助』、『总之/首先/其次』这类连接词；按 maxSentences/maxChars 精简；emoji 子段默认仍关闭（改语气属明显行为变化，需显式开启），开启后按情绪确定性地点缀，数量不超过 max。style.sticker 开启后会按情绪建议表情包关键词，交给既有 sticker 链路发送。",
+    "enabled": false,
+    "stripGreeting": true,
+    "stripSignOff": true,
+    "stripAiSelf": true,
+    "stripFiller": true,
+    "simplify": true,
+    "maxChars": 120,
+    "maxSentences": 3,
+    "collapsePunct": true,
+    "emoji": {
+      "enabled": false,
+      "max": 3,
+      "density": 0.6,
+      "allowRepeat": false,
+      "pool": [
+        "😄",
+        "😅",
+        "🙂",
+        "😉",
+        "😏",
+        "🤔",
+        "😮",
+        "🥲",
+        "😴",
+        "👍",
+        "👀",
+        "🙌",
+        "✨",
+        "💡",
+        "🔥"
+      ]
+    },
+    "sticker": {
+      "enabled": false,
+      "maxKeywords": 1
+    }
+  },
+  "meme": {
+    "_说明": "V15.4 表情包联网检索（默认关闭）。只认你自己配置的端点（provider=custom），不内置任何第三方站点，避免请求打到未知的、可能变更或收费的接口。endpoint 的 host 必须在 allowHosts，且要过 SSRF 校验；返回的图片 URL 也会逐个校验，私网/回环/云元数据一律剔除。带缓存与每小时上限。本仓库零第三方依赖、未配置任何接口，真实检索【未验证 UNVERIFIED】。",
+    "enabled": false,
+    "provider": "none",
+    "endpoint": "",
+    "allowHosts": [],
+    "timeoutMs": 8000,
+    "maxItems": 5,
+    "cacheTtlMs": 600000,
+    "maxPerHour": 60,
+    "apiKeyRef": ""
+  },
+  "imageConfirm": {
+    "_说明": "V15.4 生图确认（默认关闭）：识别到生图意图后先把要画的内容复述一遍请用户确认，用户回『画』才真的开画，回『算了』就作废，省算力也少画错。纯内存、带 TTL 自动过期，不落盘任何用户数据。requireForText2Img / requireForImg2Img 可分别关掉某类场景的确认。",
+    "enabled": false,
+    "ttlMs": 300000,
+    "maxPromptChars": 200,
+    "requireForText2Img": true,
+    "requireForImg2Img": true
+  },
+  "deepThink": {
+    "_说明": "V15.5 深度思考：需要长思考的任务优先用推理模型先想清楚再回答（默认开启）。纯本地规则判定，判定本身不新增任何模型调用。触发信号：显式要求（深度思考/一步步）、推理型（为什么/原因是/推导）、规划型（方案/架构/怎么实现）、代码调试型、对比权衡型（哪个更好/该不该）、计算数学型、长文总结型。命中后换用 model.reasoning 并按 complex 带上下文。**有图时一律让位给多模态模型**（推理模型实测不支持图片输入，发了会返回空内容）。各类信号可单独关；enabled=false 则行为与原来完全一致。",
+    "enabled": true,
+    "minChars": 4,
+    "boostContext": true,
+    "model": "",
+    "explicit": true,
+    "reasoning": true,
+    "planning": true,
+    "code": true,
+    "compare": true,
+    "math": true,
+    "longform": true
+  },
+  "shortVideo": {
+    "_说明": "V15.5 短视频识别（识别默认开、解析默认关）。只认平台（抖音/快手/B站/小红书/视频号/微博/西瓜/微视/QQ短视频）并如实告知：目前只看得到标题文案，看不到视频画面，不会编造内容，会提示对方直接发视频或截图。**不会去抓取第三方页面**（有强反爬、也可能违反其条款）。真正能看内容的是 QQ 原生视频段，走既有的 video_analysis（元数据 + 首帧视觉理解）。若要接入合规解析接口，配 parser.endpoint + allowHosts（过 SSRF 校验）；未配置时一律返回看不了，不猜。",
+    "enabled": true,
+    "injectHint": true,
+    "parser": {
+      "enabled": false,
+      "endpoint": "",
+      "allowHosts": [],
+      "timeoutMs": 10000
+    }
+  },
+  "files": {
+    "enable": true
+  },
+  "web": {
+    "enable": true
+  },
+  "image": {
+    "_说明": "生图后端。provider=comfyui 走本机 ComfyUI（仅 127.0.0.1:8188，不出网）。workflow/img2imgWorkflow 指向你 ComfyUI 里的文生图/图生图工作流（需自备）；fusion/faceSwap 工作流已随本仓库提供（相对路径）。",
+    "enabled": true,
+    "provider": "comfyui",
+    "endpoint": "http://127.0.0.1:8188",
+    "workflow": "./workflows/txt2img.json",
+    "img2imgWorkflow": "./workflows/img2img.json",
+    "img2imgDenoise": 0.65,
+    "_fusion说明": "双图融合工作流：同时发两张图 + 融合/合成/两人合影 等词才会触发。",
+    "fusionWorkflow": "./workflows/z_image_turbo_2img_fusion.json",
+    "fusionDenoise": 0.6,
+    "_faceSwap说明": "真·换脸（ReActor）工作流：先发「要改的图」、再发「脸的图」，然后说 换脸/替脸/换头，即把后发那张的脸换到先发那张上。依赖 ComfyUI 的 ComfyUI-ReActor 自定义节点 + inswapper_128.onnx / buffalo_l 模型。",
+    "faceSwapWorkflow": "./workflows/reactor_faceswap.json",
+    "_agentFirst说明": "true=把画图交给 Agent 的 generate_image 工具；false=退回正则快路径。",
+    "agentFirst": true,
+    "loraName": "",
+    "loraStrength": 0.8,
+    "filenamePrefix": "qq",
+    "model": "",
+    "apiKeyRef": "imageApiKey",
+    "width": 1024,
+    "height": 1024,
+    "steps": 9,
+    "cfgScale": 1,
+    "sampler": "euler",
+    "scheduler": "simple",
+    "negativePrompt": "",
+    "size": "1024x1024",
+    "timeoutMs": 240000,
+    "userCooldownMs": 60000,
+    "maxQueueLen": 5,
+    "useEasyNegative": false,
+    "useBadhandv4": false,
+    "hiresFix": {
+      "enabled": false,
+      "scale": 2,
+      "upscaler": "Latent",
+      "steps": 15,
+      "denoising": 0.5
+    }
+  },
+  "stats": {
+    "enable": true,
+    "file": "memory/stats.json"
+  },
+  "budget": {
+    "enabled": false,
+    "daily_tokens": 0,
+    "warn_percent": 80,
+    "hard_limit": false
+  },
+  "agent": {
+    "enabled": true,
+    "maxSteps": 5,
+    "maxToolCalls": 5,
+    "maxRetries": 1,
+    "maxObservationChars": 700,
+    "maxContextChars": 3000,
+    "logRuns": true
+  },
+  "admin": {
+    "_说明": "管理员 QQ 号数组（私聊这些号才能使用 /ai 等管理命令）。改成你自己的。",
+    "qq": [],
+    "mode": "private_only"
+  },
+  "personality": {
+    "name": "AI小助手",
+    "humor": true,
+    "proactive": true,
+    "defaultResponseLength": "normal",
+    "groups": {}
+  },
+  "debug": {
+    "rawEvent": false
+  },
+  "http": {
+    "_说明": "事件入口鉴权。true=每个事件请求都必须带 Authorization: Bearer <token>（NapCat 侧填同一个 access_token）；若未在 secrets.json 配置 onebotToken，开启后将拒绝全部推送（503，fail-closed）。默认 false 不校验，依赖 127.0.0.1 回环信任边界。",
+    "requireEventAuth": false
+  },
+  "poke": {
+    "enabled": true,
+    "mode": "pokeback+text",
+    "useAI": true,
+    "cooldownMs": 5000,
+    "texts": [
+      "戳我干嘛，痒痒的😏",
+      "哼，被你发现了～"
+    ],
+    "_说明": "戳一戳：机器人自己被戳时的回应（戳回去 + 一句俏皮话）。V15.3 的戳群友/群友被戳反应见 pokeOthers。"
+  },
+  "pokeOthers": {
+    "_说明": "V15.3 群友戳一戳（默认全关）。enabled=管理员在群里发「/戳 @某人」让机器人去戳群友：必须明确@到人（不猜昵称，防戳错）；仅群聊；默认仅管理员；带冷却/每小时/每日三重限频；不戳机器人自己、不戳发起者、不戳管理员。react 段响应「群友戳群友」：可回戳+接话，纯本地决策不新增模型调用；被戳者是机器人时让位给上面的 poke，不会重复回。",
+    "enabled": false,
+    "adminOnly": true,
+    "cooldownMs": 60000,
+    "maxPerHour": 10,
+    "maxPerDay": 30,
+    "react": {
+      "enabled": false,
+      "mode": "poke+text",
+      "cooldownMs": 30000,
+      "reactMinIntervalGroupMs": 180000,
+      "maxReactPerHour": 20,
+      "useAI": false,
+      "aiMaxTokens": 80,
+      "texts": [
+        "别戳了别戳了，人家在忙呢",
+        "你们戳来戳去，我看着都疼",
+        "再戳我要收费了啊",
+        "互相戳，也不嫌手痒"
+      ]
+    }
+  },
+  "proactiveChat": {
+    "enabled": false,
+    "useAI": true,
+    "aiStyle": "轻松、简短、像群里朋友随口开的头，不超过20字",
+    "templates": [
+      "大家早上好呀～今天也要开心😊"
+    ],
+    "schedule": []
+  },
+  "crypto": {
+    "_说明": "接入 crypto-sim 本地行情分析服务（独立进程，默认 http://127.0.0.1:8088）。默认关闭。",
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:8088",
+    "interval": "4h",
+    "defaultSymbol": "BTC",
+    "defaultUseAI": true,
+    "timeoutMs": 15000
+  },
+  "_feiyuV15": "肥鱼 V15 行动型助手（任务/浏览器/通知/TTS/QQ空间）。以下均为【顶层键】（不是嵌套 'feiyu' 段），默认全关、真实能力默认关闭、mock 仅占位。详见 feiyu/V15_GUIDE.md。",
+  "taskManager": {
+    "enabled": false,
+    "maxConcurrent": 3,
+    "maxRetries": 2,
+    "maxSteps": 10,
+    "taskTimeoutMs": 300000,
+    "runWindowMs": 60000,
+    "stepGapMs": 200,
+    "_说明": "任务生命周期（创建/调度/暂停/取消/超时）。未注入真实执行器(deps.runTask)时仅做生命周期登记（executed=false），不假称已执行任何工作。取消/超时通过 AbortSignal 通知执行器；忽略信号的长任务不会被标记为已停止（executionStopped=false）。字段与代码默认值一致。"
+  },
+  "browser": {
+    "enabled": false,
+    "provider": "mock",
+    "allow": [],
+    "timeoutMs": 30000,
+    "allowRealBrowse": false,
+    "_说明": "浏览器自动化默认关。provider=mock 不依赖任何第三方库。真实 Playwright 需 allowRealBrowse=true 且由宿主注入 playwright 实例；默认关闭，且仓库内零第三方依赖、未安装浏览器库，真实浏览路径【未经端到端验证 UNVERIFIED】，不保证绝对安全。"
+  },
+  "notifier": {
+    "enabled": false,
+    "targets": [],
+    "quietHours": null,
+    "rateLimitPerTarget": 10,
+    "rateWindowMs": 60000,
+    "dedupWindowMs": 300000,
+    "maxRetries": 3,
+    "retryBaseMs": 30000,
+    "maxQueue": 500,
+    "sentRetentionMs": 86400000,
+    "deadRetentionMs": 604800000,
+    "_说明": "主动通知默认关。targets 留空则回退 admin.qq；启用后仅向授权名单内的主人 QQ 发送，传入名单外 target 会在通知模块内部被拒（target-not-allowed / target-invalid），不依赖上层 admin 检查。运行时调用 notifier.setTargets() 会同步刷新白名单（已撤销目标立即失效）。"
+  },
+  "tts": {
+    "enabled": false,
+    "provider": "mock",
+    "maxBytes": 1048576,
+    "maxDurationMs": 30000,
+    "format": "mp3",
+    "outDir": "workspace/feiyu/tts",
+    "_说明": "语音默认关。provider=mock 仅生成占位音频（MP3 帧头+静音体），不是真实中文朗读，仅供格式/体积校验；真实语音需另行授权并配置 local/cloud 引擎。"
+  },
+  "qzone": {
+    "enabled": false,
+    "realEnabled": false,
+    "maxPerDay": 3,
+    "_说明": "QQ空间默认关。无合规开放发布接口，仅预览/模拟发布；realEnabled 默认 false，即便 true 且无合规渠道也拒绝真实发布。"
+  }
+}

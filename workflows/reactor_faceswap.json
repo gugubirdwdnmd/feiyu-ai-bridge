@@ -1,0 +1,39 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "目标图（要改的脸）" },
+    "inputs": { "upload": "image" }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "源脸图（脸的来源）" },
+    "inputs": { "upload": "image" }
+  },
+  "3": {
+    "class_type": "ReActorFaceSwap",
+    "_meta": { "title": "ReActor 换脸" },
+    "inputs": {
+      "enabled": true,
+      "input_image": ["1", 0],
+      "swap_model": "inswapper_128.onnx",
+      "facedetection": "retinaface_resnet50",
+      "face_restore_model": "none",
+      "face_restore_visibility": 1,
+      "codeformer_weight": 0.5,
+      "detect_gender_input": "no",
+      "detect_gender_source": "no",
+      "input_faces_index": "0",
+      "source_faces_index": "0",
+      "console_log_level": 1,
+      "source_image": ["2", 0]
+    }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "_meta": { "title": "保存换脸结果" },
+    "inputs": {
+      "images": ["3", 0],
+      "filename_prefix": "ReActorSwap"
+    }
+  }
+}
