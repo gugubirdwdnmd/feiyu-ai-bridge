@@ -1,6 +1,13 @@
 {
   "_说明": "AI 桥配置模板。复制为 ai_config.json 后按需修改；删掉 ai_config.json 则全部走内置默认值。所有 *_Workflow 支持相对路径（相对本文件所在目录）。",
   "_字段": "group.mode: 'smart'=智能预筛(推荐) | 'at'=仅被@才回 | 'all'=每条都回",
+  "accessControl": {
+    "_说明": "平台级访问控制（白名单/黑名单）：调模型前问桌面端能力网关。桌面端该实例未配置规则时放行；已配置则按白名单/黑名单裁决；网关不可达时放行（机器人可独立运行）。instanceId 要与桌面端「访问控制」里选的机器人实例一致。",
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:8720/v1/access/check",
+    "instanceId": "napcat",
+    "timeoutMs": 3000
+  },
   "api": {
     "baseUrl": "https://api.deepseek.com/v1/chat/completions",
     "model": "deepseek-chat",

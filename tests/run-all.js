@@ -28,6 +28,7 @@ const OFFLINE = [
   'v155_video_deepthink.test.js', // V15.5 短视频识别 + 深度思考判定（纯离线，不抓第三方页面）
   'v156_phase1_acceptance.test.js', // 第一阶段验收：群聊决策 + 群友画像 + 检索与成本（对应任务书 30 项）
   'v157_profile_budget.test.js',    // 画像容量治理专项：满员更新不误删 / 预计总量治理 / 失败不误报成功
+  'multimodal.test.js',             // 多模态理解（路径安全/端点分类/资源准入/任务生命周期/配置热更新/API 契约，纯离线）
   '_test_gen_intent.js',
   '_test_img_memory.js',
 ];

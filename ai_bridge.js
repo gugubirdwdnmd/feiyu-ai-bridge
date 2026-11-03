@@ -5,6 +5,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 // V14-C.2：URL 安全（重定向逐跳 SSRF 校验）与 QQ 分享卡片提取（独立零依赖模块，便于单测）
 const urlSafety = require('./url_safety');
 const shareCard = require('./share_card');
@@ -35,11 +36,24 @@ const memeSearch = require('./feiyu/meme_search');
 const imageConfirm = require('./feiyu/image_confirm');
 // V15.5：短视频识别（只认平台、不抓第三方页面）+ 深度思考判定（本地规则）
 const shortVideo = require('./feiyu/short_video');
+// 1.4.9 多模态理解（本地优先）：视频/图片统一理解服务 + 本地 AI 资源管理 + 多模态管理 API + 任务中心
+const { createMediaUnderstanding } = require('./feiyu/media_understanding');
+const { createLocalAIResourceManager } = require('./feiyu/local_ai_resources');
+const { createMultimodalApi } = require('./feiyu/multimodal_api');
+const { TaskManager } = require('./feiyu/task_manager');
+// 多模态服务实例（启动阶段赋值；消息处理运行时已就绪）
+let mediaResourceMgr = null;
+let mediaTaskMgr = null;
+let mediaSvc = null;
+let multimodalApi = null;
 const deepThink = require('./agent/deep_think');
 const usageReport = require('./usage_report'); // 用量报告纯计算层（筛选/聚合/白名单/鉴权决策）
 const skills = require('./skills'); // 可插拔技能运行时（提示词注入 + 工具挂载；纯计算层）
 // V15.3：群友戳一戳（主动戳群友 + 对群友被戳的反应）；与既有 poke（自己被戳）互不重叠
 const pokeSocial = require('./feiyu/poke_social');
+// V15.6：QQ空间删除/回复（走 QQ Web 私接口，需 cookie；模块缺失/异常绝不让桥崩）
+let qzoneOps = { setCreds() {}, ready: () => false, deleteContent: async () => ({ ok: false, error: '模块未加载' }), replyComment: async () => ({ ok: false, error: '模块未加载' }) };
+try { qzoneOps = require('./qzone_ops'); } catch (e) { log('[QZone] qzone_ops 模块未加载（不影响其他功能）：' + e.message); }
 
 // ================= 配置 =================
 // API Key 不写死在代码里：优先环境变量 DEEPSEEK_API_KEY，其次同目录 secrets.json
@@ -223,6 +237,30 @@ const DEFAULT_CONFIG = {
   },
   sticker: { enable: ENABLE_STICKER },
 
+  // V15.6：逐步下放给机器人的 QQ 权限（管理员在 ai_config.json 里逐项开关；默认全开，可随时收回）
+  // 设计原则：每项权限都是「显式 capability flag」，关掉即收回，bot 不能绕过。
+  qq_privileges: {
+    enabled: true,            // 总开关：整组 QQ 权限
+    replyToBot: true,         // 别人回复机器人说的话 → 机器人主动回复（见 handleMessage）
+    deleteMsg: true,          // 删除聊天消息（OneBot delete_msg，仅限自己发的）
+    setGroupCard: true,       // 改本人在群里的显示名（名片，set_group_card）
+    setAvatar: true,          // 改自己头像（NapCat 非标准 action set_qq_avatar；失败会如实说）
+    emoji: true,              // 发表情 / QQ 小黄脸（替代死板的整图）
+    qzone: {                  // QQ空间：OneBot 只给「发布」(send_qzone_msg)，回复/删除走 QQ Web API（需 cookie）
+      enabled: false,         // 默认关：需在 ai_config.json 配 qzone.uin/p_uin/p_skey 才生效
+      uin: '', p_uin: '', p_skey: '',
+      allowDelete: true,      // 允许删除 QQ 空间内容（说说 / 评论）
+      replyToComment: false,  // 有人在空间回复机器人时主动回复（需轮询，耗资源，默认关）
+    },
+  },
+  // V15.6：不要一直发——频率护栏（0=不限制）
+  rate: {
+    emojiPerHourCap: 30,     // 每小时表情上限
+    imagePerHourCap: 40,     // 每小时图片上限（含生图）
+    silentBackoffMs: 60000,  // 触发过密时短暂静默窗口（毫秒）
+    silentAfter: 12,         // 连续触发多少次进入静默
+  },
+
   // V15.4 语音识别：默认关、默认不联网。provider=mock 只占位；local/cloud 必须显式配置。
   voice: {
     enabled: false,
@@ -302,6 +340,18 @@ const DEFAULT_CONFIG = {
     sampler: 'DPM++ 2M Karras', negativePrompt: '',
     size: '512x512',
     timeoutMs: 180000,
+  },
+
+  // 平台级访问控制（白名单 / 黑名单）：调模型之前先问桌面端「这条消息该不该由机器人处理」。
+  //   - 桌面端该实例未配置过任何规则（configured=false）→ 放行，行为与接入前完全一致；
+  //   - 已配置 → 按桌面端裁决执行（白名单 / 黑名单 / 策略 / 临时授权）；
+  //   - 网关不可达 / 超时 → 放行（fail-open），桌面端没开时机器人仍可独立运行；
+  //   - 本机管理员（CFG.adminList）始终放行，避免 /ai 等管理命令被自己的白名单挡住。
+  accessControl: {
+    enabled: true,
+    endpoint: 'http://127.0.0.1:8720/v1/access/check',
+    instanceId: 'napcat',
+    timeoutMs: 3000,
   },
 
   // v11 第二阶段新增：AI Judge（只在本地规则判定「不确定」时才调用，questions≠mention）
@@ -1622,10 +1672,14 @@ async function napcatCall(action, payload) {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
+      // V15.7：必须带超时。否则 NapCat 一旦短暂变慢/卡住，bot 的发送（以及
+      // 群「回复机器人」分支的 get_msg）会无限 await，表现为「进程活着却不回消息」。
+      signal: AbortSignal.timeout(15000),
     });
     return await r.json();
   } catch (e) {
-    log('[错误] NapCat 调用失败 ' + action + ': ' + e.message);
+    const t = (e && e.name === 'TimeoutError') ? ' 超时(15s)' : '';
+    log('[错误] NapCat 调用失败' + t + ' ' + action + ': ' + (e && e.message));
     return null;
   }
 }
@@ -2128,7 +2182,7 @@ const TOOLS = [
     function: {
       name: 'generate_image',
       description:
-        '画一张图并发到当前聊天。对方让你画图、出图、生成图片，或者发了图让你改风格/重绘/换画风时用它。prompt 写清楚画面内容（中文就行，越具体越好：主体、动作、场景、光线、画风）。如果对方发了图并要基于那张图改造（改成xx风格、重绘、变成xx），把 source 填 "1"（用本条消息的第1张图）。如果对方连发了两张图并要融合/换脸/合成，把 source 填其中一张图的位置、source2 填另一张图的位置（例如 source:"1" source2:"2"），我会把两张图融合成一张。画完图会自动发出去，你只要再用一两句自然语言接一下就行，别重复描述图的内容。',
+        '画一张图并发到当前聊天。对方让你画图、出图、生成图片，或者发了图让你改风格/重绘/换画风时用它。prompt 写清楚画面内容（中文就行，越具体越好：主体、动作、场景、光线、画风）。如果对方发了图并要基于那张图改造（改成xx风格、重绘、变成xx），把 source 填 "1"（用本条消息的第1张图）。如果对方连发了两张图并要融合/换脸/合成，把 source 填其中一张图的位置、source2 填另一张图的位置（例如 source:"1" source2:"2"），我会把两张图融合成一张。重要：如果是接着上一轮图的修改（比如对方只说「全身照」「换个姿势」「改成蓝色」），prompt 必须带上上一轮的主题（例如「一个美女的全身照」），不要只写「全身照」这种没有主体的短指令，否则画出来会失去上下文。画完图会自动发出去，你只要再用一两句自然语言接一下就行，别重复描述图的内容。',
       parameters: {
         type: 'object',
         properties: {
@@ -2208,6 +2262,181 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'save_to_library',
+      description:
+        '把一张图存进素材库（表情库或图片库）。对方发图并说「存进你的表情库 / 图库 / 收藏」时用；不填 file 就默认存本会话对方最近发的一张图。kind 可选 sticker（表情库，默认）或 image（图片库）。可指定 name（关键词，方便以后调出来发）和 tags。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file: { type: 'string', description: '可选。要保存的图的 base64:// / data: 数据，或图片 URL / file_id；不填则默认用本会话最近收到的一张图' },
+          kind: { type: 'string', description: 'sticker（表情库）或 image（图片库），默认 sticker' },
+          name: { type: 'string', description: '素材关键词/名字，例如 可爱、无语；不填则系统按内容命名' },
+          tags: { type: 'array', items: { type: 'string' }, description: '标签数组，便于检索' },
+          from: { type: 'string', description: '可选。「盗图」用：填别人的 QQ 号或昵称/群名片，就存那个人最近发的图（而不是发起者发的）' },
+        },
+      },
+    },
+  },
+    {
+      type: 'function',
+      function: {
+        name: 'get_avatar',
+        description:
+          '查看（并发到聊天里）任意人的 QQ 头像。对方说「看看我头像 / 他头像什么样 / 把 xxx 的头像发来 / 查一下 xxx 的头像」时用。qq 填对方 QQ 号；不知道 QQ 号时填 name（昵称/群名片），我会在群里查；都不填就查发起者自己的头像。头像走腾讯公开头像接口，取不到会如实说明。',
+        parameters: {
+          type: 'object',
+          properties: {
+            qq: { type: 'string', description: '对方 QQ 号，纯数字' },
+            name: { type: 'string', description: '对方昵称或群名片，用于反查 QQ 号（群聊里才查得到）' },
+            save: { type: 'string', description: '填 "1" 时顺手把头像存进素材库' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'send_like',
+        description:
+          '给指定的人点赞（QQ 名片赞）。对方说「给 xxx 点赞 / 赞我一下 / 给我点十个赞」时用。qq 填对方 QQ 号，不填就给发起者点。times 是次数，QQ 有限额，点多了会失败，失败要如实说。',
+        parameters: {
+          type: 'object',
+          properties: {
+            qq: { type: 'string', description: '对方 QQ 号' },
+            times: { type: 'string', description: '点赞次数，默认 1，最多 20' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'publish_qzone',
+        description:
+          '发一条 QQ 空间说说（真实发布，会真的出现在空间里）。只有对方明确说「发个空间 / 发条说说 / 发动态到空间 / 在空间说一句」时才用，绝不自己发挥。content 是正文；images 可选，填本地图片绝对路径。发完要如实说发成功了，失败就如实说原因。',
+        parameters: {
+          type: 'object',
+          properties: {
+            content: { type: 'string', description: '说说正文' },
+            images: { type: 'array', items: { type: 'string' }, description: '要带的图片，填本地文件绝对路径（可选）' },
+          },
+          required: ['content'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'delete_message',
+        description:
+          '删除一条聊天消息或 QQ 空间内容。聊天消息只填 message_id（不填就删我刚发的那条）；删空间说说/评论填 qzone "1" 并给 tid/comment_id。注意：聊天消息只能删我自己发的、且没过服务端保留期的；删不掉如实说原因，别假装删了。',
+        parameters: {
+          type: 'object',
+          properties: {
+            message_id: { type: 'string', description: '要删的聊天消息 id（可选，不填=删我刚发的）' },
+            qzone: { type: 'string', description: '填 "1" 表示删 QQ 空间内容，配合 tid / comment_id' },
+            tid: { type: 'string', description: 'QQ空间说说 id（删说说用）' },
+            comment_id: { type: 'string', description: 'QQ空间评论 id（删评论用）' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'set_group_card',
+        description:
+          '改机器人在某个群里的显示名（群名片）。只有对方明确说「改个名 / 你叫XX / 换个群名片」时才用。name 是新名字；group_id 不填就用当前群。',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: '新的群内显示名' },
+            group_id: { type: 'string', description: '群号（可选，不填=当前群）' },
+          },
+          required: ['name'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'set_self_avatar',
+        description:
+          '改机器人自己的 QQ 头像。只有对方明确说「换个头像 / 用这张当头像」时才用。image 是本机图片绝对路径（不能是要联网的 URL，避免乱来）。换不上如实说原因。',
+        parameters: {
+          type: 'object',
+          properties: {
+            image: { type: 'string', description: '本机图片绝对路径' },
+          },
+          required: ['image'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'send_face',
+        description:
+          '单独发一个 QQ 小黄脸表情（不带文字），比发整张图更自然。keyword 是心情词，如 开心、点赞、无语、爱心、偷笑、拥抱；不填随机发一个。发完就不用在回复里再写 [[表情]] 了。',
+        parameters: {
+          type: 'object',
+          properties: {
+            keyword: { type: 'string', description: '表情关键词，可留空随机' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'qzone_delete',
+        description:
+          '删除 QQ 空间内容（说说或评论）。tid 删说说，comment_id 删某条评论；content 可不填。只有对方明确说「删掉那条说说 / 删空间评论」时才用，且需管理员先在 ai_config.json 配好 QQ空间 cookie 才生效。',
+        parameters: {
+          type: 'object',
+          properties: {
+            tid: { type: 'string', description: '要删的说说 id' },
+            comment_id: { type: 'string', description: '要删的评论 id' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'qzone_reply',
+        description:
+          '回复 QQ 空间里某条评论（在对方评论下接话）。只有对方明确说「在空间回他一句 / 回一下那条评论」时才用。comment_id 是评论 id，content 是回复内容；需配好 QQ空间 cookie 才生效。',
+        parameters: {
+          type: 'object',
+          properties: {
+            comment_id: { type: 'string', description: '要回复的评论 id' },
+            content: { type: 'string', description: '回复内容' },
+          },
+          required: ['comment_id', 'content'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_image',
+        description:
+          '去网上搜图片/表情包，把搜到的图发到聊天里。对方说「找张 xxx 的图 / 搜个表情包 / 网上找个 xxx 图片」时用。query 是搜索词。save 填 "1" 时把搜到的图存进素材库（等于"网上盗图"）。搜不到或下载失败要如实说，不许编造。',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: '搜索关键词，例如「猫猫 表情包」「赛博朋克 城市」' },
+            count: { type: 'string', description: '要发几张，默认 1，最多 3' },
+            save: { type: 'string', description: '填 "1" 时把图存进自己的素材库' },
+          },
+          required: ['query'],
+        },
+      },
+    },
 ];
 
 // ================= v12：工具按需加载（分组）=================
@@ -2218,6 +2447,9 @@ const TOOL_GROUPS = {
   file: ['create_file', 'read_file', 'list_files', 'send_file'],
   memory: ['remember'],
   image: ['send_sticker', 'generate_image'],
+  library: ['save_to_library'],
+  voice: ['send_voice'],
+  social: ['get_avatar', 'send_like', 'publish_qzone', 'send_face', 'set_group_card', 'set_self_avatar', 'delete_message', 'qzone_delete', 'qzone_reply'],
   spreadsheet: ['create_table'],
 };
 const MAX_TOOLS_PER_TURN = Object.keys(TOOL_GROUPS).length + TOOLS.length; // 安全上限
@@ -2233,6 +2465,19 @@ function selectToolsOnDemand(text) {
   if (/(记住|记一下|记得|我的喜好|我的名字|我的生日|约定|帮我记)/.test(t)) add('memory');
   if (/(表情|颜文字|发个图|表情包|斗图)/.test(t)) add('image');
   if (isImageGenIntent(t) || /(重绘|重画|换风格|换画风|改成|变成|风格化|img2img)/.test(t)) add('image');
+  if (/(发个?语音|发条语音|发一句?语音|说句?语音|念一下|念给我|读给我|说句话|读一.*语音|听听你的声音|用语音|语音发|整一句?语音|来句语音|播报|读出来|播给我|声音回我)/.test(t)) add('voice');
+  if (/(存|收藏|入库|收进|存进|存到|加到.*库|保存到?.*(表情库|图库|素材库|收藏)|把.*(图|表情).*存|盗图|偷图|扒图)/.test(t)) add('library');
+  // 社交能力：头像 / 点赞 / QQ空间（空间只在明确说"发空间/发说说"时才挂，避免误触真实发布）
+  if (/(头像|看看.{0,4}头像|查.{0,4}头像)/.test(t)) add('social');
+  if (/(点赞|赞我|点个赞|赞一下|给.{0,6}点赞)/.test(t)) add('social');
+  if (/(发.{0,3}(空间|说说|动态)|写.{0,3}说说|更新.{0,3}空间|发.{0,3}QQ空间)/.test(t)) add('social');
+  // 自主社交操作：改名 / 换头像 / 删消息 / 删空间 / 回空间评论（明确意图才挂）
+  if (/(改.{0,2}名|换个?名|叫.{0,3}(名字|XX|xx)|群名片|昵称)/.test(t)) add('social');
+  if (/(换头像|改头像|用.{0,4}头像|头像换成|头像用这张)/.test(t)) add('social');
+  if (/(删.{0,3}(消息|那条|说说|评论|空间)|撤回|删掉你刚发)/.test(t)) add('social');
+  // 网上找图 / 表情包
+  if (/(找.{0,4}(图|表情包|图片)|搜.{0,4}(图|表情包|图片)|网上.{0,4}(图|表情包)|来.{0,3}张.{0,6}图|去网上)/.test(t)) { add('web'); add('image'); }
+  if (/(网上找图|搜图|找表情包|搜表情包|盗图|网上的图)/.test(t)) add('library');
   if (want.size === 0) return [];                 // 普通聊天：不挂任何工具
   return TOOLS.filter((tool) => want.has(tool.function.name)).slice(0, MAX_TOOLS_PER_TURN);
 }
@@ -2247,6 +2492,8 @@ function toolsForMode(text) {
 // 单独发一个表情包（工具调用）；target 从 sessionId 解析
 async function sendStickerTo(sessionId, keyword, ctx) {
   const seg = await resolveStickerAsync(keyword);
+  // V15.6：频率护栏——发出的是整图时计入图片额度，避免一直甩图
+  if (seg.type === 'image' && !rateAllow('image')) return '我这一小时图发太多了，先歇会儿，过会儿再跟你斗图。';
   const kind = seg.type === 'image' ? '图片' : 'face' + seg.data.id;
   if (sessionId.startsWith('group_')) {
     await napcatCall('send_group_msg', { group_id: Number(sessionId.slice(6)), message: [seg] });
@@ -2288,11 +2535,222 @@ function setImageToolCtx(sessionId, ev, imgSegs) {
   }
 }
 
+// ================= 生图上下文关联 + 发送可靠性 =================
+
+// 平台能力网关根地址：从 accessControl.endpoint 推导，避免再硬编码一个端口。
+function capabilityHostBase() {
+  const ep = String((CFG.accessControl && CFG.accessControl.endpoint) || 'http://127.0.0.1:8720/v1/access/check');
+  return ep.replace(/\/v1\/access\/check$/, '');
+}
+
+// 通过文件内容嗅探扩展名（base64 落地成文件时用，确保 NapCat 能识别格式）。
+function sniffImageExt(buf) {
+  if (!buf || !Buffer.isBuffer(buf)) return '.png';
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf.length >= 6 && buf.slice(0, 6).toString('ascii').startsWith('GIF8')) return '.gif';
+  if (buf.length >= 12 && buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return '.webp';
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp';
+  return '.png';
+}
+
+// 把 base64:// 图片段落成本地文件，换成绝对路径段发送。
+// 原因：NapCat 对较大的 inline base64 图片会静默丢弃（用户反馈「发了个寂寞」「图收不到」），
+// 换成绝对本地路径后发送稳定。url / 本地路径 / face 段原样透传。
+const IMG_SEND_DIR = path.join(os.tmpdir(), 'feiyu-send');
+function segToLocalFile(seg) {
+  if (!seg || !seg.data) return seg;
+  const f = seg.data.file;
+  if (typeof f === 'string' && f.startsWith('base64://')) {
+    let buf;
+    try { buf = Buffer.from(f.slice('base64://'.length), 'base64'); } catch (e) { return seg; }
+    if (!buf || !buf.length) return seg;
+    try {
+      fs.mkdirSync(IMG_SEND_DIR, { recursive: true });
+      const ext = sniffImageExt(buf);
+      const name = 'send_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + ext;
+      const fp = path.join(IMG_SEND_DIR, name);
+      fs.writeFileSync(fp, buf);
+      return { type: seg.type, data: Object.assign({}, seg.data, { file: fp }) };
+    } catch (e) {
+      return seg; // 落盘失败就退回 base64 尽力发送
+    }
+  }
+  return seg;
+}
+
+// 生图上下文关联：记住每会话最近一次成功出图的主题；遇到「在上一轮基础上改/加/换」的短指令时，
+// 自动把上一轮主题补到前面，避免「全身照」「换个姿势」这类指令失去上下文。
+// （验收反馈：生图不关联上下文 / 无法联系上下文）
+const SESSION_IMG_PROMPT = new Map();
+const SESSION_IMG_PROMPT_TTL = 30 * 60 * 1000;
+
+function isRefinementPrompt(p) {
+  const t = String(p || '').trim();
+  if (!t) return false;
+  const REFINE = /(全身|半身|换|改|变成|再来|也来|加|去掉|调|重画|重绘|改成|换成|只留|加上|风格|背景|姿势|表情|衣服|头发|配色|色调|光影)/;
+  return t.length <= 60 && REFINE.test(t);
+}
+
+function enrichImagePrompt(sessionId, prompt) {
+  // 顺带清理过期项，避免长期累积
+  const now = Date.now();
+  for (const k of SESSION_IMG_PROMPT.keys()) {
+    const v = SESSION_IMG_PROMPT.get(k);
+    if (!v || now - (v.ts || 0) > SESSION_IMG_PROMPT_TTL) SESSION_IMG_PROMPT.delete(k);
+  }
+  const last = SESSION_IMG_PROMPT.get(sessionId);
+  if (last && last.prompt && isRefinementPrompt(prompt) && !prompt.includes(last.prompt)) {
+    return last.prompt + '，' + prompt;
+  }
+  return prompt;
+}
+
+function rememberImagePrompt(sessionId, prompt) {
+  SESSION_IMG_PROMPT.set(sessionId, { prompt, ts: Date.now() });
+}
+
+// ================= 存进素材库 =================
+// 机器人「把这张图存进你的表情库/图库」的能力：把图（base64 或本会话最近收到的一张图）
+// 推给平台能力网关的 /v1/media/add（平台再落到 mediaLibraryService.addFromBase64）。
+/**
+ * 按 sessioId 查看「记住的图」（不消费）。
+ * 群聊的 pending key 形如 g<群号>:<发言者>，而工具只拿得到 sessionId（无私聊者 id），
+ * 因此按前缀匹配该群下所有人的图，取最新的一张。
+ */
+function peekPendingForSession(sessionId) {
+  const sid = String(sessionId || '');
+  if (sid.startsWith('private_')) return peekPendingImages(null, Number(sid.slice(8)));
+  if (!sid.startsWith('group_')) return [];
+  const pre = 'g' + sid.slice(6) + ':';
+  const out = [];
+  for (const k of pendingGroupImages.keys()) {
+    if (!String(k).startsWith(pre)) continue;
+    const v = pendingGroupImages.get(k);
+    if (v && Date.now() - v.at <= PENDING_IMAGE_TTL_MS) out.push(...v.segs);
+  }
+  return out;
+}
+
+async function resolveLibrarySource(sessionId, args) {
+  // fetchImageAsBase64 返回 data:<mime>;base64,<b64> 字符串，失败返回 null
+  const toB64 = (dataUrl) => {
+    if (typeof dataUrl !== 'string') return null;
+    const i = dataUrl.indexOf(',');
+    return i > 0 ? dataUrl.slice(i + 1) : null;
+  };
+  // 1. 显式给的图（base64:// 或 data: 或 url / file_id）
+  if (args && args.file) {
+    const f = String(args.file);
+    if (f.startsWith('base64://')) return { ok: true, b64: f.slice('base64://'.length), ext: '' };
+    if (f.startsWith('data:')) {
+      const b = toB64(f);
+      return b ? { ok: true, b64: b, ext: '' } : { ok: false, error: '这张图数据解析失败。' };
+    }
+    // url / file_id：交给 fetchImageAsBase64 取字节
+    const b64 = toB64(await fetchImageAsBase64({ type: 'image', data: { file: f } }));
+    if (!b64) return { ok: false, error: '这张图取不到内容。' };
+    return { ok: true, b64, ext: '' };
+  }
+  // 2. 用本会话最近收到的一张图（IMG_TOOL_CTX 优先，再用「先发图再打字」记住的图兜底）
+  const m = IMG_TOOL_CTX.get(sessionId) || {};
+  let segs = (m.imgSegs || []).filter((s) => s && s.type === 'image' && s.data && (s.data.file || s.data.url));
+  if (!segs.length) segs = peekPendingForSession(sessionId).filter((s) => s && s.type === 'image' && s.data && (s.data.file || s.data.url));
+  if (!segs.length) return { ok: false, error: '你还没给我发过图，我没法存。先发张图再说～' };
+  const seg = segs[segs.length - 1];
+  const b64 = toB64(await fetchImageAsBase64(seg));
+  if (!b64) return { ok: false, error: '这张图我取不到内容，存不了。' };
+  let ext = '';
+  const fp = String((seg.data && seg.data.file) || '');
+  const em = /\.(png|jpe?g|gif|webp|bmp)$/i.exec(fp);
+  if (em) ext = '.' + em[1].toLowerCase().replace('jpg', 'jpeg');
+  return { ok: true, b64, ext };
+}
+
+async function saveToLibraryTool(sessionId, args, ctx) {
+  // 「盗图」：指定某人（QQ 号 / 昵称）→ 存 TA 最近发的那张图，而不是发起者发的
+  const from = String((args && args.from) || '').trim();
+  if (from && !(args && args.file)) {
+    const r = await resolveSegFromUser(sessionId, from);
+    if (!r.ok) return r.error;
+    args = Object.assign({}, args, { file: String((r.seg.data && (r.seg.data.file || r.seg.data.url)) || '') });
+    log('[库] 盗图目标 uin=' + r.uin);
+  }
+  const src = await resolveLibrarySource(sessionId, args);
+  if (!src || !src.ok) return src ? src.error : '没找到可保存的图。';
+  if (!src.b64) return '图片数据为空，存不了。';
+  const kind = (args && args.kind === 'image') ? 'image' : 'sticker';
+  const tags = Array.isArray(args && args.tags) ? args.tags
+    : (args && args.tags ? String(args.tags).split(/[,，\s]+/).filter(Boolean) : undefined);
+  const body = { kind, data: src.b64, ext: src.ext, name: args && args.name, tags };
+  const base = capabilityHostBase();
+  let resp;
+  try {
+    resp = await fetch(base + '/v1/media/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    return '存库请求没发出去：' + (e.name === 'TimeoutError' ? '超时' : e.message);
+  }
+  const j = await resp.json().catch(() => null);
+  if (!resp.ok || !j || !j.ok) return '存库失败了：' + ((j && j.error) || ('HTTP ' + resp.status));
+  if (ctx) ctx.librarySaved = true;
+  log('[库] 已保存素材 kind=' + kind + ' name=' + (args && args.name || '(无)'));
+  return '已经帮你存进素材库啦' + (kind === 'image' ? '（图片库）' : '（表情库）') + '。以后我可以按关键词把它调出来发。';
+}
+
+// 发语音工具：让机器人真正发一条语音消息。
+// 语音能力归平台所有（桌面端能力网关），这里只负责把「要念的话 + 会话目标」交给
+// 能力网关的 /v1/audio/send：网关用本地 SAPI 合成 wav，再经 OneBot 以 record 段发出去。
+// 平台未就绪（桌面端没开 / 语音能力未启用 / NapCat 没起）时如实回退成文字，绝不大话。
+async function sendVoiceTool(sessionId, args, ctx) {
+  const text = String((args && args.text) || '').trim();
+  if (!text) return '没写要念的话，先告诉我用语音说什么。';
+
+  let target = 'private';
+  let peerId = '';
+  if (sessionId.startsWith('group_')) { target = 'group'; peerId = sessionId.slice(6); }
+  else if (sessionId.startsWith('private_')) { target = 'private'; peerId = sessionId.slice(8); }
+  else return '不知道发到哪个会话，语音发不出去。';
+
+  const url = capabilityHostBase() + '/v1/audio/send';
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, target, peerId }),
+    });
+  } catch (e) {
+    return '语音网关连不上（桌面端能力网关可能没开），我先用文字回你：' + text;
+  }
+  let j = null;
+  try { j = await res.json(); } catch (_) {}
+  if (!res.ok || !j || !j.ok) {
+    const err = String((j && j.error) || ('HTTP ' + res.status));
+    if (res.status === 503 || /未就绪|未启用|能力未/.test(err)) {
+      return '语音模块还没就绪（桌面端能力网关没启动或语音能力没启用），我先用文字回你：' + text;
+    }
+    return '语音发送失败（' + err + '），我先用文字回你：' + text;
+  }
+  if (ctx) ctx.voiceSent = true;
+  log('[语音] 已发送 ' + target + ' ' + peerId + ' 文本=' + text.slice(0, 24));
+  // 语音已作为独立语音消息送达，文字只需极简收尾，避免和语音内容重复。
+  return '（已用语音发送，无需再用文字复述内容）';
+}
+
 // 生图工具：AI 自己决定什么时候画（文生图 / 图生图），画完直接发到当前聊天
 async function generateImageTool(sessionId, args, ctx) {
   const img = CFG.image || {};
   if (!img.enabled) {
     return '生图功能没开（image.enabled=false）。跟对方说你暂时画不了，别编造画好的图。';
+  }
+  // V15.6：频率护栏——每小时出图太多时先歇会儿（「不要一直发」）
+  if (!rateAllow('image')) {
+    return '我这一个小时图发太密集了，先歇口气，过会儿再帮你画。跟对方说一声稍等。';
   }
   const m = IMG_TOOL_CTX.get(sessionId) || {};
   const ev = m.ev || null;
@@ -2300,6 +2758,13 @@ async function generateImageTool(sessionId, args, ctx) {
 
   let prompt = String((args && args.prompt) || '').trim();
   if (!prompt) return '没写画面描述，先想清楚要画什么再调用。';
+
+  // 上下文关联：短改造指令（如「全身照」「换个姿势」）自动带上上一轮主题，避免失去上下文
+  const enrichedPrompt = enrichImagePrompt(sessionId, prompt);
+  if (enrichedPrompt !== prompt) {
+    log('[生图] 上下文补全：' + prompt + ' ← ' + enrichedPrompt);
+    prompt = enrichedPrompt;
+  }
 
   // 安全硬过滤：命中直接拒，不调用后端
   const unsafe = checkImagePromptSafety(prompt);
@@ -2350,6 +2815,12 @@ async function generateImageTool(sessionId, args, ctx) {
     }
   }
 
+  // 自动图生图：未显式指定 source、非换脸/融合、且上下文恰好一张图时，
+  // 默认拿这张图做底图（覆盖「引用一张图 + 说改成X」「先发图再打字说改成X」等场景）。
+  if (!sourceSeg && !sourceSeg2 && !faceSwap && !fusion && imgSegsSafe.length === 1) {
+    sourceSeg = imgSegsSafe[0];
+  }
+
   const userId = String((ev && ev.user_id) || sessionId);
   const q = imgQueueEnter(userId, prompt, sourceSeg, sourceSeg2, targetSeg, faceSeg);
   if (q.status === 'cooldown') {
@@ -2378,11 +2849,13 @@ async function generateImageTool(sessionId, args, ctx) {
       const gid = Number(sessionId.slice(6));
       out.unshift({ type: 'at', data: { qq: String((ev && ev.user_id) || '') } });
       if (ev && ev.message_id != null) out.unshift({ type: 'reply', data: { id: String(ev.message_id) } });
-      await napcatCall('send_group_msg', { group_id: gid, message: out });
+      const segs = out.map((s) => (s.type === 'image' ? segToLocalFile(s) : s));
+      await napcatCall('send_group_msg', { group_id: gid, message: segs });
     } else if (sessionId.startsWith('private_')) {
       const uid = Number(sessionId.slice(8));
       if (ev && ev.message_id != null) out.unshift({ type: 'reply', data: { id: String(ev.message_id) } });
-      await napcatCall('send_private_msg', { user_id: uid, message: out });
+      const segs = out.map((s) => (s.type === 'image' ? segToLocalFile(s) : s));
+      await napcatCall('send_private_msg', { user_id: uid, message: segs });
     } else {
       return '图画好了，但不知道该发到哪个会话。';
     }
@@ -2391,6 +2864,26 @@ async function generateImageTool(sessionId, args, ctx) {
   }
 
   if (ctx) ctx.imageSent = true;
+  // 记住这次出图的主题，供后续「在上一轮基础上改/加」的短指令复用上下文
+  rememberImagePrompt(sessionId, prompt);
+  // 自主入库：把自己画好的图存进素材库。
+  // 之前画完不入库，用户说「再发一遍 / 把刚才那张发来」时机器人只能回「我这儿没这个文件」。
+  // 这里失败只记日志、不影响出图结果（绝不因为入库把已经画好的图搞没）。
+  if (r && r.file) {
+    try {
+      const b64 = String(r.file).replace(/^base64:\/\//, '');
+      if (b64) {
+        await fetch(capabilityHostBase() + '/v1/media/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'sticker', data: b64, name: String(prompt || '').slice(0, 16) || undefined }),
+          signal: AbortSignal.timeout(10000),
+        }).then((resp) => {
+          if (resp && resp.ok) { if (ctx) ctx.librarySaved = true; log('[库] 出图已自动入库'); }
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  }
   // 让 AI 之后能看到自己刚画的那张图：用户常紧接着吐槽「你给我画成啥了」，
   // 不存下来 AI 就只能回「我没看到图」。
   if (sessionId.startsWith('group_') && r && r.file) {
@@ -2405,6 +2898,371 @@ async function generateImageTool(sessionId, args, ctx) {
     + '。现在用一两句自然的话接一下就行，别再复述画面内容，也别再说"这就画"之类的话。';
 }
 
+// ================= 社交能力：头像 / 点赞 / QQ空间 / 网上找图 =================
+// 说明：这些全都是**真实调用** NapCat 的真实 action（send_like / send_qzone_msg），
+// 不做任何"假装成功"。取不到就如实报错。
+const SOCIAL_TMP = path.join(os.tmpdir(), 'feiyu-social');
+const AVATAR_BASE = 'https://q1.qlogo.cn/g';
+
+function avatarUrl(uin, size) {
+  const s = [40, 100, 140, 640].indexOf(Number(size)) >= 0 ? Number(size) : 640;
+  return AVATAR_BASE + '?b=qq&nk=' + encodeURIComponent(String(uin)) + '&s=' + s;
+}
+
+// 严格的图片字节校验：嗅探不到已知图片头就判定不是图片（防止把防盗链网页当图存进去）
+function isImageBytes(buf) {
+  if (!buf || !Buffer.isBuffer(buf) || buf.length < 8) return false;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  const h = buf.slice(0, 6).toString('ascii');
+  if (h.startsWith('GIF8')) return true;
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return true;
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return true;
+  return false;
+}
+
+// 安全下载网络图片 → 落成本地文件（走 safeFetch：防 SSRF + 逐跳校验 + 限额）
+async function downloadImageToLocal(url, prefix) {
+  let r;
+  try {
+    r = await safeFetch(url, {
+      maxRedirects: 3,
+      maxBytes: 8 * 1024 * 1024,
+      headers: { 'User-Agent': UA, Accept: 'image/*,*/*;q=0.8', 'Accept-Language': 'zh-CN,zh;q=0.9' },
+    });
+  } catch (e) {
+    return { ok: false, error: '请求没发出去：' + String((e && e.message) || e).slice(0, 60) };
+  }
+  if (!r || !r.ok) return { ok: false, error: '下载失败' + ((r && r.error) ? '：' + String(r.error).slice(0, 60) : '') };
+  const buf = Buffer.isBuffer(r.body) ? r.body : Buffer.from(String((r && r.body) || ''), 'base64');
+  if (!buf.length) return { ok: false, error: '下载到的是空文件' };
+  if (!isImageBytes(buf)) return { ok: false, error: '下载到的不是图片（多半是网页或防盗链页）' };
+  try {
+    fs.mkdirSync(SOCIAL_TMP, { recursive: true });
+    const fp = path.join(SOCIAL_TMP, prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + sniffImageExt(buf));
+    fs.writeFileSync(fp, buf);
+    return { ok: true, file: fp, bytes: buf.length, buf };
+  } catch (e) {
+    return { ok: false, error: '落盘失败：' + String((e && e.message) || e).slice(0, 60) };
+  }
+}
+
+// 昵称/群名片 → QQ 号（只在群聊里查得到，结果缓存 60 秒）
+const UIN_CACHE = new Map();
+async function resolveUin(sessionId, hint, ev) {
+  const h = String(hint || '').trim();
+  if (!h) {
+    if (ev && ev.user_id != null) return Number(ev.user_id);
+    const sid = String(sessionId || '');
+    return sid.startsWith('private_') ? Number(sid.slice(8)) : null;
+  }
+  if (/^\d{5,12}$/.test(h)) return Number(h);
+  const sid = String(sessionId || '');
+  if (!sid.startsWith('group_')) return null;            // 私聊没有成员表可查
+  const gid = Number(sid.slice(6));
+  const ck = gid + ':' + h;
+  const c = UIN_CACHE.get(ck);
+  if (c && Date.now() - c.ts < 60000) return c.uin;
+  const r = await napcatCall('get_group_member_list', { group_id: gid });
+  const list = (r && r.data) || [];
+  let hit = null;
+  for (const m of list) {
+    const nick = String(m.nickname || ''), card = String(m.card || '');
+    if (card === h || nick === h) { hit = Number(m.user_id); break; }
+  }
+  if (hit == null) {
+    const m2 = list.find((m) => String(m.nickname || '').includes(h) || String(m.card || '').includes(h));
+    if (m2) hit = Number(m2.user_id);
+  }
+  if (hit != null) UIN_CACHE.set(ck, { uin: hit, ts: Date.now() });
+  return hit;
+}
+
+// 统一发送：图片段一律落成本地绝对路径（NapCat 会静默丢弃大段 inline base64）
+async function sendSegsToSession(sessionId, segs, ev) {
+  const sid = String(sessionId || '');
+  const out = segs.map((s) => (s && s.type === 'image' ? segToLocalFile(s) : s));
+  if (sid.startsWith('group_')) {
+    if (ev && ev.user_id != null) out.unshift({ type: 'at', data: { qq: String(ev.user_id) } });
+    if (ev && ev.message_id != null) out.unshift({ type: 'reply', data: { id: String(ev.message_id) } });
+    return await napcatCall('send_group_msg', { group_id: Number(sid.slice(6)), message: out });
+  }
+  if (sid.startsWith('private_')) return await napcatCall('send_private_msg', { user_id: Number(sid.slice(8)), message: out });
+  return null;
+}
+
+// 查并发任意人的头像（腾讯公开头像接口，实测可用）
+async function getAvatarTool(sessionId, args, ctx) {
+  const m = IMG_TOOL_CTX.get(sessionId) || {};
+  const ev = m.ev || null;
+  const hint = String((args && args.qq) || (args && args.name) || '').trim();
+  const uin = await resolveUin(sessionId, hint, ev);
+  if (!uin) return '不知道要查谁的头像，给我 QQ 号或者昵称（群里我才认得到昵称）。';
+  const d = await downloadImageToLocal(avatarUrl(uin, 640), 'avatar' + uin);
+  if (!d.ok) return '头像没取到：' + d.error + '。如实跟对方说，别编。';
+  const r = await sendSegsToSession(sessionId, [{ type: 'image', data: { file: d.file } }], ev);
+  if (r && r.status && r.status !== 'ok') return '头像取到了但没发出来：' + (r.message || '').slice(0, 60);
+  if (String((args && args.save) || '') === '1') {
+    try {
+      await fetch(capabilityHostBase() + '/v1/media/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'image', data: d.buf.toString('base64'), ext: sniffImageExt(d.buf), name: '头像' + uin }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (e) { /* 入库失败不影响主流程 */ }
+  }
+  log('[头像] 已取头像 uin=' + uin + ' bytes=' + d.bytes);
+  return '已经把 ' + uin + ' 的头像发出来了。用一两句自然的话接一下就行。';
+}
+
+// 点赞（真实 send_like，QQ 有限额，失败如实说）
+async function sendLikeTool(sessionId, args, ctx) {
+  const m = IMG_TOOL_CTX.get(sessionId) || {};
+  const ev = m.ev || null;
+  const uin = await resolveUin(sessionId, String((args && args.qq) || '').trim(), ev);
+  if (!uin) return '不知道给谁点赞，告诉我要给谁点（或者给个 QQ 号）。';
+  let times = Number(args && args.times);
+  if (!Number.isFinite(times)) times = 1;
+  times = Math.max(1, Math.min(20, Math.trunc(times)));
+  const r = await napcatCall('send_like', { user_id: String(uin), times });
+  if (!r || r.status !== 'ok') {
+    return '点赞失败了：' + String((r && r.message) || 'NapCat 没响应').slice(0, 80) + '。多半是今天对 TA 的赞到上限了，如实跟对方说，别假装点过了。';
+  }
+  log('[点赞] uin=' + uin + ' times=' + times);
+  return '已经给 ' + uin + ' 点了 ' + times + ' 个赞。';
+}
+
+// 发 QQ 空间说说（真实 send_qzone_msg，会真的发出去，所以只在明确意图时才挂这个工具）
+async function publishQzoneTool(sessionId, args, ctx) {
+  const content = String((args && args.content) || '').trim();
+  if (!content) return '没写说说内容，先告诉我要在空间发什么。';
+  const raw = Array.isArray(args && args.images) ? args.images.map(String).filter(Boolean) : [];
+  const safeImgs = [];
+  for (const p of raw) {
+    // 安全：只接受本机已存在的绝对路径，不把任意 URL 递给 NapCat（避免 SSRF / 非法路径）
+    if (path.isAbsolute(p) && fs.existsSync(p)) safeImgs.push(p);
+    else log('[空间] 跳过不合规图片路径');
+  }
+  const r = await napcatCall('send_qzone_msg', {
+    content,
+    images: safeImgs,
+    ugc_right: 1,
+    target_uins: [],
+  });
+  if (!r || r.status !== 'ok') {
+    return '空间说说没发出去：' + String((r && r.message) || 'NapCat 没响应').slice(0, 80) + '。如实跟对方说原因，别假装发过了。';
+  }
+  const tid = r.data && r.data.tid;
+  log('[空间] 已发说说 len=' + content.length + ' imgs=' + safeImgs.length + (tid ? ' tid=' + tid : ''));
+  return 'QQ空间说说已经真的发出去了' + (safeImgs.length ? '（带 ' + safeImgs.length + ' 张图）' : '')
+    + (tid ? '（说说 id：' + String(tid).slice(0, 20) + '，你说要删我可以删）' : '')
+    + '。跟对方说一声发好了，别复述正文。';
+}
+
+// ================= V15.6：自主社交操作（逐步下放的 QQ 权限）=================
+// 每个工具都先过 privOk 权限闸门——关了就如实说「没开放权限」，bot 无法绕过。
+
+// 删除一条聊天消息（或 QQ 空间内容）。仅聊天消息的删除走真实 delete_msg；
+// 空间内容删除走 QQ Web API（见 qzone_ops）。
+async function toolDeleteMessage(sessionId, args, ctx) {
+  if (!privOk('deleteMsg')) return '现在没开放「删除消息」的权限（管理员在 ai_config.json 的 qq_privileges.deleteMsg 打开就行）。';
+  const qz = String((args && args.qzone) || '').trim();
+  if (qz) return await toolQzoneDelete(args); // 透传给空间删除
+  // 聊天消息：优先用给定 id，否则删机器人自己刚发的那条
+  let mid = String((args && args.message_id) || '').trim();
+  if (!mid) {
+    mid = lastBotSentMid.get(sessionId) || '';
+    if (!mid) return '没给要删的消息 id，也记不住我刚发过哪条——把要删的消息 id 给我吧。';
+  }
+  const r = await napcatCall('delete_msg', { message_id: Number(mid) });
+  if (!r || r.status !== 'ok') {
+    return '这条删不掉：' + String((r && r.message) || 'NapCat 没响应').slice(0, 80)
+      + '。只能删我自己发的、且没超过服务端保留期的消息，别人的删不了。如实跟对方说，别假装删了。';
+  }
+  log('[删除] 已删聊天消息 mid=' + mid);
+  return '已经把那条消息删了。跟对方说一声删好了，别复述。';
+}
+
+// 改机器人在某个群里的显示名（群名片）。用 set_group_card 设置自己的名片。
+async function toolSetGroupCard(sessionId, args, ctx) {
+  if (!privOk('setGroupCard')) return '没开放「改群名片」的权限（管理员在 ai_config.json 的 qq_privileges.setGroupCard 打开就行）。';
+  const card = String((args && args.name) || '').trim();
+  if (!card) return '没告诉要改成什么名字。';
+  if (card.length > 30) return '名字太长了（群名片上限 30 字），短一点。';
+  // 群号：优先参数，否则从当前会话推（仅群聊会话 'group_<id>' 能推）
+  let groupId = Number(args && args.group_id) || 0;
+  if (!groupId && sessionId && sessionId.startsWith('group_')) groupId = Number(sessionId.slice(6));
+  if (!groupId) return '改群名片得知道是哪个群（给我群号，或者在群里说）。';
+  // 自己的 QQ：事件里带 self_id；没有就从登录信息取
+  let selfId = (ctx && ctx.ev && ctx.ev.self_id) || 0;
+  if (!selfId) { try { const me = await napcatCall('get_login_info', {}); selfId = me && me.data && me.data.user_id; } catch (e) {} }
+  if (!selfId) return '拿不到自己的 QQ 号，没法改名片（可能需要 NapCat 先登录）。';
+  const r = await napcatCall('set_group_card', { group_id: Number(groupId), user_id: Number(selfId), card });
+  if (!r || r.status !== 'ok') {
+    return '名片没改成：' + String((r && r.message) || 'NapCat 没响应').slice(0, 80) + '。如实跟对方说原因。';
+  }
+  log('[名片] 群' + groupId + ' 已改为「' + card + '」');
+  return '已经把我在本群的名字改成「' + card + '」了。跟对方说一声就好。';
+}
+
+// 改自己头像（NapCat 非标准 action set_qq_avatar；不同版本字段名可能不同，失败如实说）。
+async function toolSetSelfAvatar(sessionId, args, ctx) {
+  if (!privOk('setAvatar')) return '没开放「换头像」的权限（管理员在 ai_config.json 的 qq_privileges.setAvatar 打开就行）。';
+  const p = String((args && args.image) || '').trim();
+  if (!p) return '没给图片路径。';
+  // 安全：只接受本机已存在的绝对路径，不把任意 URL 递给 NapCat（防 SSRF / 乱改）
+  if (!isLocalPath(p) || !fs.existsSync(p)) return '图片路径不合规（必须是本机已存在的绝对路径，不能是网址）。';
+  // 只接受常见图片类型
+  if (!/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(p)) return '头像得是图片文件（jpg/png/webp…）。';
+  const r = await napcatCall('set_qq_avatar', { file: p });
+  if (!r || r.status !== 'ok') {
+    return '头像没换上：' + String((r && r.message) || '这个 NapCat 版本可能不支持 set_qq_avatar，或 QQ 版本限制').slice(0, 80) + '。如实跟对方说原因。';
+  }
+  log('[头像] 已更换为 ' + p.replace(/^.*[\\/]/, ''));
+  return '头像已经换好了。跟对方说一声就行。';
+}
+
+// 单独发一个 QQ 小黄脸表情（比发整张图更自然）。带频率护栏，避免刷屏。
+async function toolSendFace(sessionId, args, ctx) {
+  if (!privOk('emoji')) return '没开放「发表情」的权限（管理员在 ai_config.json 的 qq_privileges.emoji 打开就行）。';
+  if (!rateAllow('emoji')) return '我这一个小时表情发太多了，先歇会儿，待会儿再跟你皮。';
+  const kw = String((args && args.keyword) || '').trim();
+  let seg;
+  if (kw && FACE_MAP[kw] != null) {
+    seg = { type: 'face', data: { id: String(FACE_MAP[kw]) } };
+  } else if (kw) {
+    // 关键词命中不到黄脸时，退回既有表情包解析（可能是本地图）
+    seg = resolveSticker(kw);
+  } else {
+    seg = { type: 'face', data: { id: String(FACE_IDS[Math.floor(Math.random() * FACE_IDS.length)]) } };
+  }
+  const ev = (ctx && ctx.ev) || null;
+  const r = await sendSegsToSession(sessionId, [seg], ev);
+  if (r && r.status && r.status !== 'ok') return '表情没发出来：' + (r.message || '').slice(0, 60);
+  log('[表情] 已发 face ' + (seg.data && seg.data.id) + (kw ? ' kw=' + kw : ''));
+  return '已经发了一个表情。别在回复里再写 [[表情]] 了，免得发两个。';
+}
+
+// QQ空间删除（说说 / 评论）：走独立 QQ Web API 模块（需 cookie），未配置如实说。
+async function toolQzoneDelete(args) {
+  if (!qzoneReady()) return 'QQ空间删除没配好（需要在 ai_config.json 的 qq_privileges.qzone 里填 uin/p_uin/p_skey 并打开 enabled）。配好前我不乱动你的空间。';
+  if (!(qzoneCfg().allowDelete)) return '管理员没开「删除QQ空间」的权限（qq_privileges.qzone.allowDelete）。';
+  const tid = String((args && args.tid) || '').trim();
+  const commentId = String((args && args.comment_id) || '').trim();
+  if (!tid && !commentId) return '没给要删的说说 id 或评论 id。';
+  try {
+    qzoneOps.setCreds(qzoneCfg());
+    const r = await qzoneOps.deleteContent({ tid, commentId });
+    if (!r || !r.ok) return '空间内容没删掉：' + String((r && r.error) || 'QQ空间接口没响应').slice(0, 80) + '。如实跟对方说。';
+    log('[空间] 已删 ' + (tid ? '说说 ' + tid : '评论 ' + commentId));
+    return '已经把那条 QQ 空间' + (tid ? '说说' : '评论') + '删了。跟对方说一声就好。';
+  } catch (e) {
+    return '删空间内容时出错了：' + e.message.slice(0, 80) + '。如实跟对方说，别假装删了。';
+  }
+}
+
+// QQ空间回复某条评论：走独立 QQ Web API 模块（需 cookie）。
+async function toolQzoneReply(args) {
+  if (!qzoneReady()) return 'QQ空间回复没配好（需要在 ai_config.json 的 qq_privileges.qzone 里填 uin/p_uin/p_skey 并打开 enabled）。配好前我不回空间评论。';
+  const commentId = String((args && args.comment_id) || '').trim();
+  const content = String((args && args.content) || '').trim();
+  if (!commentId) return '没给要回复的评论 id。';
+  if (!content) return '没写回复内容。';
+  try {
+    qzoneOps.setCreds(qzoneCfg());
+    const r = await qzoneOps.replyComment({ commentId, content });
+    if (!r || !r.ok) return '空间评论没回成：' + String((r && r.error) || 'QQ空间接口没响应').slice(0, 80) + '。如实跟对方说。';
+    log('[空间] 已回评论 ' + commentId);
+    return '已经在那条空间评论下回了一句。跟对方说一声就好。';
+  } catch (e) {
+    return '回空间评论时出错了：' + e.message.slice(0, 80) + '。如实跟对方说。';
+  }
+}
+
+// 网上搜图：Bing 图片版面解析（实测可返回 25 条真实图片地址）
+async function searchImageUrls(query, n) {
+  const url = 'https://cn.bing.com/images/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&mkt=zh-CN';
+  let r;
+  try {
+    r = await safeFetch(url, {
+      maxRedirects: 3,
+      maxBytes: 4 * 1024 * 1024,
+      headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+    });
+  } catch (e) {
+    return { ok: false, error: '搜索请求没发出去：' + String((e && e.message) || e).slice(0, 60) };
+  }
+  if (!r || !r.ok) return { ok: false, error: '图片搜索失败' + ((r && r.error) ? '：' + String(r.error).slice(0, 60) : '') };
+  const html = Buffer.isBuffer(r.body) ? r.body.toString('utf-8') : String(r.body || '');
+  const re = /murl&quot;:&quot;(https?:\/\/.*?)&quot;/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(html)) !== null && out.length < 40) {
+    const u = m[1].replace(/&amp;/g, '&');
+    if (out.indexOf(u) < 0) out.push(u);
+  }
+  if (!out.length) return { ok: false, error: '没搜到可用的图片地址（Bing 版面可能变了）' };
+  return { ok: true, urls: out.slice(0, Math.max(1, Math.min(10, Number(n) || 8))) };
+}
+
+async function searchImageTool(sessionId, args, ctx) {
+  const m = IMG_TOOL_CTX.get(sessionId) || {};
+  const ev = m.ev || null;
+  const query = String((args && args.query) || '').trim();
+  if (!query) return '没给搜索词，先告诉我你要找什么图。';
+  let want = Number(args && args.count) || 1;
+  if (!Number.isFinite(want)) want = 1;
+  want = Math.max(1, Math.min(3, Math.trunc(want)));
+
+  const s = await searchImageUrls(query, 12);
+  if (!s.ok) return '网上没找到图：' + s.error + '。如实跟对方说，别编造。';
+
+  const got = [];
+  for (const u of s.urls) {
+    if (got.length >= want) break;
+    const d = await downloadImageToLocal(u, 'webimg');
+    if (d.ok) got.push(d);
+  }
+  if (!got.length) return '搜到了图但一张都没下载下来（多半是防盗链）。如实跟对方说没拿到图。';
+
+  const r = await sendSegsToSession(sessionId, got.map((d) => ({ type: 'image', data: { file: d.file } })), ev);
+  if (r && r.status && r.status !== 'ok') return '图拿到了但没发出来：' + (r.message || '').slice(0, 60);
+
+  let saved = 0;
+  if (String((args && args.save) || '') === '1') {
+    for (const d of got) {
+      try {
+        const resp = await fetch(capabilityHostBase() + '/v1/media/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'sticker', data: d.buf.toString('base64'), ext: sniffImageExt(d.buf), name: query.slice(0, 20) }),
+          signal: AbortSignal.timeout(15000),
+        });
+        const j = await resp.json().catch(() => null);
+        if (resp.ok && j && j.ok) saved += 1;
+      } catch (e) { /* 入库失败不影响发图 */ }
+    }
+  }
+  log('[找图] query=' + query + ' 发出=' + got.length + ' 入库=' + saved);
+  return '从网上找了 ' + got.length + ' 张「' + query + '」的图发到聊天里了'
+    + (saved ? '，并且顺手存了 ' + saved + ' 张进素材库（下次可以直接调出来发）' : '')
+    + '。用一两句自然的话接一下就行。';
+}
+
+// 「盗图」：按 QQ 号 / 昵称定位某人最近发的图
+async function resolveSegFromUser(sessionId, hint) {
+  const m = IMG_TOOL_CTX.get(sessionId) || {};
+  const ev = m.ev || null;
+  const uin = await resolveUin(sessionId, hint, ev);
+  if (!uin) return { ok: false, error: '没找到「' + hint + '」这个人，确认下 QQ 号或昵称？' };
+  const sid = String(sessionId || '');
+  const segs = (sid.startsWith('group_') ? peekPendingImages(Number(sid.slice(6)), uin) : peekPendingImages(null, uin))
+    .filter((s) => s && s.type === 'image' && s.data && (s.data.file || s.data.url));
+  if (!segs.length) return { ok: false, error: '没翻到 TA 最近发的图（我只记得 5 分钟内收到的图）。让 TA 先发一张再存？' };
+  return { ok: true, seg: segs[segs.length - 1], uin };
+}
+
 async function runTool(name, args, sessionId, ctx) {
   try {
     if (name === 'web_search') return await webSearch(args.query);
@@ -2412,6 +3270,18 @@ async function runTool(name, args, sessionId, ctx) {
     if (name === 'get_current_time') return getCurrentTime();
     if (name === 'remember') return rememberNote(sessionId, args.content);
     if (name === 'send_sticker') return await sendStickerTo(sessionId, args.keyword, ctx);
+    if (name === 'save_to_library') return await saveToLibraryTool(sessionId, args, ctx);
+    if (name === 'send_voice') return await sendVoiceTool(sessionId, args, ctx);
+    if (name === 'get_avatar') return await getAvatarTool(sessionId, args, ctx);
+    if (name === 'send_like') return await sendLikeTool(sessionId, args, ctx);
+    if (name === 'publish_qzone') return await publishQzoneTool(sessionId, args, ctx);
+    if (name === 'delete_message') return await toolDeleteMessage(sessionId, args, ctx);
+    if (name === 'set_group_card') return await toolSetGroupCard(sessionId, args, ctx);
+    if (name === 'set_self_avatar') return await toolSetSelfAvatar(sessionId, args, ctx);
+    if (name === 'send_face') return await toolSendFace(sessionId, args, ctx);
+    if (name === 'qzone_delete') return await toolQzoneDelete(args);
+    if (name === 'qzone_reply') return await toolQzoneReply(args);
+    if (name === 'search_image') return await searchImageTool(sessionId, args, ctx);
     if (name === 'generate_image') return await generateImageTool(sessionId, args, ctx);
     if (name === 'create_file') return await toolCreateFile(sessionId, args);
     if (name === 'create_table') return await toolCreateTable(sessionId, args);
@@ -2801,11 +3671,8 @@ function resolveSticker(kw) {
         list.find((s) => s.kw.includes(k));
     }
     if (!hit) hit = list[Math.floor(Math.random() * list.length)];
-    const dataUrl = readLocalAsBase64(hit.file);
-    if (dataUrl) {
-      const i = dataUrl.indexOf(',');
-      if (i > 0) return { type: 'image', data: { file: 'base64://' + dataUrl.slice(i + 1) } };
-    }
+    // 直接发本地绝对路径（NapCat 对较大的 inline base64 图片会静默丢弃，本地路径最稳）
+    return { type: 'image', data: { file: hit.file } };
   }
   let id = k && FACE_MAP[k] != null ? FACE_MAP[k] : null;
   if (id == null) id = FACE_IDS[Math.floor(Math.random() * FACE_IDS.length)];
@@ -3712,6 +4579,117 @@ function extractReply(msg) {
   return null;
 }
 
+// 引用回复：拉取被引用消息里的图片段（供视觉查看与图生图使用）。
+// NapCat get_msg 返回的原始消息段结构与事件推送一致，其 image 段的 data.file
+// 可复用 fetchImageAsBase64 的 get_image/本地/下载链路取到字节。
+const refMsgCache = new Map(); // message_id -> { segs, ts }
+async function fetchReferencedImageSegs(messageId) {
+  const key = String(messageId);
+  if (!key) return [];
+  const now = Date.now();
+  const cached = refMsgCache.get(key);
+  if (cached && now - cached.ts < 5 * 60 * 1000) return cached.segs;
+  try {
+    const r = await napcatCall('get_msg', { message_id: Number(messageId) });
+    if (r && r.status === 'ok' && r.data && Array.isArray(r.data.message)) {
+      const raw = r.data.message;
+      const segs = (Array.isArray(raw) ? raw : (segments(raw) || []))
+        .filter((s) => s && s.type === 'image');
+      refMsgCache.set(key, { segs, ts: now });
+      if (refMsgCache.size > 50) { const oldest = refMsgCache.keys().next().value; refMsgCache.delete(oldest); }
+      return segs;
+    }
+  } catch (e) {
+    log('[引用图] get_msg 失败 message_id=' + messageId + ': ' + e.message);
+  }
+  return [];
+}
+
+// 引用回复：拉取被引用消息的发送者，判断是否「回复给机器人」。
+// 这是「别人回复机器人的话 → 机器人主动回复」的可靠判定：不依赖本地环形缓冲（有容量上限、旧消息会丢），
+// 直接问 NapCat 取原消息的发送者，与 ev.self_id 比对即可。
+const refSenderCache = new Map(); // message_id -> { uid, ts }
+async function getReferencedSenderId(messageId) {
+  const key = String(messageId);
+  if (!key) return null;
+  const now = Date.now();
+  const cached = refSenderCache.get(key);
+  if (cached && now - cached.ts < 2 * 60 * 1000) return cached.uid;
+  try {
+    const r = await napcatCall('get_msg', { message_id: Number(messageId) });
+    if (r && r.status === 'ok' && r.data) {
+      let uid = null;
+      if (r.data.sender && r.data.sender.user_id != null) uid = String(r.data.sender.user_id);
+      else if (r.data.user_id != null) uid = String(r.data.user_id);
+      if (uid != null) {
+        refSenderCache.set(key, { uid, ts: now });
+        if (refSenderCache.size > 50) { const oldest = refSenderCache.keys().next().value; refSenderCache.delete(oldest); }
+        return uid;
+      }
+    }
+  } catch (e) {
+    log('[引用] get_msg 取发送者失败 message_id=' + messageId + ': ' + e.message);
+  }
+  return null;
+}
+
+// V15.6：逐条记录机器人自己最近发出的消息 id（按会话）——支撑「删掉你刚发的」这类无 id 删除。
+const lastBotSentMid = new Map(); // sessionId -> message_id
+
+// V15.6：权限查询（逐步下放的 QQ 权限）。整组关了或单项关了都算无权限。
+function privOk(flag) {
+  try {
+    const q = CFG.qq_privileges;
+    if (!q || q.enabled === false) return false;
+    if (flag in q && q[flag] === false) return false;
+    return true;
+  } catch (e) { return false; }
+}
+function qzoneCfg() {
+  try { return (CFG.qq_privileges && CFG.qq_privileges.qzone) || {}; } catch (e) { return {}; }
+}
+function qzoneReady() {
+  const z = qzoneCfg();
+  return !!(z && z.enabled && z.uin && z.p_uin && z.p_skey);
+}
+
+// V15.6：频率护栏（「不要一直发」）。按 kind 每小时计数，超过上限返回 false。
+const rateHits = new Map(); // kind -> { t0, n }
+function rateAllow(kind) {
+  const cap = Number(CFG.rate && CFG.rate[kind + 'PerHourCap']) || 0;
+  if (!cap) return true; // 0 = 不限
+  const now = Date.now();
+  let rec = rateHits.get(kind);
+  if (!rec || now - rec.t0 >= 3600000) { rec = { t0: now, n: 0 }; rateHits.set(kind, rec); }
+  if (rec.n >= cap) { log('[频率] ' + kind + ' 已达每小时上限 ' + cap + '，本次跳过'); return false; }
+  rec.n += 1;
+  return true;
+}
+
+// V15.6：触发过密时的「短暂静默」——避免机器人刷屏。按会话(key)独立计数，
+// 一分钟内同一会话连续触发超过 silentAfter 次就静默 silentBackoffMs。返回 true=当前应跳过。
+const backoffUntilMap = new Map(); // key -> 静默截止时间戳
+const triggerStreakMap = new Map(); // key -> { n, t0 }
+function frenzyGuard(key) {
+  const k = String(key || 'global');
+  const now = Date.now();
+  const after = Number(CFG.rate && CFG.rate.silentAfter) || 0;
+  const backoff = Number(CFG.rate && CFG.rate.silentBackoffMs) || 0;
+  const until = backoffUntilMap.get(k) || 0;
+  if (now < until) return true;                       // 静默中
+  if (!after) return false;                           // 未启用静默
+  let s = triggerStreakMap.get(k) || { n: 0, t0: 0 };
+  if (now - s.t0 > 60000) s = { n: 0, t0: now };      // 一分钟窗口重置
+  s.n += 1; s.t0 = now; triggerStreakMap.set(k, s);
+  if (s.n > after && backoff > 0) {
+    backoffUntilMap.set(k, now + backoff);
+    log('[频率] 会话 ' + k + ' 连续触发 ' + s.n + ' 次，进入静默 ' + (backoff / 1000) + 's');
+    triggerStreakMap.delete(k);
+    return true;
+  }
+  return false;
+}
+
 // 从缓冲里按 message_id 找被引用的消息（找不到就返回 null，绝不编造）
 function findBufferedMsg(groupId, messageId) {
   if (!messageId) return null;
@@ -3736,10 +4714,10 @@ function shouldReplyGroup(ev, text, opts) {
     return { reply: true, needsJudge: false, reason: 'at', bypassCooldown: true };
   }
 
-  // 优先级 2：回复机器人自己的消息 → 必回（确定性命中）
+  // 优先级 2：回复机器人自己的消息 → 必回（确定性命中，且不受冷却限制，反应更跟手）
   const rp = opts.reply;
   if (rp && rp.isToBot) {
-    return { reply: true, needsJudge: false, reason: 'reply-to-bot', bypassCooldown: false };
+    return { reply: true, needsJudge: false, reason: 'reply-to-bot', bypassCooldown: true };
   }
 
   // 优先级 3：出现机器人名字 → 候选（【提到】≠【呼叫】，本地无法区分，交 Judge）
@@ -4213,14 +5191,69 @@ function recordAgentRun(ar) {
 }
 
 // ———— 组装 + 调用 AI + 发送（群聊/私聊共用，v10 抽出）————
+// ================= 平台访问控制（白名单 / 黑名单）问询 =================
+// 桌面端「访问控制」是平台级的唯一裁决源。机器人后端在调 AI 之前先问它一句「这条该不该处理」。
+// 事件格式必须用 OneBot 原生字段（message_type / user_id / group_id / sender.group_id），
+// 因为桌面端按同一套字段做归一化；这里只带身份字段，不外发消息正文。
+let _accessWarned = false;
+async function checkPlatformAccess(ev, userId, groupId) {
+  const ac = CFG.accessControl || {};
+  if (!ac.enabled) return { allowed: true, skipped: true, reason: 'disabled' };
+  if (isAdmin(userId)) return { allowed: true, skipped: true, reason: 'admin' };
+  const lite = {
+    post_type: 'message',
+    message_type: (ev && ev.message_type) || 'private',
+    user_id: Number(userId),
+    self_id: (ev && ev.self_id) != null ? ev.self_id : undefined,
+  };
+  if (ev && ev.sub_type) lite.sub_type = ev.sub_type;
+  if (groupId != null) lite.group_id = Number(groupId);
+  if (ev && ev.sender && ev.sender.group_id != null) lite.sender = { group_id: Number(ev.sender.group_id) };
+  try {
+    const r = await fetch(String(ac.endpoint || 'http://127.0.0.1:8720/v1/access/check'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instanceId: String(ac.instanceId || 'napcat'), event: lite }),
+      signal: AbortSignal.timeout(Number(ac.timeoutMs) || 3000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || j.ok === false) {
+      if (!_accessWarned) { log('[访问控制] 问询失败（放行）: ' + String((j && j.error) || ('http ' + r.status)).slice(0, 80)); _accessWarned = true; }
+      return { allowed: true, skipped: true, reason: 'query-failed' };
+    }
+    const d = j.decision || {};
+    // configured=false：桌面端还没给这个实例配过任何规则 → 不拦截，保持原行为
+    if (d.configured === false) return { allowed: true, skipped: true, configured: false, reason: 'not-configured' };
+    if (d.allowed === false) {
+      return { allowed: false, configured: true, stage: d.stage, reason: String(d.reason || '被访问控制拒绝') };
+    }
+    return { allowed: true, configured: true, reason: String(d.reason || '') };
+  } catch (e) {
+    if (!_accessWarned) { log('[访问控制] 能力网关不可达（放行；桌面端未启动？）: ' + String((e && e.message) || e).slice(0, 80)); _accessWarned = true; }
+    return { allowed: true, skipped: true, reason: 'unreachable' };
+  }
+}
+
 async function processReply(ev, o) {
   const msgType = ev.message_type;
   const userId = Number(ev.user_id);
   const sessionId = o.sessionId;
 
+  // 平台访问控制：在调模型之前裁决。被拒绝的消息直接丢弃，不调模型、不回复。
+  const acc = await checkPlatformAccess(ev, ev.user_id, ev.group_id);
+  if (!acc.allowed) {
+    log('[访问控制] 已拒绝 ' + (msgType === 'group' ? ('群' + maskId(ev.group_id) + '/' + maskId(ev.user_id)) : ('私聊' + maskId(ev.user_id))) + ' 原因=' + acc.reason);
+    return;
+  }
+
   // —— V14-C：视频段直接来自真实事件（不是模型给的路径），只传引用 ——
   const videoSegs = segments(ev.message).filter((s) => s && s.type === 'video');
   const crRefs = chatRecordMediaRefs(ev);   // 待处理聊天记录里的图片/视频引用（可能为 null）
+
+  // ===== 1.4.9 多模态：真实视频段 → 异步触发视频理解（不阻塞主回复）=====
+  if (videoSegs.length > 0 && mediaSvc) {
+    triggerVideoUnderstanding(ev, videoSegs).catch((e) => log('[多模态] 视频触发异常: ' + (e && e.message || e)));
+  }
 
   // —— 内容顺序（保证前缀稳定）：图片 → 群上下文 → 当前文本 → 提示 ——
   const parts = [];
@@ -4509,7 +5542,9 @@ async function processReply(ev, o) {
       text: replyText || '[表情包]', time: Date.now(),
       atMe: false, isBot: true, replyTo: null,
     });
+    if (lastMid) lastBotSentMid.set('group_' + ev.group_id, lastMid); // V15.6：供「删掉你刚发的」使用
   } else {
+    let lastPrivMid = '';
     for (let i = 0; i < chunks.length; i++) {
       const segs = [{ type: 'text', data: { text: chunks[i] } }];
       if (i === 0 && ev.message_id != null) segs.unshift({ type: 'reply', data: { id: String(ev.message_id) } });
@@ -4520,8 +5555,10 @@ async function processReply(ev, o) {
         log('[发送失败] 私聊' + maskId(userId) + ' status=' + (r2 && r2.status)
           + ' retcode=' + (r2 && r2.retcode) + ' 原因=' + String((r2 && (r2.wording || r2.message)) || '').slice(0, 60));
       }
+      if (r2 && r2.data && r2.data.message_id != null) lastPrivMid = String(r2.data.message_id);
       if (i < chunks.length - 1) await nap(gapMs);
     }
+    if (lastPrivMid) lastBotSentMid.set('private_' + userId, lastPrivMid); // V15.6：供「删掉你刚发的」使用
   }
   stats.replies++; saveStats();
 }
@@ -5328,7 +6365,20 @@ async function handleMessage(ev) {
   const rawMsg = ev.message;
   let msgSegs = segments(rawMsg);
   let text = extractText(rawMsg);
-  const imgSegs = msgSegs.filter((s) => s?.type === 'image');
+  let imgSegs = msgSegs.filter((s) => s?.type === 'image');
+  // 引用回复：把被引用消息里的图片并进图片上下文（修复「引用表情包/图无法查看」与「引用图无法图生图」）。
+  // 用户引用一条带图消息、自己只发纯文字时，当前消息本身没有图片段——图在被引用的原消息里，
+  // 必须调 NapCat get_msg 把它拉回来并并入，否则视觉查看和图生图都拿不到这张图。
+  const rp0 = extractReply(rawMsg);
+  if (rp0 && rp0.id) {
+    try {
+      const refImgs = await fetchReferencedImageSegs(rp0.id);
+      if (refImgs.length) {
+        imgSegs = imgSegs.concat(refImgs);
+        log('[引用图] 已并入 ' + refImgs.length + ' 张被引用消息的图片');
+      }
+    } catch (e) { /* 引用消息已撤回/过期则忽略，不影响主流程 */ }
+  }
   // V14-C.2 修复 A：QQ 分享卡片是 json/xml 段、没有 text 段，以前会在这里被当「空消息」静默丢弃。
   // 这里先做一次受控提取（只取标题/摘要/URL，长度受限），再走下面的空消息判断。
   let fromShareCard = false;
@@ -5380,6 +6430,15 @@ async function handleMessage(ev) {
     const atMe = isAtMe(rawMsg, selfId);
     const rp = extractReply(rawMsg);
     const rpTarget = rp ? findBufferedMsg(ev.group_id, rp.id) : null;
+    // V15.6：别人回复机器人说的话 → 主动回复。本地环形缓冲会因容量上限丢旧消息，
+    // 故这里直接问 NapCat 取被引用消息的发送者，和 self_id 比对；命中即视为「对着机器人说」。
+    let replyToBot = !!(rpTarget && rpTarget.isBot);
+    if (rp && rp.id && !replyToBot && privOk('replyToBot')) {
+      try {
+        const sid = await getReferencedSenderId(rp.id);
+        if (sid && String(sid) === String(selfId)) replyToBot = true;
+      } catch (e) {}
+    }
     const grpName = await getGroupName(ev.group_id, ev.group_name);
 
     // ① 无条件记录进本地环形缓冲（不管是否回复，低成本）+ 累计触发摘要
@@ -5408,6 +6467,8 @@ async function handleMessage(ev) {
 
     // V13.6：缓存本条图片引用（放在预筛之前，纯图片消息即使被丢弃也能留住）
     if (imgSegs.length) storePendingGroupImages(ev.group_id, userId, imgSegs);
+    // 同私聊：收到图立刻挂上下文，避免纯图片消息走视觉分支后工具拿不到图。
+    if (imgSegs.length) setImageToolCtx('group_' + ev.group_id, ev, imgSegs);
 
     // ①.5 用户指令（/今日总结 /昨日总结 /记忆…）：**放在预筛之前**，命令不必 @ 也能用。
     //     都是只读或本人范围内的操作，且总结命令自带限频与二次确认。
@@ -5424,7 +6485,7 @@ async function handleMessage(ev) {
 
     // ② 本地规则预筛（全程 0 次 API 调用）
     let decision = shouldReplyGroup(ev, text, {
-      reply: { isToBot: !!(rpTarget && rpTarget.isBot) },
+      reply: { isToBot: !!(rpTarget && rpTarget.isBot) || replyToBot },
       requireAt: !!CFG.group.requireAt,
     });
 
@@ -5458,8 +6519,8 @@ async function handleMessage(ev) {
     if (CFG.group.mode === 'all' && !decision.deferToAggregator) {
       decision = { reply: true, needsJudge: false, reason: 'all', bypassCooldown: atMe };
     } else if (CFG.group.mode === 'at') {
-      // 兼容旧模式：mode='at' 时退回「仅@才回」；但合并转发（聊天记录）一律视为对着机器人，不需要 @
-      if (!atMe && !hasForwardSeg) { recordAvoided('l0'); logDrop('群' + maskId(ev.group_id), '群预筛', '未@我'); return; }
+      // 兼容旧模式：mode='at' 时退回「仅@才回」；但合并转发（聊天记录）/回复机器人 一律视为对着机器人，不需要 @
+      if (!atMe && !hasForwardSeg && !replyToBot) { recordAvoided('l0'); logDrop('群' + maskId(ev.group_id), '群预筛', '未@我'); return; }
     } else if (!decision.reply && !decision.needsJudge && !decision.deferToAggregator) {
       recordAvoided('l0'); logDrop('群' + maskId(ev.group_id), '群预筛', decision.reason || 'normal-chat'); return;
     }
@@ -5526,6 +6587,8 @@ async function handleMessage(ev) {
     let useImgs = imgSegs.slice();
     if (!useImgs.length) useImgs = takePendingGroupImages(ev.group_id, userId);
 
+    // V15.6：同一群连续被触发过密 → 短暂静默，别一直发（「不要一直发」）
+    if (frenzyGuard('g' + ev.group_id)) { logDrop('群' + maskId(ev.group_id), '频率静默', 'burst'); return; }
     await decideAndReply(ev, { text: pureText || text, imgSegs: useImgs, grpName, decision });
     return;
   }
@@ -5588,10 +6651,16 @@ async function handleMessage(ev) {
   // 私聊同样缓存最近发的图，支持「先发图、再打字说改成X」的图生图记忆
   // （之前私聊完全没这条路，跨消息图生图必失败 → “记不住图”）
   if (imgSegs.length) storePendingGroupImages(null, userId, imgSegs);
+  // 关键修复：收到图就立刻挂进工具上下文。
+  // 之前只在 processReply 里挂，而「纯图片无文字」的消息走视觉/Agent 分支，根本到不了那里，
+  // 于是 save_to_library 只能报「你还没给我发过图」（日志实证：收到 [image] 后 2 秒仍报无图）。
+  if (imgSegs.length) setImageToolCtx('private_' + userId, ev, imgSegs);
   let privImgs = imgSegs.slice();
   if (!privImgs.length) privImgs = takePendingGroupImages(null, userId);
 
   const chatId = genChatId('p' + userId);
+  // V15.6：私聊连续被触发过密 → 短暂静默，别一直发
+  if (frenzyGuard('p' + userId)) { logDrop('私聊' + maskId(userId), '频率静默', 'burst'); return; }
   await processReply(ev, {
     sessionId: 'private_' + userId,
     text, imgSegs: privImgs, grpName: '',
@@ -5943,6 +7012,18 @@ const server = http.createServer((req, res) => {
     const pathname = urlObj.pathname;
     const range = urlObj.searchParams.get('range') || 'today';
 
+    // —— 1.4.9 多模态管理 API（仅 127.0.0.1 回环；服务器已绑定回环）——
+    if (pathname.startsWith('/api/multimodal/')) {
+      if (multimodalApi) {
+        multimodalApi.handleGet(pathname, urlObj.searchParams)
+          .then((r) => sendJson(r.status, r.json))
+          .catch((e) => sendJson(500, { ok: false, error: String(e && e.message || e).slice(0, 160) }));
+      } else {
+        sendJson(503, { ok: false, error: 'multimodal-not-ready' });
+      }
+      return;
+    }
+
     if (pathname === '/api/usage') {
       // 权限：若启用事件鉴权（http.requireEventAuth），/api/usage 同样要求 Bearer 校验（fail-closed）；
       // 默认关闭，依赖 127.0.0.1 回环信任边界，旧客户端不受影响。绝不暴露日志文件为下载接口。
@@ -5983,6 +7064,13 @@ const server = http.createServer((req, res) => {
   if (req.method !== 'POST') {
     log('[HTTP] 拒绝非 POST 方法 ' + req.method + ' ' + String(req.url || '').slice(0, 80));
     return sendJson(405, { status: 'method-not-allowed' });
+  }
+
+  // —— 1.4.9 多模态管理 API（仅回环；服务器已绑定 127.0.0.1，作为本地控制面，不要求事件 Bearer）——
+  {
+    let _pn = '';
+    try { _pn = new URL(req.url, 'http://localhost').pathname; } catch (e) {}
+    if (_pn.startsWith('/api/multimodal/')) return handleMultimodalPost(req, res, _pn);
   }
 
   // —— 来源鉴权：开启 requireEventAuth 时强制 Bearer 校验（fail-closed）——
@@ -6184,6 +7272,118 @@ if (CFG.stats.enable) { const t = setInterval(saveStats, 60000); if (t.unref) t.
 // V15.3：定期清理戳一戳的内存计数（限频用），避免长时间运行无限增长。
 // 只清理过期计数，不影响任何用户数据（这些计数本来就不落盘）。
 { const t = setInterval(() => { try { pokeSocial.sweep(); } catch (e) {} }, 10 * 60 * 1000); if (t.unref) t.unref(); }
+
+// ================= 1.4.9 多模态理解（本地优先）=================
+function sendJsonResp(res, code, obj) {
+  try { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); } catch (e) {}
+}
+
+// 多模态管理 API 的 POST 处理（独立读取 body，避免消耗事件入口的流）
+function handleMultimodalPost(req, res, pathname) {
+  let body = '';
+  let tooLarge = false;
+  const LIMIT = 2 * 1024 * 1024;
+  req.on('data', (c) => {
+    if (tooLarge) return;
+    body += c;
+    if (body.length > LIMIT) { tooLarge = true; body = ''; try { req.destroy(); } catch (e) {} }
+  });
+  req.on('end', () => {
+    if (tooLarge) return sendJsonResp(res, 413, { ok: false, error: 'payload-too-large' });
+    let json = {};
+    try { json = body ? JSON.parse(body) : {}; } catch (e) { return sendJsonResp(res, 400, { ok: false, error: 'invalid-json' }); }
+    if (!multimodalApi) return sendJsonResp(res, 503, { ok: false, error: 'multimodal-not-ready' });
+    multimodalApi.handlePost(pathname, json)
+      .then((r) => sendJsonResp(res, r.status, r.json))
+      .catch((e) => sendJsonResp(res, 500, { ok: false, error: String(e && e.message || e).slice(0, 160) }));
+  });
+}
+
+// 视频理解结果回送至原聊天（群/私聊）
+function safeSendVideoResult(p, text) {
+  if (!p) return;
+  const isGroup = !!p.groupId;
+  const userId = p.userId;
+  if (!userId && !isGroup) return;
+  const evLike = { message_type: isGroup ? 'group' : 'private', group_id: p.groupId, user_id: userId, message_id: (p.messageId != null ? p.messageId : null) };
+  try { sendSimpleReply(evLike, isGroup, userId, text); } catch (e) { log('[多模态] 发送回复失败: ' + (e && e.message || e)); }
+}
+
+function formatVideoResultForChat(r) {
+  if (!r || !r.ok) return '视频理解暂不可用：' + ((r && (r.note || r.reason)) || '未知原因');
+  let out = '【视频理解】';
+  if (r.summary) out += '\n摘要：' + r.summary;
+  if (r.transcript) out += '\n语音：' + r.transcript.slice(0, 500);
+  out += '\n（共 ' + (r.frameCount || 0) + ' 帧分析，时长 ' + (r.duration != null ? Math.round(r.duration) + 's' : '?') + '，模式=' + (r.mode || 'local') + '）';
+  return out.slice(0, 1800);
+}
+
+// 收到真实视频段时异步触发理解（不阻塞主回复）
+async function triggerVideoUnderstanding(ev, videoSegs) {
+  if (!mediaSvc) return;
+  if (CFG.multimodal && CFG.multimodal.enabled === false) return;
+  const seg = videoSegs[0];
+  const isGroup = ev.message_type === 'group';
+  const userId = ev.user_id;
+  const groupId = ev.group_id;
+  try { sendSimpleReply(ev, isGroup, userId, '收到视频，正在用本地算力理解中（如未配置本地模型将如实告知）…'); } catch (e) {}
+  await mediaSvc.handleIncomingVideo(seg, {
+    ev,
+    chatId: isGroup ? 'group:' + groupId : 'private:' + userId,
+    groupId, userId,
+    sendReply: () => {},
+  });
+}
+
+// 启动阶段初始化（失败不影响其它功能）
+(function initMultimodal() {
+  try {
+    mediaResourceMgr = createLocalAIResourceManager({});
+    mediaTaskMgr = new TaskManager({
+      storeFile: path.join(__dirname, 'workspace', '_media_tasks.json'),
+      executor: (step, task, tctx) => mediaSvc.executeVideoStep(step, task, tctx),
+      // 终态时一次性回送结果（成功/失败都如实告知；避免每次重试都发消息）
+      onEvent: (ev, task) => {
+        if ((ev === 'completed' || ev === 'failed') && task && task.mediaResult) {
+          try { safeSendVideoResult(task.payload, formatVideoResultForChat(task.mediaResult)); } catch (e) {}
+        }
+      },
+      config: { maxConcurrent: 1, taskTimeoutMs: 5 * 60 * 1000, maxTasks: 200 },
+    });
+    mediaTaskMgr.init();
+    mediaSvc = createMediaUnderstanding({
+      napcatCall,
+      getCFG: () => CFG,
+      callAPI,
+      log,
+      resourceManager: mediaResourceMgr,
+      taskManager: mediaTaskMgr,
+    });
+    function applyMultimodalConfig(partial) {
+      try {
+        CFG.multimodal = deepMergeMultimodal(CFG.multimodal || {}, partial || {});
+        if (mediaResourceMgr && CFG.multimodal.limits) {
+          mediaResourceMgr.setConfig({ vramBudgetMB: CFG.multimodal.limits.vramBudgetMB, maxConcurrent: CFG.multimodal.limits.maxConcurrent });
+        }
+        return true;
+      } catch (e) { log('[多模态] 配置热更新失败: ' + (e && e.message || e)); return false; }
+    }
+    function deepMergeMultimodal(base, over) {
+      const out = JSON.parse(JSON.stringify(base || {}));
+      for (const k of Object.keys(over || {})) {
+        const ov = over[k];
+        if (ov && typeof ov === 'object' && !Array.isArray(ov) && out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
+          out[k] = deepMergeMultimodal(out[k], ov);
+        } else if (ov !== undefined) out[k] = ov;
+      }
+      return out;
+    }
+    multimodalApi = createMultimodalApi({ mediaSvc, resourceManager: mediaResourceMgr, taskManager: mediaTaskMgr, getCFG: () => CFG, applyConfig: applyMultimodalConfig, log });
+    log('[多模态] 服务已初始化（本地优先；能力自检见 GET /api/multimodal/capabilities）');
+  } catch (e) {
+    log('[多模态] 初始化失败，已跳过（不影响其他功能）: ' + (e && e.message || e));
+  }
+})();
 
 server.listen(LISTEN_PORT, '127.0.0.1', () => {
   log('='.repeat(46));
