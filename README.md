@@ -107,6 +107,11 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 > 桌面控制中心的「一键配置」会自动拉取**源码归档**（按 tag 固定版本，可复现）：
 > `https://github.com/gugubirdwdnmd/feiyu-ai-bridge/archive/refs/tags/bot-runtime-v1.4.9.zip`
 > 归档只含机器人运行时，**不含** `feiyu-desktop/`（桌面端已迁至独立仓库），也不含任何密钥或本地配置。
+>
+> ⚠️ 归档必须**包含完整的 `memory/` 源码模块**（`group_log` / `memory_store` / `daily_summary` / `group_profile`）：
+> `ai_bridge.js` 直接 `require` 这四个模块，早先的 `bot-runtime-v1.4.7` 快照漏掉了整个 `memory/` 目录，
+> 导致一键配置下载后机器人**启动即报** `Cannot find module './memory/group_log'`。
+> `bot-runtime-v1.4.9` 快照已修复并实测（下载 → 解压 → 加载 → Agent 与多模态服务均正常初始化）。
 
 > 注：exe 只含 AI 桥本身。QQ 协议端（NapCat 框架）、本地表情包 `stickers/`、视频元数据能力（依赖 NapCat 自带 ffmpeg addon）不在 exe 内，完整玩法请用方式二源码运行，或把这些目录一并放到 exe 同目录。
 
