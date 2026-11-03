@@ -87,7 +87,11 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 
 ### 方式一：exe 直接运行（推荐，无需装 Node）
 
-到 [Releases](../../releases) 下载 `qq-ai-bot.exe`，把 `ai_config.json`、`secrets.json` 放到 exe 同目录，双击运行即可（AI 桥监听 3001 端口，等 NapCat 把消息推进来）。
+到 [Releases](https://github.com/gugubirdwdnmd/feiyu-ai-bridge/releases/tag/bot-runtime-v1.4.9) 下载 `qq-ai-bot-1.4.9.exe`，把 `ai_config.json`、`secrets.json` 放到 exe 同目录，双击运行即可（AI 桥监听 3001 端口，等 NapCat 把消息推进来）。
+
+> 桌面控制中心的「一键配置」会自动拉取**源码归档**（按 tag 固定版本，可复现）：
+> `https://github.com/gugubirdwdnmd/feiyu-ai-bridge/archive/refs/tags/bot-runtime-v1.4.9.zip`
+> 归档只含机器人运行时，**不含** `feiyu-desktop/`（桌面端已迁至独立仓库），也不含任何密钥或本地配置。
 
 > 注：exe 只含 AI 桥本身。QQ 协议端（NapCat 框架）、本地表情包 `stickers/`、视频元数据能力（依赖 NapCat 自带 ffmpeg addon）不在 exe 内，完整玩法请用方式二源码运行，或把这些目录一并放到 exe 同目录。
 
