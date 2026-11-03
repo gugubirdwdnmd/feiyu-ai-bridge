@@ -1,0 +1,119 @@
+{
+  "unet": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "z_image_turbo-Q5_K_M.gguf"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoaderGGUF",
+    "inputs": {
+      "clip_name": "Qwen3-4B-Q5_K_M.gguf",
+      "type": "lumina2"
+    }
+  },
+  "sampling": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 3,
+      "model": ["unet", 0]
+    }
+  },
+  "src1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qq_src1.png"
+    }
+  },
+  "src2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qq_src2.png"
+    }
+  },
+  "scale1": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["src1", 0],
+      "upscale_method": "lanczos",
+      "width": 1024,
+      "height": 1024,
+      "crop": "center"
+    }
+  },
+  "scale2": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["src2", 0],
+      "upscale_method": "lanczos",
+      "width": 1024,
+      "height": 1024,
+      "crop": "center"
+    }
+  },
+  "blend": {
+    "class_type": "ImageBlend",
+    "inputs": {
+      "image1": ["scale1", 0],
+      "image2": ["scale2", 0],
+      "blend_factor": 0.5,
+      "blend_mode": "normal"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "encode": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["blend", 0],
+      "vae": ["vae", 0]
+    }
+  },
+  "pos": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "融合两人特征，写实摄影，高清，自然光线，细节丰富",
+      "clip": ["clip", 0]
+    }
+  },
+  "neg": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["clip", 0]
+    }
+  },
+  "sampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 654321,
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 0.6,
+      "model": ["sampling", 0],
+      "positive": ["pos", 0],
+      "negative": ["neg", 0],
+      "latent_image": ["encode", 0]
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["sampler", 0],
+      "vae": ["vae", 0]
+    }
+  },
+  "save": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "qq_fusion",
+      "images": ["decode", 0]
+    }
+  }
+}

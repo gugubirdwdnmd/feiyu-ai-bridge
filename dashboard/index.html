@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DeepSeek 用量看板</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --card2: #222631; --line: #2c3040;
+    --txt: #e6e8ee; --sub: #9aa3b2; --accent: #4f8cff; --green: #3ecf8e;
+    --amber: #f5b54a; --red: #ff6b6b; --purple: #b07cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 18px 60px; }
+  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 700; }
+  h1 small { color: var(--sub); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  .ranges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .ranges button {
+    background: var(--card); color: var(--sub); border: 1px solid var(--line);
+    padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: 13px; transition: .15s;
+  }
+  .ranges button:hover { color: var(--txt); border-color: var(--accent); }
+  .ranges button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card .k { color: var(--sub); font-size: 12px; margin-bottom: 6px; }
+  .card .v { font-size: 22px; font-weight: 700; }
+  .card .v small { font-size: 12px; color: var(--sub); font-weight: 400; }
+  .section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 18px; }
+  .section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .section h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--sub); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: var(--card2); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+  .pill.judge { color: var(--purple); border-color: var(--purple); }
+  .pill.answer { color: var(--green); border-color: var(--green); }
+  .pill.tool { color: var(--amber); border-color: var(--amber); }
+  .pill.chatrecord { color: var(--accent); border-color: var(--accent); }
+  .bar { height: 8px; border-radius: 4px; background: var(--card2); overflow: hidden; margin-top: 4px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .muted { color: var(--sub); }
+  .err { color: var(--red); }
+  .scroll { max-height: 420px; overflow: auto; }
+  a { color: var(--accent); }
+  .hint { color: var(--sub); font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>DeepSeek 用量看板 <small id="subtitle">Token Economy</small></h1>
+    <div class="ranges" id="ranges">
+      <button data-r="today" class="active">今日</button>
+      <button data-r="yesterday">昨日</button>
+      <button data-r="7d">近7天</button>
+      <button data-r="month">本月</button>
+      <button data-r="all">全部</button>
+    </div>
+  </header>
+
+  <div class="grid" id="cards"></div>
+
+  <div class="section">
+    <h2><span class="dot"></span>模型分账</h2>
+    <div class="scroll">
+      <table id="modelTable">
+        <thead><tr><th>模型</th><th class="num">调用次数</th><th class="num">Token</th><th style="width:160px">占比</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="dot" style="background:var(--green)"></span>最近的聊天（一条用户消息 = 一次聚合）</h2>
+    <div class="scroll">
+      <table id="chatTable">
+        <thead><tr><th>时间</th><th>类型</th><th>预览</th><th class="num">Judge</th><th class="num">Answer</th><th class="num">Tool</th><th class="num">合计 Token</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="dot" style="background:var(--accent)"></span>聊天记录分析（Chat Record Analysis）</h2>
+    <div class="scroll">
+      <table id="crTable">
+        <thead><tr><th>时间</th><th>ChatRecordID</th><th>范围</th><th>问题</th><th>模型</th><th class="num">消息</th><th class="num">图</th><th class="num">视频</th><th class="num">发送图</th><th class="num">耗时ms</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="hint" id="crHint"></div>
+  </div>
+
+  <div class="section">
+    <h2><span class="dot" style="background:var(--amber)"></span>最近的 API 请求（明细）</h2>
+    <div class="scroll">
+      <table id="reqTable">
+        <thead><tr><th>时间</th><th>类型</th><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">缓存命中</th><th class="num">缓存未中</th><th class="num">合计</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="hint" id="footer"></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => (n == null ? 0 : n).toLocaleString('zh-CN');
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const shortTime = (iso) => iso ? iso.replace('T', ' ').slice(5, 16) : '-';
+
+let currentRange = 'today';
+
+async function load() {
+  try {
+    const r = await fetch('/api/usage?range=' + currentRange);
+    const d = await r.json();
+    if (d.error) { $('#footer').innerHTML = '<span class="err">读取失败：' + esc(d.error) + '</span>'; return; }
+    render(d);
+  } catch (e) {
+    $('#footer').innerHTML = '<span class="err">无法连接后台 API（/api/usage）。确认桥接进程在跑且本页由 http://127.0.0.1:3001 打开。</span>';
+  }
+}
+
+function render(d) {
+  const saved = d.cacheHitTokens || 0;
+  const cards = [
+    { k: '总 Token', v: fmt(d.totalTokens) },
+    { k: 'API 请求', v: fmt(d.requests), s: '平均 ' + fmt(d.avg) + '/次' },
+    { k: '输入 / 输出', v: fmt(d.promptTokens) + ' / ' + fmt(d.completionTokens) },
+    { k: '推理 Token', v: fmt(d.reasoningTokens) },
+    { k: '缓存命中率', v: d.cacheRate + '%', s: '命中 ' + fmt(saved) },
+    { k: '避免的调用', v: fmt(d.modelCallsAvoided), s: 'L0拦截 ' + fmt(d.l0Blocked) },
+    { k: 'Judge / Answer / Tool', v: fmt(d.judgeRequests) + ' / ' + fmt(d.answerRequests) + ' / ' + fmt(d.toolExecutions) },
+    { k: '聊天记录分析', v: fmt(d.chatRecordAnalyses), s: fmt(d.chatRecordMessages) + ' 消息 / ' + fmt(d.chatRecordImages) + ' 图 / ' + fmt(d.chatRecordVideos) + ' 视频' },
+  ];
+  $('#cards').innerHTML = cards.map(c =>
+    `<div class="card"><div class="k">${esc(c.k)}</div><div class="v">${c.v}${c.s ? ' <small>' + esc(c.s) + '</small>' : ''}</div></div>`
+  ).join('');
+
+  // 模型分账
+  const models = Object.entries(d.modelUsage || {}).sort((a, b) => b[1].tokens - a[1].tokens);
+  const maxTok = models.length ? models[0][1].tokens : 1;
+  $('#modelTable tbody').innerHTML = models.length ? models.map(([m, u]) => `
+    <tr><td>${esc(m)}</td><td class="num">${fmt(u.calls)}</td><td class="num">${fmt(u.tokens)}</td>
+    <td><div class="bar"><i style="width:${maxTok ? Math.round(u.tokens / maxTok * 100) : 0}%"></i></div></td></tr>
+  `).join('') : `<tr><td colspan="4" class="muted">该范围内暂无数据</td></tr>`;
+
+  // 聊天聚合
+  const chats = d.recentChats || [];
+  $('#chatTable tbody').innerHTML = chats.length ? chats.map(c => `
+    <tr>
+      <td>${shortTime(c.time)}</td>
+      <td class="muted">${esc(c.type)}<br><span class="muted">${esc(c.scope || '')}</span></td>
+      <td>${esc(c.preview)}</td>
+      <td class="num">${fmt(c.judge.c)}<br><span class="muted">${fmt(c.judge.t)}</span></td>
+      <td class="num">${fmt(c.answer.c)}<br><span class="muted">${fmt(c.answer.t)}</span></td>
+      <td class="num">${fmt(c.tool.c)}<br><span class="muted">${fmt(c.tool.t)}</span></td>
+      <td class="num"><b>${fmt(c.total)}</b></td>
+    </tr>
+  `).join('') : `<tr><td colspan="7" class="muted">该范围内暂无聊天数据</td></tr>`;
+
+  // 请求明细
+  const reqs = d.recentRequests || [];
+  $('#reqTable tbody').innerHTML = reqs.length ? reqs.map(r => `
+    <tr>
+      <td>${shortTime(r.time)}</td>
+      <td><span class="pill ${esc(r.kind)}">${esc(r.kind)}</span></td>
+      <td class="muted">${esc(r.model)}</td>
+      <td class="num">${fmt(r.prompt_tokens)}</td>
+      <td class="num">${fmt(r.completion_tokens)}</td>
+      <td class="num">${fmt(r.reasoning_tokens)}</td>
+      <td class="num">${fmt(r.cache_hit_tokens)}</td>
+      <td class="num">${fmt(r.cache_miss_tokens)}</td>
+      <td class="num"><b>${fmt(r.total_tokens)}</b></td>
+    </tr>
+  `).join('') : `<tr><td colspan="9" class="muted">该范围内暂无请求</td></tr>`;
+
+  // 聊天记录分析明细
+  const crs = d.chatRecords || [];
+  $('#crTable tbody').innerHTML = crs.length ? crs.map(r => `
+    <tr>
+      <td>${shortTime(r.time)}</td>
+      <td class="muted">${esc(r.chatRecordId)}</td>
+      <td class="muted">${esc(r.scope || '')}</td>
+      <td>${esc(r.question || '')}</td>
+      <td class="muted">${esc(r.model || '')}</td>
+      <td class="num">${fmt(r.message_count)}</td>
+      <td class="num">${fmt(r.image_count)}</td>
+      <td class="num">${fmt(r.video_count)}</td>
+      <td class="num">${fmt(r.images_sent)}</td>
+      <td class="num">${fmt(r.processing_time_ms)}</td>
+    </tr>
+  `).join('') : `<tr><td colspan="10" class="muted">该范围内暂无聊天记录分析</td></tr>`;
+  const crt = d.chatRecordTotals || {};
+  $('#crHint').innerHTML = `聊天记录分析：累计 ${fmt(d.chatRecordAnalyses)} 次，API 调用 ${fmt(d.chatRecordRequests)} 次，Token ${fmt(d.chatRecordTokens)}（明细仅含 chatRecordId/计数，不含聊天内容）`;
+
+  $('#footer').innerHTML = `范围=${esc(d.range)} | 覆盖文件=${d.files} 个 | 数据文件：memory/usage/*.jsonl（不含聊天内容、不含 API Key）`;
+  const rangeLabel = { today:'今日', yesterday:'昨日', '7d':'近7天', month:'本月', all:'全部' }[currentRange];
+  $('#subtitle').textContent = 'Token Economy · ' + rangeLabel;
+}
+
+document.querySelectorAll('#ranges button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#ranges button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    currentRange = b.dataset.r;
+    load();
+  });
+});
+
+load();
+setInterval(load, 15000); // 每 15 秒自动刷新
+</script>
+</body>
+</html>
