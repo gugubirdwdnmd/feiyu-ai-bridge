@@ -1,7 +1,7 @@
-# 肥鱼 AI 桥接层（feiyu-ai-bridge）
+# 玄枢 XUANSHU AI 桥接层（feiyu-ai-bridge）
 
-一个**零第三方依赖**的 QQ 群聊 / 私聊 AI 自动回复**桥接层**，可打包为**单文件 exe**；
-附带**桌面控制中心**（Electron），用于可视化配置、统计真实用量与费用。
+玄枢 XUANSHU 的**运行时内核**：一个**零第三方依赖**的 QQ 群聊 / 私聊 AI 自动回复**桥接层**，可打包为**单文件 exe**；
+配套的**桌面控制中心**（玄枢 XUANSHU Desktop，Electron）已迁至独立仓库，用于可视化配置、统计真实用量与费用。
 
 消息经由 [NapCat](https://github.com/NapNeko/NapCatQQ)（OneBot11）推送到本桥接层，桥接层决定"要不要回、用什么模型、带多少上下文、调不调工具"，再调用大模型生成回复，最后通过 NapCat 发回 QQ。
 
@@ -62,13 +62,15 @@ QQ 客户端（NapCat 注入，3000 端口，OneBot11 HTTP）
 
 ---
 
-## 桌面控制中心（feiyu-desktop）
+## 桌面控制中心（玄枢 XUANSHU Desktop）
 
 图形化管理端（Electron）：多 Provider 配置、真实用量统计、费用估算、人格模板库、
-**技能扩展**、**ComfyUI 生图自动下载**，并提供 Windows x64 安装包。
+**技能扩展**、**ComfyUI 生图自动下载**、**多模态理解**（视频/图片/OCR/ASR），并提供 Windows x64 安装包。
 
-- 完整使用说明（含技能与 ComfyUI 接入步骤）：[`feiyu-desktop/docs/USER_GUIDE.md`](feiyu-desktop/docs/USER_GUIDE.md)
-- 安装包下载：[Releases](https://github.com/gugubirdwdnmd/feiyu-ai-bridge/releases)
+> 桌面端已迁至**独立仓库**，不再随本仓库分发（本仓库的运行时归档里也不含 `feiyu-desktop/`）。
+> 桌面端的一键配置按 tag 固定版本自动拉取本仓库的运行时归档：
+> `https://github.com/gugubirdwdnmd/feiyu-ai-bridge/archive/refs/tags/bot-runtime-v1.4.9.zip`
+> 桌面端自身的 exe **不发布到本仓库**，只在本地分发。
 
 ---
 

@@ -382,7 +382,7 @@
     "defaultUseAI": true,
     "timeoutMs": 15000
   },
-  "_feiyuV15": "肥鱼 V15 行动型助手（任务/浏览器/通知/TTS/QQ空间）。以下均为【顶层键】（不是嵌套 'feiyu' 段），默认全关、真实能力默认关闭、mock 仅占位。详见 feiyu/V15_GUIDE.md。",
+  "_feiyuV15": "玄枢 XUANSHU V15 行动型助手（任务/浏览器/通知/TTS/QQ空间）。以下均为【顶层键】（不是嵌套 'feiyu' 段），默认全关、真实能力默认关闭、mock 仅占位。详见 feiyu/V15_GUIDE.md。",
   "taskManager": {
     "enabled": false,
     "maxConcurrent": 3,

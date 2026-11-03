@@ -7241,7 +7241,7 @@ try {
       generateImageTool(String((ctx && ctx.sessionId) || ''), { prompt, source }, ctx || {}),
     sendSticker: (keyword, ctx) =>
       sendStickerTo(String((ctx && ctx.sessionId) || ''), keyword, ctx || {}),
-    // 肥鱼升级：注入配置与对外发送能力（新功能默认全关，仅按配置启用）
+    // 玄枢 V15 升级：注入配置与对外发送能力（新功能默认全关，仅按配置启用）
     config: CFG,
     adminList: (CFG.admin && CFG.admin.qq) || [],
     sendToMaster: async (text, opts) => {
@@ -7264,7 +7264,7 @@ try { fs.mkdirSync(STICKER_DIR, { recursive: true }); } catch (e) {}
 try { fs.mkdirSync(WORKSPACE_DIR, { recursive: true }); } catch (e) {}
 // 统计定期落盘（防进程被杀丢数据），并把内存态缓存的配置写出来便于排查
 if (CFG.stats.enable) { const t = setInterval(saveStats, 60000); if (t.unref) t.unref(); }
-// 主动聊天：每分钟检查一次计划，到点向群发开场白；同时驱动肥鱼任务调度与通知冲刷
+// 主动聊天：每分钟检查一次计划，到点向群发开场白；同时驱动玄枢任务调度与通知冲刷
 { const t = setInterval(async () => {
     try { runProactiveOnce(); } catch (e) {}
     try { const f = require('./tools/feiyu').getFeiyu(); if (f) await f.tick(); } catch (e) {}

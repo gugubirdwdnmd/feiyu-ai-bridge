@@ -1,5 +1,5 @@
 'use strict';
-// ================= 肥鱼升级：新增工具注册（阶段 B/C/D/E/F 接入） =================
+// ================= 玄枢 V15 升级：新增工具注册（阶段 B/C/D/E/F 接入） =================
 // 统一通过现有 tool_router 注册；每个工具默认按配置门控、仅管理员可调用。
 // 高危动作（建任务/浏览器/发布/语音）一律 adminOnly，普通群成员或网页输入无法越权。
 
@@ -20,7 +20,7 @@ function register(deps) {
   const config = deps.config || {};
   const adminList = (config.admin && config.admin.qq) || deps.adminList || [];
   if (!config.feiyu && !config.taskManager && !config.browser && !config.notifier && !config.tts && !config.qzone) {
-    // 没有任何肥鱼配置段：仍允许通过 deps 注入的 config 初始化（默认全关），但不注册任何工具
+    // 没有任何玄枢配置段：仍允许通过 deps 注入的 config 初始化（默认全关），但不注册任何工具
   }
   initFeiyu(config, deps);
   const F = getFeiyu();

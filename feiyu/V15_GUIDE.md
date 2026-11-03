@@ -1,4 +1,4 @@
-# 肥鱼 V15：行动型 AI 助手 — 配置 / 运行 / 回滚 / 安全边界
+# 玄枢 XUANSHU V15：行动型 AI 助手 — 配置 / 运行 / 回滚 / 安全边界
 
 > 适用版本：提交 `6bb6ffc` 起的 V15 修复（本目录 `feiyu/*`、`tools/feiyu.js`；经 `e2be70d`、`e40bd12` 等修正）。本次追加：通知目标模块内强制白名单、通知重试确定性测试、浏览器请求级 SSRF 拦截逻辑（真实浏览路径为 UNVERIFIED）。
 > 设计原则：**默认全关、fail-closed、不联网、不连真实 QQ、不调付费 API、不破坏记忆格式与普通聊天。**
@@ -74,7 +74,7 @@
 ## 2. 启动与每分钟心跳
 
 - 普通聊天/记忆/生图/戳一戳等原有功能**完全不受影响**（V15 模块独立、默认关闭）。
-- 肥鱼模块由 `tools/feiyu.js` 在工具注册时 `initFeiyu()` 装配；任务调度与通知冲刷需由宿主每分钟调用一次心跳：
+- 玄枢模块由 `tools/feiyu.js` 在工具注册时 `initFeiyu()` 装配；任务调度与通知冲刷需由宿主每分钟调用一次心跳：
   ```js
   const feiyu = require('./feiyu').getFeiyu();
   setInterval(() => feiyu && feiyu.tick(), 60 * 1000); // tick() 内部：taskManager.tick() + notifier.flush()
@@ -89,7 +89,7 @@
 
 1. **配置回滚（最快、零代码）**：把 `ai_config.json` 里的 `taskManager/browser/notifier/tts/qzone` 五个顶层键删掉或设 `"enabled": false`，重启服务即恢复为纯聊天模式（原有记忆/聊天配置不动）。
 2. **文件回滚**：本次修改前已对每个文件做 SHA-256 备份，见 `D:\NapCat\backups\feiyu_v15_fixes_*/SHA256.txt`。逐文件用备份覆盖即可，或 `git` 在镜像仓库 `D:\NapCat_publish` 回退到 `6bb6ffc`。
-3. **全局禁用肥鱼工具**：在 `tools/feiyu.js` 的 `register()` 中不调用 `initFeiyu()` 即可（不影响其它工具）。
+3. **全局禁用玄枢工具**：在 `tools/feiyu.js` 的 `register()` 中不调用 `initFeiyu()` 即可（不影响其它工具）。
 
 ---
 
@@ -113,7 +113,7 @@
 离线、不联网、不连真实 QQ、不调付费 API。临时数据落在系统临时目录并在退出时清理。
 
 ```bash
-# 单跑肥鱼套件
+# 单跑玄枢套件
 node tests/feiyu_upgrade.test.js
 
 # 本地离线总入口（仅含 D:\NapCat 本地存在的离线用例）
