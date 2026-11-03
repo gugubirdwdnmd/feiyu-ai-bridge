@@ -12,7 +12,7 @@
     "test": "node tests/run-all.js",
     "test:napcat": "node tests/agent_c_napcat_env.test.js",
     "test:net": "node tests/s3_net.test.js",
-    "check": "node --check ai_bridge.js && node --check url_safety.js && node --check safe_http.js && node --check share_card.js",
+    "check": "node build/check-syntax.js",
     "build:exe": "node build/build-exe.js"
   },
   "license": "MIT",

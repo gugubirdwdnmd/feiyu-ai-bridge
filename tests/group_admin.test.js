@@ -33,12 +33,12 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
   {
     const g = ga({ callOneBot: mockCallOneBot('ok-group'), isAdmin: adminYes });
     eq(g.isEnabled(), false, 'isEnabled 默认 false');
-    const r1 = await g.queryGroupProfile(10000, 1430831772);
+    const r1 = await g.queryGroupProfile(10000, 100000001);
     eq(r1.ok, false, '未启用时 groupProfile.ok=false');
     ok(r1.reason === 'disabled', 'reason=disabled');
-    const r2 = await g.queryMember(10000, 999, 1430831772);
+    const r2 = await g.queryMember(10000, 999, 100000001);
     eq(r2.ok, false, '未启用时 member.ok=false');
-    const r3 = await g.queryBotAdminStatus(10000, 1430831772, 1430831772);
+    const r3 = await g.queryBotAdminStatus(10000, 100000001, 100000001);
     eq(r3.ok, false, '未启用时 botAdmin.ok=false');
   }
 
@@ -52,7 +52,7 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
     ok(r1.rejected === true && r1.reason === 'forbidden', 'rejected+forbidden');
     const r2 = await g2.queryMember(10000, 999, 999999);
     eq(r2.ok, false, '越权 member.ok=false');
-    const r3 = await g2.queryBotAdminStatus(10000, 1430831772, 999999);
+    const r3 = await g2.queryBotAdminStatus(10000, 100000001, 999999);
     eq(r3.ok, false, '越权 botAdmin.ok=false');
   }
 
@@ -62,11 +62,11 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
     const spy = async (a, p) => { calls.n++; return mockCallOneBot('ok-group')(a, p); };
     const g = ga({ callOneBot: spy, isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
     for (const bad of [0, -1, 'abc', 1e20, null, undefined, '']) {
-      const r = await g.queryGroupProfile(bad, 1430831772);
+      const r = await g.queryGroupProfile(bad, 100000001);
       eq(r.ok, false, 'bad group_id=' + JSON.stringify(bad) + ' 拒绝');
       ok(r.reason === 'bad-group', 'bad-group reason');
     }
-    const r2 = await g.queryMember(10000, 'notqq', 1430831772);
+    const r2 = await g.queryMember(10000, 'notqq', 100000001);
     eq(r2.ok, false, 'invalid target 拒绝');
     ok(r2.reason === 'bad-user', 'bad-user reason');
     eq(calls.n, 0, '无效参数时未发起任何接口调用');
@@ -75,16 +75,16 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
   group('T4 接口失败（failed 状态）：不当作成功');
   {
     const g = ga({ callOneBot: mockCallOneBot('failed'), isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
-    const r1 = await g.queryGroupProfile(10000, 1430831772);
+    const r1 = await g.queryGroupProfile(10000, 100000001);
     eq(r1.ok, false, 'failed 状态 groupProfile.ok=false');
-    const r2 = await g.queryBotAdminStatus(10000, 1430831772, 1430831772);
+    const r2 = await g.queryBotAdminStatus(10000, 100000001, 100000001);
     eq(r2.ok, false, 'failed 状态 botAdmin.ok=false');
   }
 
   group('T5 接口异常（transport error）：被捕获为失败，不当作成功');
   {
     const g = ga({ callOneBot: mockCallOneBot('transport'), isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
-    const r1 = await g.queryGroupProfile(10000, 1430831772);
+    const r1 = await g.queryGroupProfile(10000, 100000001);
     eq(r1.ok, false, 'transport groupProfile.ok=false');
     ok(r1.reason === 'api-error' || r1.reason === 'api-exception', 'transport 归类为接口失败');
   }
@@ -92,13 +92,13 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
   group('T6 机器人不是管理员：正确返回 is_group_admin=false（非报错、非误判）');
   {
     const g = ga({ callOneBot: mockCallOneBot('ok-member'), isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
-    const r = await g.queryBotAdminStatus(10000, 1430831772, 1430831772);
+    const r = await g.queryBotAdminStatus(10000, 100000001, 100000001);
     eq(r.ok, true, '查询成功');
     eq(r.role, 'admin', 'role=admin');
     eq(r.is_group_admin, true, 'admin 视为群管');
-    const mockMember = async () => ({ status: 'ok', retcode: 0, data: { user_id: 1430831772, role: 'member', nickname: 'bot' } });
+    const mockMember = async () => ({ status: 'ok', retcode: 0, data: { user_id: 100000001, role: 'member', nickname: 'bot' } });
     const g2 = ga({ callOneBot: mockMember, isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
-    const r2 = await g2.queryBotAdminStatus(10000, 1430831772, 1430831772);
+    const r2 = await g2.queryBotAdminStatus(10000, 100000001, 100000001);
     eq(r2.ok, true, '普通成员角色查询成功');
     eq(r2.is_group_admin, false, 'member 的 is_group_admin=false');
   }
@@ -106,7 +106,7 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
   group('T7 成功路径 + 脱敏：仅返回白名单字段，无 secret/无关字段');
   {
     const g = ga({ callOneBot: mockCallOneBot('ok-group'), isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
-    const r = await g.queryGroupProfile(10000, 1430831772);
+    const r = await g.queryGroupProfile(10000, 100000001);
     eq(r.ok, true, 'groupProfile.ok=true');
     eq(r.group_name, '测试群', '返回群名');
     eq(r.member_count, 50, '返回人数');
@@ -114,7 +114,7 @@ function enabled(getCFG) { return Object.assign({ isAdmin: adminYes }, getCFG ? 
     ok(!Array.isArray(r.member_list), '群资料不含成员名单');
 
     const g2 = ga({ callOneBot: mockCallOneBot('ok-member'), isAdmin: adminYes, getCFG: () => ({ groupAdmin: { enabled: true } }) });
-    const r2 = await g2.queryMember(10000, 999, 1430831772);
+    const r2 = await g2.queryMember(10000, 999, 100000001);
     eq(r2.ok, true, 'member.ok=true');
     eq(r2.member.user_id, 999, '返回被查询者自身 user_id');
     eq(r2.member.role, 'admin', '返回角色');

@@ -55,7 +55,7 @@ function ga(over) { return createGroupAdmin(Object.assign({ isAdmin: adminYes, g
   group('B 权限拒绝：isAdmin=false 时命令被拒（fail-closed）');
   {
     const g = ga({ callOneBot: mockCallOneBot('ok-group'), isAdmin: adminNo });
-    const ctx = { userId: 999999, selfId: 1430831772 };
+    const ctx = { userId: 999999, selfId: 100000001 };
     const r1 = await runGroupCommand(g, '/ai group status 10000', ctx);
     ok(/管理员/.test(r1), 'status拒绝含「管理员」: ' + r1.replace(/\n/g, ' '));
     const r2 = await runGroupCommand(g, '/ai group member 10000 999', ctx);
@@ -67,7 +67,7 @@ function ga(over) { return createGroupAdmin(Object.assign({ isAdmin: adminYes, g
   group('C 未启用：enabled=false 时命令被拒');
   {
     const g = ga({ callOneBot: mockCallOneBot('ok-group'), getCFG: () => ({ groupAdmin: { enabled: false } }) });
-    const ctx = { userId: 1430831772, selfId: 1430831772 };
+    const ctx = { userId: 100000001, selfId: 100000001 };
     const r = await runGroupCommand(g, '/ai group status 10000', ctx);
     ok(/未启用/.test(r), '未启用提示: ' + r.replace(/\n/g, ' '));
   }
@@ -75,10 +75,10 @@ function ga(over) { return createGroupAdmin(Object.assign({ isAdmin: adminYes, g
   group('D 接口失败 / 传输异常：不当作成功');
   {
     const g1 = ga({ callOneBot: mockCallOneBot('failed') });
-    const r1 = await runGroupCommand(g1, '/ai group status 10000', { userId: 1, selfId: 1430831772 });
+    const r1 = await runGroupCommand(g1, '/ai group status 10000', { userId: 1, selfId: 100000001 });
     ok(/失败/.test(r1) && !/测试群/.test(r1), 'failed→失败且不含有效数据: ' + r1.replace(/\n/g, ' '));
     const g2 = ga({ callOneBot: mockCallOneBot('transport') });
-    const r2 = await runGroupCommand(g2, '/ai group status 10000', { userId: 1, selfId: 1430831772 });
+    const r2 = await runGroupCommand(g2, '/ai group status 10000', { userId: 1, selfId: 100000001 });
     ok(/失败/.test(r2), 'transport→失败: ' + r2.replace(/\n/g, ' '));
   }
 
@@ -87,7 +87,7 @@ function ga(over) { return createGroupAdmin(Object.assign({ isAdmin: adminYes, g
     const calls = { n: 0 };
     const spy = async (a, p) => { calls.n++; return mockCallOneBot('ok-group')(a, p); };
     const g = ga({ callOneBot: spy });
-    const ctx = { userId: 1, selfId: 1430831772 };
+    const ctx = { userId: 1, selfId: 100000001 };
     const r1 = await runGroupCommand(g, '/ai group status', ctx);
     ok(/参数不足/.test(r1), '缺少群号→参数不足: ' + r1.replace(/\n/g, ' '));
     const r2 = await runGroupCommand(g, '/ai group foo 10000', ctx);
@@ -98,25 +98,25 @@ function ga(over) { return createGroupAdmin(Object.assign({ isAdmin: adminYes, g
   group('F 成功返回 + 脱敏：仅必要字段，无 secret/名单');
   {
     const g = ga({ callOneBot: mockCallOneBot('ok-group') });
-    const r1 = await runGroupCommand(g, '/ai group status 10000', { userId: 1, selfId: 1430831772 });
+    const r1 = await runGroupCommand(g, '/ai group status 10000', { userId: 1, selfId: 100000001 });
     ok(/测试群/.test(r1) && /人数=50\/200/.test(r1), 'status成功含群名/人数: ' + r1.replace(/\n/g, ' '));
     ok(!/secret_field/.test(r1), 'status结果不含 secret_field');
 
     const g2 = ga({ callOneBot: mockCallOneBot('ok-member') });
-    const r2 = await runGroupCommand(g2, '/ai group member 10000 999', { userId: 1, selfId: 1430831772 });
+    const r2 = await runGroupCommand(g2, '/ai group member 10000 999', { userId: 1, selfId: 100000001 });
     ok(/QQ=999/.test(r2) && /角色=admin/.test(r2), 'member成功含QQ/角色: ' + r2.replace(/\n/g, ' '));
     ok(/群号=10000/.test(r2) && !/群号=undefined/.test(r2), 'member群号正确非undefined: ' + r2.replace(/\n/g, ' '));
     ok(!/secret_field/.test(r2), 'member结果不含 secret_field');
     ok(!/\[\]/.test(r2) && !/Array/.test(r2), 'member返回单条而非名单');
 
     const g3 = ga({ callOneBot: mockCallOneBot('ok-member') });
-    const r3 = await runGroupCommand(g3, '/ai group me 10000', { userId: 1, selfId: 1430831772 });
+    const r3 = await runGroupCommand(g3, '/ai group me 10000', { userId: 1, selfId: 100000001 });
     ok(/是否该群管理员=是/.test(r3), 'me管理员身份=是: ' + r3.replace(/\n/g, ' '));
   }
 
   group('G 帮助信息包含三条只读子命令');
   {
-    const r = await runGroupCommand(ga({}), '/ai group help', { userId: 1, selfId: 1430831772 });
+    const r = await runGroupCommand(ga({}), '/ai group help', { userId: 1, selfId: 100000001 });
     ok(/status/.test(r) && /member/.test(r) && /me/.test(r), 'help含 status/member/me');
     ok(/未开放|写操作/.test(r), 'help声明写操作未开放');
   }

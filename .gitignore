@@ -88,8 +88,11 @@ desktop.ini
 node_modules/
 npm-debug.log*
 package-lock.json
-# 桌面端 lockfile 例外：Electron 版本必须锁定，否则 `npm ci` 无法复现打包结果
-!feiyu-desktop/package-lock.json
+
+# ---------- 11. 桌面端（玄枢 XUANSHU Desktop）已迁至独立仓库 ----------
+# 本仓库只保留桥接层运行时；桌面端代码/安装包不在此分发。
+# 磁盘上若仍留有旧副本，仅作本地参考，不纳入版本控制。
+feiyu-desktop/
 
 # ==========================================================
 #  推送前自检：
